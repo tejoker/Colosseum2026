@@ -1,6 +1,6 @@
-# SauronID
+# TrustAI
 
-SauronID is a privacy-first identity verification platform for login and onboarding flows. This repository is the **product codebase** (services, libraries, and UIs), not a throwaway demo: you deploy and operate it like any other backend stack—secrets via environment or a secret manager, TLS at the edge, and data stores chosen for your SLOs.
+TrustAI is a privacy-first identity verification platform for login and onboarding flows. This repository is the **product codebase** (services, libraries, and UIs), not a throwaway demo: you deploy and operate it like any other backend stack—secrets via environment or a secret manager, TLS at the edge, and data stores chosen for your SLOs.
 
 The project combines:
 - Privacy-preserving credentials and ZK proofs
@@ -51,6 +51,18 @@ For pre-Stripe hardening, `POST /agent/payment/authorize` also enforces:
 - intent `maxAmount` and `currency` bounds
 - optional `constraints.merchant_allowlist`
 - single-use A-JWT (`jti` replay blocked)
+
+## L402 / Lightning Mock Payments
+
+The backend includes a no-cost L402 flow for paid agent resources. It is mock-only by default: `SAURON_LIGHTNING_PROVIDER=mock` generates local invoices, macaroons, and preimages, then records settlement in SQLite. It does not broadcast Lightning payments or move real sats.
+
+Routes:
+
+- `POST /lightning/l402/challenge`: create an L402 invoice challenge from an existing agent payment authorization.
+- `POST /lightning/l402/settle`: settle the mock invoice with the returned dev preimage.
+- `GET /paid/agent-score/{agent_id}`: example paid resource unlocked by `Authorization: L402 macaroon="...", preimage="..."`.
+
+The L402 challenge currently requires the underlying payment authorization to use `currency: "SAT"`. This keeps the Lightning demo separate from Stripe test-mode flows and preserves the "no real money" invariant during local and CI testing.
 
 ## KYA policy matrix (configuration advice)
 

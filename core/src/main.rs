@@ -17,7 +17,7 @@ use sauron_core::{
         ServerState,
     },
 };
-use sauron_core::{identity::{Identity, UserData}, db, agent};
+use sauron_core::{identity::{Identity, UserData}, db, agent, lightning};
 use sauron_core::compliance;
 use sauron_core::compliance_screening;
 use sauron_core::issuer_runtime::IssuerVerifyError;
@@ -73,6 +73,9 @@ async fn main() {
         .route("/agent/payment/nonexistence/material",   post(payment_nonexistence_material))
         .route("/agent/payment/nonexistence/verify",     post(payment_nonexistence_verify))
         .route("/merchant/payment/consume",              post(merchant_payment_consume))
+        .route("/lightning/l402/challenge",              post(lightning::create_l402_challenge))
+        .route("/lightning/l402/settle",                 post(lightning::settle_l402_mock))
+        .route("/paid/agent-score/{agent_id}",           get(lightning::paid_agent_score))
         .route("/policy/authorize",                      post(policy_authorize))
         .route("/agent/list/{human_key_image}",          get(agent::list_agents))
         .route("/agent/{agent_id}",                      get(agent::get_agent).delete(agent::revoke_agent))
@@ -512,25 +515,27 @@ async fn handle_register(
             st.user_group.members.len(), st.merkle_ledger.len());
     }
 
-    // ── Ancrage Solana (non-bloquant) ─────────────────────────────────────
-    // Si une nouvelle root Merkle a été calculée ET que le service Solana est
-    // configuré, on publie la root on-chain dans un task séparé (fire & forget).
-    // Une erreur réseau Solana ne doit jamais faire échouer l'API KYC.
+    // ── Bitcoin anchoring (non-blocking) ──────────────────────────────────
+    // Default provider records a no-cost OP_RETURN-style anchor locally.
+    // A broadcast failure must not make registration fail.
     if let Some(ref root_hex) = merkle_root_out {
         if let Ok(root_bytes) = hex::decode(root_hex) {
             if root_bytes.len() == 32 {
                 let root_arr: [u8; 32] = root_bytes.try_into().unwrap();
                 let st = state.read().unwrap();
-                if let Some(ref svc) = st.solana_service {
+                if let Some(ref svc) = st.bitcoin_anchor {
                     let svc = svc.clone();
+                    let db = Arc::clone(&st.db);
                     tokio::spawn(async move {
-                        match svc.publish_new_root(root_arr).await {
-                            Ok(sig) => println!(
-                                "[SOLANA] ✓ Root anchée on-chain | tx={}",
-                                &sig[..20]
+                        match svc.publish_new_root(&db, root_arr).await {
+                            Ok(receipt) => println!(
+                                "[BITCOIN] Root anchored | provider=mock network={} txid={} no_real_money={}",
+                                receipt.network,
+                                &receipt.txid[..20],
+                                receipt.no_real_money
                             ),
                             Err(e) => eprintln!(
-                                "[SOLANA] ⚠ publish_new_root échoué (non-fatal) : {}", e
+                                "[BITCOIN] publish_new_root failed (non-fatal): {}", e
                             ),
                         }
                     });
@@ -2658,8 +2663,8 @@ async fn agent_kyc_consent(
 //         - Merkle-committed (tamper-evident log)
 //       Signed with server JWT secret (same trust anchor as A-JWT).
 //    4. VC stored in agent_vcs table.
-//    5. Optional: agent_checksum anchored to on-chain AgentDelegationRegistry
-//       (existing Solana/EVM contracts).
+//    5. Optional: agent checksum/root anchored as a Bitcoin OP_RETURN-style
+//       commitment in no-cost mock mode.
 //
 //  Trust chain: SauronID server key → VC → agent_id
 //  Verification by retail site: POST /agent/verify with A-JWT → server returns VC proof.

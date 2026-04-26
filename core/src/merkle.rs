@@ -1,11 +1,11 @@
-/// Commitment Ledger basé sur un Arbre de Merkle (Préparation Solana).
+/// Commitment ledger backed by a Merkle tree.
 ///
 /// Chaque "feuille" est le SHA256 d'un secret client (le commitment).
 /// Sauron s'engage cryptographiquement sur l'ensemble des KYC reçus :
 /// en cas de litige, le client peut prouver mathématiquement que son
 /// KYC a bien été ingéré par Sauron sans révéler aucune base de données.
 ///
-/// Algorithme interne : SHA256 standard (compatible chaîne Solana).
+/// Internal algorithm: standard SHA256, suitable for Bitcoin OP_RETURN commitments.
 use rs_merkle::{MerkleTree, algorithms::Sha256 as MerkleSha256};
 
 /// Ledger immuable (append-only) des commitments KYC.

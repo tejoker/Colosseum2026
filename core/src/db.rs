@@ -252,6 +252,38 @@ pub fn init_schema(conn: &Connection) {
             updated_at  INTEGER NOT NULL
         );
 
+        -- Bitcoin anchoring receipts for Merkle roots.
+        -- Default provider is local mock: OP_RETURN payload + fake txid, no real BTC.
+        CREATE TABLE IF NOT EXISTS bitcoin_merkle_anchors (
+            anchor_id          TEXT PRIMARY KEY NOT NULL,
+            merkle_root_hex    TEXT NOT NULL,
+            provider           TEXT NOT NULL,
+            network            TEXT NOT NULL,
+            op_return_hex      TEXT NOT NULL,
+            txid               TEXT NOT NULL,
+            broadcast          INTEGER NOT NULL DEFAULT 0,
+            no_real_money      INTEGER NOT NULL DEFAULT 1,
+            created_at         INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_bitcoin_merkle_root ON bitcoin_merkle_anchors(merkle_root_hex);
+
+        -- Lightning/L402 invoices for agent-paid APIs.
+        -- Default provider is local mock: no real sats move during tests.
+        CREATE TABLE IF NOT EXISTS lightning_l402_invoices (
+            invoice_id      TEXT PRIMARY KEY NOT NULL,
+            auth_id         TEXT NOT NULL,
+            agent_id        TEXT NOT NULL,
+            service         TEXT NOT NULL,
+            amount_msat     INTEGER NOT NULL,
+            payment_hash    TEXT NOT NULL,
+            macaroon        TEXT NOT NULL UNIQUE,
+            settled         INTEGER NOT NULL DEFAULT 0,
+            created_at      INTEGER NOT NULL,
+            expires_at      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_lightning_l402_auth ON lightning_l402_invoices(auth_id);
+        CREATE INDEX IF NOT EXISTS idx_lightning_l402_agent ON lightning_l402_invoices(agent_id, settled);
+
         -- Opaque rate-limit buckets (SHA256-derived keys); sliding windows by window_id = floor(epoch/window).
         CREATE TABLE IF NOT EXISTS risk_rate_counters (
             bucket      TEXT NOT NULL,

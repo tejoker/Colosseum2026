@@ -7,6 +7,7 @@ use rusqlite::{Connection, params};
 use sha2::{Sha256, Digest};
 use subtle::ConstantTimeEq;
 use hex;
+use crate::bitcoin_anchor::BitcoinAnchorService;
 use crate::compliance::ComplianceConfig;
 use crate::compliance_screening::ScreeningPolicy;
 use crate::db::DbHandle;
@@ -14,7 +15,6 @@ use crate::issuer_runtime::IssuerRuntime;
 use crate::merkle::MerkleCommitmentLedger;
 use crate::payment_smt::PaymentSmt;
 use crate::ring;
-use crate::solana_service::SolanaService;
 
 pub use crate::runtime_mode::{is_development_runtime, runtime_environment};
 
@@ -91,7 +91,7 @@ pub struct ServerState {
     pub screening: ScreeningPolicy,
     pub merkle_ledger: MerkleCommitmentLedger,
     pub payment_smt: std::sync::Mutex<PaymentSmt>,
-    pub solana_service: Option<std::sync::Arc<SolanaService>>,
+    pub bitcoin_anchor: Option<std::sync::Arc<BitcoinAnchorService>>,
 }
 
 fn derive_dev_secret(name: &str) -> Vec<u8> {
@@ -266,7 +266,7 @@ impl ServerState {
             screening,
             merkle_ledger,
             payment_smt,
-            solana_service: SolanaService::from_env().map(std::sync::Arc::new),
+            bitcoin_anchor: BitcoinAnchorService::from_env().map(std::sync::Arc::new),
         }
     }
 
