@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sauronid.io/schemas/external-crypto/policy-evaluate-v1.json",
+  "title": "Policy Evaluate Request",
+  "type": "object",
+  "required": ["bindingId", "action", "policyHash"],
+  "properties": {
+    "bindingId": { "type": "string", "minLength": 1 },
+    "action": { "type": "string", "minLength": 1 },
+    "resource": { "type": "string" },
+    "policyHash": { "type": "string", "minLength": 32 },
+    "constraints": { "type": "object" },
+    "amountMinor": { "type": "integer", "minimum": 1 },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "merchantId": { "type": "string" }
+  },
+  "additionalProperties": false
+}

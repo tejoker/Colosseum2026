@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sauronid.io/schemas/external-crypto/agent-bind-v1.json",
+  "title": "Agent Bind Request",
+  "type": "object",
+  "required": ["ownerRef", "agentChecksum", "agentPublicKey", "popPublicKey", "policyHash"],
+  "properties": {
+    "ownerRef": { "type": "string", "minLength": 1 },
+    "agentChecksum": { "type": "string", "minLength": 32 },
+    "agentPublicKey": { "type": "string", "minLength": 32 },
+    "popPublicKey": { "type": "string", "minLength": 32 },
+    "policyHash": { "type": "string", "minLength": 32 },
+    "workflowId": { "type": "string" },
+    "delegationParent": { "type": "string" },
+    "expiresAt": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

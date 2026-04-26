@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sauronid.io/schemas/external-crypto/agent-bind-response-v1.json",
+  "title": "Agent Bind Response",
+  "type": "object",
+  "required": ["bindingId", "bindingReceipt", "keyVersion", "createdAt"],
+  "properties": {
+    "bindingId": { "type": "string", "minLength": 1 },
+    "bindingReceipt": { "type": "string", "minLength": 16 },
+    "keyVersion": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

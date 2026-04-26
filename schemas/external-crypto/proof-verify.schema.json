@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sauronid.io/schemas/external-crypto/proof-verify-v1.json",
+  "title": "Proof Verify Request",
+  "type": "object",
+  "required": ["circuit", "circuitVersion", "proof", "publicSignals"],
+  "properties": {
+    "circuit": { "type": "string", "minLength": 1 },
+    "circuitVersion": { "type": "string", "minLength": 1 },
+    "proof": { "type": "object" },
+    "publicSignals": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "expectedRoot": { "type": "string" },
+    "expectedKeyHex": { "type": "string" },
+    "policyHash": { "type": "string" }
+  },
+  "additionalProperties": false
+}

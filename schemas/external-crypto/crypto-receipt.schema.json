@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sauronid.io/schemas/external-crypto/crypto-receipt-v1.json",
+  "title": "Crypto Receipt",
+  "type": "object",
+  "required": ["receiptId", "accepted", "operation", "keyVersion", "issuedAt"],
+  "properties": {
+    "receiptId": { "type": "string", "minLength": 1 },
+    "accepted": { "type": "boolean" },
+    "operation": {
+      "type": "string",
+      "enum": ["agent_bind", "verify_binding", "policy_evaluate", "proof_verify", "audit_encrypt"]
+    },
+    "reason": { "type": "string" },
+    "keyVersion": { "type": "string", "minLength": 1 },
+    "policyVersion": { "type": "string" },
+    "circuitVersion": { "type": "string" },
+    "issuedAt": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

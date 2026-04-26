@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sauronid.io/schemas/external-crypto/verify-binding-v1.json",
+  "title": "Verify Binding Request",
+  "type": "object",
+  "required": ["bindingId", "ajwtClaims", "popProof"],
+  "properties": {
+    "bindingId": { "type": "string", "minLength": 1 },
+    "ajwtClaims": { "type": "object" },
+    "popProof": {
+      "type": "object",
+      "required": ["challenge", "jws"],
+      "properties": {
+        "challenge": { "type": "string", "minLength": 1 },
+        "jws": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "consumeJti": { "type": "boolean", "default": false }
+  },
+  "additionalProperties": false
+}

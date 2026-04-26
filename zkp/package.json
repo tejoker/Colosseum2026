@@ -1,0 +1,17 @@
+{
+  "name": "zkp",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "compile:circuits": "bash scripts/compile.sh",
+    "audit:circuits": "bash scripts/audit_circuits.sh",
+    "test": "npm run audit:circuits"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "circomlib": "^2.0.5"
+  }
+}
