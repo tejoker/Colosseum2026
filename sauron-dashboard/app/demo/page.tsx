@@ -131,7 +131,8 @@ export default function DemoPage() {
   const [attackResults, setAttackResults] = useState<Record<string, AttackResult>>({});
   const [attackInFlight, setAttackInFlight] = useState<string | null>(null);
 
-  // LLM
+  // LLM (entirely optional — demo works without any key)
+  const [showLlm, setShowLlm] = useState(false);
   const [providers, setProviders] = useState<LlmProvider[]>([]);
   const [llmProvider, setLlmProvider] = useState("anthropic");
   const [llmApiKey, setLlmApiKey] = useState("");
@@ -576,16 +577,45 @@ export default function DemoPage() {
         </>
       )}
 
-      {/* ── Real LLM call (multi-provider) ─────────────────────── */}
+      {/* ── Real LLM call (entirely optional, collapsed by default) ───── */}
 
-      <Card title="REAL.LLM.CALL" hex="0x915">
-        <p className="text-[13px] text-white/55 leading-[1.7] max-w-2xl mb-8">
-          Pick any provider, paste your key, hit RUN. The dashboard sends a
-          short prompt + one tool definition (<code className="text-white/75">pay_merchant</code>) to the model
-          and surfaces the structured tool call. Pair this with the binding
-          flow above to see the real round-trip: model proposes → SauronID
-          ratifies + signs + anchors.
-        </p>
+      {!showLlm && (
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setShowLlm(true)}
+            className="font-mono-label text-[10px] tracking-[0.2em] rounded-full px-5 py-2.5 border border-white/15 text-white/55 hover:border-[#4F8CFE]/50 hover:text-[#4F8CFE] transition-colors"
+          >
+            ▸ SHOW REAL.LLM.CALL  (OPTIONAL)
+          </button>
+          <span className="font-mono-label text-[9px] text-white/30 leading-relaxed">
+            REQUIRES AN API KEY (PASTE OR .ENV) · DEMO ABOVE WORKS WITHOUT IT
+          </span>
+        </div>
+      )}
+
+      {showLlm && (
+      <Card title="REAL.LLM.CALL · OPTIONAL" hex="0x915">
+        <div className="flex items-center justify-between mb-6">
+          <p className="text-[13px] text-white/55 leading-[1.7] max-w-2xl">
+            Pick any provider, paste your key (or set it in .env), hit RUN.
+            The dashboard sends a short prompt + one tool definition
+            (<code className="text-white/75">pay_merchant</code>) to the model
+            and surfaces the structured tool call. Pair this with the binding
+            flow above to see the real round-trip: model proposes → SauronID
+            ratifies + signs + anchors.
+          </p>
+          <button
+            onClick={() => {
+              setShowLlm(false);
+              setLlmResult(null);
+              setLlmErr(null);
+            }}
+            className="font-mono-label text-[9.5px] text-white/45 hover:text-white/85 transition-colors flex-shrink-0"
+            aria-label="Hide LLM section"
+          >
+            ▾ HIDE
+          </button>
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
           {/* Provider */}
@@ -742,6 +772,7 @@ export default function DemoPage() {
           </div>
         )}
       </Card>
+      )}
 
       {/* ── Attack panel ─────────────────────────────────────── */}
 
