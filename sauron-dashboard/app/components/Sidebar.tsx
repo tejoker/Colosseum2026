@@ -50,28 +50,28 @@ export default function Sidebar() {
 
   return (
     <aside
-      className="relative w-[232px] flex-shrink-0 min-h-screen flex flex-col"
+      className="relative w-[252px] flex-shrink-0 min-h-screen flex flex-col"
       style={{
         background: "linear-gradient(180deg, #06090F 0%, #060C1E 100%)",
         borderRight: "1px solid rgba(230,241,255,0.06)",
       }}
     >
       {/* Decorative left edge accent */}
-      <span aria-hidden className="absolute right-0 top-24 h-40 w-px hairline" />
+      <span aria-hidden className="absolute right-0 top-28 h-44 w-px hairline" />
 
       {/* Brand lockup */}
-      <div className="px-5 pt-7 pb-6">
-        <Link href="/" className="flex items-center gap-3 group">
-          <BrandMark size={36} />
+      <div className="px-6 pt-9 pb-8">
+        <Link href="/" className="flex items-center gap-4 group">
+          <BrandMark size={40} />
           <div className="leading-tight">
             <div
-              className="text-[15px] font-semibold tracking-tight"
+              className="text-[16px] font-semibold tracking-tight"
               style={{ fontFamily: "Satoshi, system-ui, sans-serif" }}
             >
               <span className="text-white">Sauron</span>
               <span className="text-[#4F8CFE]">ID</span>
             </div>
-            <div className="font-mono-label text-[9px] text-white/45 mt-0.5">
+            <div className="font-mono-label text-[9px] text-white/45 mt-1">
               Mandate console
             </div>
           </div>
@@ -79,14 +79,14 @@ export default function Sidebar() {
       </div>
 
       {/* Section label — primary nav */}
-      <div className="px-5 pb-3 flex items-center gap-3">
+      <div className="px-6 pb-4 flex items-center gap-3">
         <span className="font-mono-label text-[9px] text-white/35">SYS.NAV</span>
         <span className="h-px flex-1 hairline" />
         <span className="font-mono-label text-[9px] text-white/20">0x000</span>
       </div>
 
       {/* Nav */}
-      <div className="flex-1 px-3 space-y-px">
+      <div className="flex-1 px-3 space-y-1">
         {LINKS.map(({ href, label, hex, icon }) => {
           const active = pathname === href;
           return (
@@ -94,8 +94,8 @@ export default function Sidebar() {
               key={href}
               href={href}
               className={[
-                "group relative flex items-center justify-between gap-2.5",
-                "px-3 py-[9px] rounded-md text-[13.5px] transition-colors",
+                "group relative flex items-center justify-between gap-3",
+                "px-3.5 py-3 rounded-md text-[13.5px] transition-colors",
                 active
                   ? "text-white"
                   : "text-white/55 hover:text-white hover:bg-white/[0.03]",
@@ -128,8 +128,8 @@ export default function Sidebar() {
       </div>
 
       {/* Footer status */}
-      <div className="px-5 pt-5 pb-5">
-        <div className="flex items-center gap-3 mb-3">
+      <div className="px-6 pt-7 pb-7">
+        <div className="flex items-center gap-3 mb-4">
           <span className="font-mono-label text-[9px] text-white/35">SYS.STATUS</span>
           <span className="h-px flex-1 hairline" />
         </div>

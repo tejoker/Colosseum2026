@@ -71,7 +71,7 @@ export default function AnchorsPage() {
   if (!anchor) return <Spinner />;
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-12">
       <PageHeader
         eyebrow="ANCHOR.PIPELINE"
         hex="0x200"
@@ -85,7 +85,7 @@ export default function AnchorsPage() {
         description="Every batch of agent action receipts is committed to Bitcoin via OpenTimestamps and to Solana via the Memo program. Tampering requires forging both."
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
         <Kpi
           label="ANCHOR.BATCHES"
           value={fmtNum(anchor.agent_action_batches)}
@@ -132,7 +132,7 @@ export default function AnchorsPage() {
       </Card>
 
       <Card title="ACTION.RECEIPTS · RECENT" hex="0x220">
-        <div className="overflow-x-auto -mx-2">
+        <div className="overflow-x-auto -mx-3">
           {actions.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
               <span className="font-mono-label text-[9.5px] text-white/35">EMPTY</span>
@@ -232,7 +232,7 @@ function ChainPane({
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-3 font-normal">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal">
       {children}
     </th>
   );
@@ -254,6 +254,6 @@ function Td({
   if (mono && dim) cls = "font-mono text-[11px] text-white/40";
   if (muted) cls = "text-white/55";
   return (
-    <td className={`px-2 py-3 align-middle whitespace-nowrap ${cls}`}>{children}</td>
+    <td className={`px-3 py-4 align-middle whitespace-nowrap ${cls}`}>{children}</td>
   );
 }

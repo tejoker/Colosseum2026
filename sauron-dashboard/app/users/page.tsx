@@ -9,7 +9,7 @@ export default function UsersPage() {
   if (loading) return <Spinner />;
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-12">
       <PageHeader
         eyebrow="HUMAN.REGISTRY"
         hex="0x500"
@@ -23,7 +23,7 @@ export default function UsersPage() {
         description="Each human is a stable OPRF key-image. Agents are bound to one. Revoke the human, every agent it owns dies."
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-5">
         <Kpi label="HUMANS" value={fmtNum(users.length)} accent="cyan" />
         <Kpi
           label="JURISDICTIONS"
@@ -38,7 +38,7 @@ export default function UsersPage() {
       </div>
 
       <Card title={`USER.LIST · ${users.length}`} hex="0x510">
-        <div className="overflow-x-auto -mx-2">
+        <div className="overflow-x-auto -mx-3">
           {users.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
               <span className="font-mono-label text-[9.5px] text-white/35">EMPTY</span>
@@ -74,7 +74,7 @@ export default function UsersPage() {
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-3 font-normal">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal">
       {children}
     </th>
   );
@@ -96,7 +96,7 @@ function Td({
   if (mono && dim) cls = "font-mono text-[11px] text-white/40";
   if (muted) cls = "text-white/55";
   return (
-    <td className={`px-2 py-3 align-middle whitespace-nowrap ${cls}`}>
+    <td className={`px-3 py-4 align-middle whitespace-nowrap ${cls}`}>
       {children}
     </td>
   );

@@ -71,7 +71,7 @@ export default function DemoPage() {
   }
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-12">
       <PageHeader
         eyebrow="LIVE.DEMO"
         hex="0x900"
@@ -87,9 +87,9 @@ export default function DemoPage() {
 
       {/* Control panel */}
       <Card title="DEMO.CONTROLS" hex="0x901">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
           {/* Human picker */}
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div className="font-mono-label text-[9px] text-white/45">
               SIGN AS HUMAN
             </div>
@@ -126,7 +126,7 @@ export default function DemoPage() {
           </div>
 
           {/* N actions */}
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div className="font-mono-label text-[9px] text-white/45">
               ACTIONS PER RUN
             </div>
@@ -167,7 +167,7 @@ export default function DemoPage() {
           </div>
 
           {/* Run button */}
-          <div className="space-y-3 flex flex-col">
+          <div className="space-y-4 flex flex-col">
             <div className="font-mono-label text-[9px] text-white/45">
               EXECUTE
             </div>
@@ -244,7 +244,7 @@ export default function DemoPage() {
       {/* Result */}
       {result && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
             <ResultTile
               label="AGENT.REGISTERED"
               value={result.agent_id ? result.agent_id.slice(0, 14) + "…" : "—"}
@@ -360,7 +360,7 @@ function ResultTile({
 
 function Step({ n, label }: { n: string; label: string }) {
   return (
-    <li className="flex gap-4">
+    <li className="flex gap-5">
       <span className="font-mono-label text-[10px] text-[#4F8CFE] flex-shrink-0">
         {n}
       </span>
@@ -371,7 +371,7 @@ function Step({ n, label }: { n: string; label: string }) {
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-3 font-normal text-left">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal text-left">
       {children}
     </th>
   );
@@ -393,6 +393,6 @@ function Td({
   if (mono && dim) cls = "font-mono text-[11px] text-white/40";
   if (muted) cls = "text-white/55";
   return (
-    <td className={`px-2 py-3 align-middle whitespace-nowrap ${cls}`}>{children}</td>
+    <td className={`px-3 py-4 align-middle whitespace-nowrap ${cls}`}>{children}</td>
   );
 }

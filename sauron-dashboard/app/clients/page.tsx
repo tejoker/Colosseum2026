@@ -50,7 +50,7 @@ export default function ClientsPage() {
   const activeCount = data.active_count ?? clientList.length;
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-12">
       <PageHeader
         eyebrow="CLIENT.DIRECTORY"
         hex="0x400"
@@ -64,7 +64,7 @@ export default function ClientsPage() {
         description="Partner sites that hold an authoring slot in the SauronID ring. Anonymous to each other; accountable to the core."
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-5">
         <Kpi label="TOTAL CLIENTS" value={fmtNum(clientList.length)} accent="cyan" />
         <Kpi label="ACTIVE · 90D" value={fmtNum(activeCount)} accent="emerald" />
         <Kpi
@@ -102,7 +102,7 @@ export default function ClientsPage() {
           </span>
         </div>
 
-        <div className="overflow-x-auto -mx-2">
+        <div className="overflow-x-auto -mx-3">
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
               <span className="font-mono-label text-[9.5px] text-white/35">
@@ -167,7 +167,7 @@ function Th({ children, right }: { children: React.ReactNode; right?: boolean })
   return (
     <th
       className={[
-        "font-mono-label text-[8.5px] text-white/40 px-2 py-3 font-normal",
+        "font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal",
         right ? "text-right" : "",
       ].join(" ")}
     >
@@ -194,7 +194,7 @@ function Td({
   return (
     <td
       className={[
-        "px-2 py-3 align-middle whitespace-nowrap",
+        "px-3 py-4 align-middle whitespace-nowrap",
         right ? "text-right tabular-nums" : "",
         cls,
       ].join(" ")}

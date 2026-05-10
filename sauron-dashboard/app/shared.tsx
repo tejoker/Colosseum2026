@@ -293,7 +293,7 @@ export function Kpi({
   accent?: string;
 }) {
   return (
-    <div className="relative glass rounded-md px-5 py-5 flex flex-col gap-3 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
+    <div className="relative glass rounded-md px-6 py-7 flex flex-col gap-4 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
       {/* Top hairline accent — sweeps in on hover */}
       <span
         aria-hidden
@@ -301,13 +301,13 @@ export function Kpi({
       />
       <span className="font-mono-label text-[9px] text-white/45">{label}</span>
       <span
-        className={`text-[28px] tabular-nums leading-none ${resolveAccent(accent)}`}
+        className={`text-[30px] tabular-nums leading-none ${resolveAccent(accent)}`}
         style={{ fontFamily: "Satoshi, system-ui, sans-serif", fontWeight: 500, letterSpacing: "-0.025em" }}
       >
         {value}
       </span>
       {sub && (
-        <span className="text-[10.5px] text-white/35 font-mono-label tracking-[0.12em]">
+        <span className="text-[10.5px] text-white/35 font-mono-label tracking-[0.12em] mt-1">
           {sub}
         </span>
       )}
@@ -358,16 +358,16 @@ export function PageHeader({
   hex?: string;
 }) {
   return (
-    <header className="space-y-3 animate-fade-in-up">
+    <header className="space-y-5 animate-fade-in-up pb-2">
       <MonoLabel label={eyebrow ?? "MANDATE.CONSOLE"} hex={hex ?? "0x000"} />
       <h1
-        className="font-display text-[44px] leading-[1.04] text-white"
+        className="font-display text-[48px] leading-[1.06] text-white max-w-3xl"
         style={{ letterSpacing: "-0.015em" }}
       >
         {title}
       </h1>
       {description && (
-        <p className="text-[13.5px] text-white/55 max-w-2xl leading-relaxed">
+        <p className="text-[14px] text-white/55 max-w-2xl leading-[1.7] pt-1">
           {description}
         </p>
       )}
@@ -393,12 +393,12 @@ export function Card({
     <div
       className={[
         bare ? "" : "glass",
-        "relative rounded-md p-7",
+        "relative rounded-md p-8",
         className ?? "",
       ].join(" ")}
     >
       {title && (
-        <div className="mb-6">
+        <div className="mb-8">
           <MonoLabel label={title} hex={hex} />
         </div>
       )}

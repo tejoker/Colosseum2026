@@ -241,7 +241,7 @@ export default function OverviewPage() {
       )}
 
       {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-5">
         <Kpi
           label="ACTIVE AGENTS"
           value={fmtNum(activeAgents)}
@@ -279,10 +279,10 @@ export default function OverviewPage() {
       </div>
 
       {/* Activity + anchor pipeline */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2">
           <Card title="AGENT.ACTIVITY · 90D" hex="0x010">
-            <div className="h-64">
+            <div className="h-80">
               <Line
                 data={{
                   labels: overview.daily?.dates ?? [],
@@ -369,9 +369,9 @@ export default function OverviewPage() {
       </div>
 
       {/* Agent registry + recent receipts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <Card title="ACTION.RECEIPTS · RECENT" hex="0x020">
-          <div className="overflow-y-auto max-h-80 -mx-2">
+          <div className="overflow-y-auto max-h-96 -mx-3">
             {actions.length === 0 ? (
               <Empty hint="No action receipts. Run the receipt-verify flow to anchor agent decisions." />
             ) : (
@@ -405,7 +405,7 @@ export default function OverviewPage() {
         </Card>
 
         <Card title="AGENT.REGISTRY" hex="0x021">
-          <div className="overflow-y-auto max-h-80 -mx-2">
+          <div className="overflow-y-auto max-h-96 -mx-3">
             {agents.length === 0 ? (
               <Empty hint="No agents registered. Bind your first agent via the Python adapter." />
             ) : (
@@ -497,7 +497,7 @@ function Meta({ label, value }: { label: string; value: string }) {
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-3 font-normal">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal">
       {children}
     </th>
   );
@@ -514,7 +514,7 @@ function Td({
   dim?: boolean;
   muted?: boolean;
 }) {
-  const base = "px-2 py-3 align-middle whitespace-nowrap";
+  const base = "px-3 py-4 align-middle whitespace-nowrap";
   let cls = "text-white/85";
   if (mono) cls = "font-mono text-[11.5px] text-white/85";
   if (mono && dim) cls = "font-mono text-[11.5px] text-white/45";

@@ -53,7 +53,7 @@ export default function RequestsPage() {
   }, [load]);
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-12">
       <PageHeader
         eyebrow="ACTIVITY.LOG"
         hex="0x300"
@@ -68,7 +68,7 @@ export default function RequestsPage() {
 
       <Card title={`STREAM · ${events.length} EVENTS`} hex="0x310">
         <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-5">
             <StatusPill
               status={loading ? "warn" : "ok"}
               label={loading ? "REFRESHING" : "LIVE · 5S"}
@@ -85,7 +85,7 @@ export default function RequestsPage() {
           </button>
         </div>
 
-        <div className="overflow-x-auto -mx-2">
+        <div className="overflow-x-auto -mx-3">
           {events.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 gap-2">
               <span className="font-mono-label text-[9.5px] text-white/35">EMPTY</span>
@@ -145,7 +145,7 @@ function Th({ children, right }: { children: React.ReactNode; right?: boolean })
   return (
     <th
       className={[
-        "font-mono-label text-[8.5px] text-white/40 px-2 py-3 font-normal",
+        "font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal",
         right ? "text-right" : "",
       ].join(" ")}
     >
@@ -172,7 +172,7 @@ function Td({
   return (
     <td
       className={[
-        "px-2 py-3 align-middle whitespace-nowrap",
+        "px-3 py-4 align-middle whitespace-nowrap",
         right ? "text-right tabular-nums" : "",
         cls,
       ].join(" ")}
