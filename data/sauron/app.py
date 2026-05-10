@@ -2067,6 +2067,179 @@ async def live_demo_llm_call(req: Request):
         raise HTTPException(status_code=502, detail=f"upstream LLM unreachable: {e}")
 
 
+@app.post("/api/live/demo/llm-then-bind")
+async def live_demo_llm_then_bind(req: Request):
+    """Two-stage stream: call an LLM, then run the binding flow with the
+    arguments the model proposed in its tool call.
+
+    Body: {provider, api_key?, base_url?, model, user_message,
+           email, password, tool_name?, tool_schema?}
+    Streams: llm.start -> llm.done with parsed tool_call -> standard
+    binding events (step.start/step.done/run.done) using the LLM args
+    as intent overrides. If the LLM produces no tool_call OR the call
+    fails, emits llm.fail and stops without running the binding (so the
+    caller can fall back to the simple /demo/stream flow).
+    """
+    body = await req.json()
+    provider = (body.get("provider") or "").strip()
+    if not provider or provider not in _LLM_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"unknown provider: {provider!r}")
+
+    spec = _LLM_PROVIDERS[provider]
+    body_key = (body.get("api_key") or "").strip()
+    env_key  = os.getenv(spec["env_key"], "").strip()
+    api_key  = body_key or env_key
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"no api_key supplied and {spec['env_key']} not set in env",
+        )
+
+    user_message = (body.get("user_message")
+                    or "Send 15.00 EUR to mch_demo_payments for invoice INV-2026-001.")
+    model = (body.get("model") or spec["default_model"]).strip()
+
+    async def event_stream() -> AsyncIterator[str]:
+        # ── 1. LLM call ────────────────────────────────────────────────
+        yield f"data: {json.dumps({'event': 'llm.start', 'provider': provider, 'model': model})}\n\n"
+        try:
+            if provider == "tavily":
+                # Tavily's "tool call" is a search shape; can't bind a search
+                # to payment_authorize. Fall through with an explicit note.
+                yield f"data: {json.dumps({'event': 'llm.fail', 'reason': 'tavily search results cannot drive payment_authorize binding — pick an LLM provider for the chained demo'})}\n\n"
+                return
+            elif provider == "anthropic":
+                res = _llm_call_anthropic(
+                    api_key, model,
+                    body.get("system_prompt") or "You are a payment-initiating agent. Call pay_merchant with amount, currency and merchant_id.",
+                    user_message,
+                    body.get("tool_name") or "pay_merchant",
+                    body.get("tool_schema") or {
+                        "type": "object",
+                        "properties": {
+                            "amount":      {"type": "number"},
+                            "currency":    {"type": "string"},
+                            "merchant_id": {"type": "string"},
+                            "memo":        {"type": "string"},
+                        },
+                        "required": ["amount", "currency", "merchant_id"],
+                    },
+                )
+            elif provider == "gemini":
+                res = _llm_call_gemini(
+                    api_key, model,
+                    body.get("system_prompt") or "You are a payment-initiating agent. Call pay_merchant with amount, currency and merchant_id.",
+                    user_message,
+                    body.get("tool_name") or "pay_merchant",
+                    body.get("tool_schema") or {
+                        "type": "object",
+                        "properties": {
+                            "amount":      {"type": "number"},
+                            "currency":    {"type": "string"},
+                            "merchant_id": {"type": "string"},
+                            "memo":        {"type": "string"},
+                        },
+                        "required": ["amount", "currency", "merchant_id"],
+                    },
+                )
+            elif provider == "openai-custom":
+                base = (body.get("base_url") or "").strip()
+                if not base:
+                    yield f"data: {json.dumps({'event': 'llm.fail', 'reason': 'base_url required for openai-custom'})}\n\n"
+                    return
+                res = _llm_call_openai_compatible(
+                    base, api_key, model,
+                    body.get("system_prompt") or "You are a payment-initiating agent. Call pay_merchant with amount, currency and merchant_id.",
+                    user_message,
+                    body.get("tool_name") or "pay_merchant",
+                    body.get("tool_schema") or {
+                        "type": "object",
+                        "properties": {
+                            "amount":      {"type": "number"},
+                            "currency":    {"type": "string"},
+                            "merchant_id": {"type": "string"},
+                            "memo":        {"type": "string"},
+                        },
+                        "required": ["amount", "currency", "merchant_id"],
+                    },
+                )
+            else:
+                base = spec["base_url"]
+                res = _llm_call_openai_compatible(
+                    base, api_key, model,
+                    body.get("system_prompt") or "You are a payment-initiating agent. Call pay_merchant with amount, currency and merchant_id.",
+                    user_message,
+                    body.get("tool_name") or "pay_merchant",
+                    body.get("tool_schema") or {
+                        "type": "object",
+                        "properties": {
+                            "amount":      {"type": "number"},
+                            "currency":    {"type": "string"},
+                            "merchant_id": {"type": "string"},
+                            "memo":        {"type": "string"},
+                        },
+                        "required": ["amount", "currency", "merchant_id"],
+                    },
+                )
+        except Exception as e:
+            yield f"data: {json.dumps({'event': 'llm.fail', 'reason': f'LLM call failed: {e}'})}\n\n"
+            return
+
+        tool_call = res.get("tool_call")
+        yield f"data: {json.dumps({'event': 'llm.done', 'tool_call': tool_call, 'text': res.get('text'), 'usage': res.get('usage')})}\n\n"
+
+        if not tool_call or not isinstance(tool_call.get("args"), dict):
+            yield f"data: {json.dumps({'event': 'llm.fail', 'reason': 'model returned no structured tool call'})}\n\n"
+            return
+
+        args = tool_call["args"]
+        amount = args.get("amount")
+        currency = (args.get("currency") or "EUR").upper()
+        merchant_id = args.get("merchant_id") or "mch_demo_payments"
+        if not isinstance(amount, (int, float)) or amount <= 0:
+            yield f"data: {json.dumps({'event': 'llm.fail', 'reason': 'tool call missing valid amount'})}\n\n"
+            return
+
+        # ── 2. Binding flow with LLM-derived intent ────────────────────
+        binding_body = dict(body)
+        binding_body.update({
+            "n_actions": 1,
+            "max_amount": f"{float(amount):.2f}",
+            "currency":   currency,
+            "merchant_allowlist": merchant_id,
+            "intent_scope": "payment_initiation",
+        })
+        cmd = _demo_subprocess_args(binding_body, stream=True)
+        env = _demo_subprocess_env()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=str(_REPO_ROOT),
+        )
+        assert proc.stdout is not None
+        try:
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                yield f"data: {line}\n\n"
+        finally:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+        yield "event: end\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/live/demo/run")
 async def live_demo_run(req: Request):
     """Run the full agent-binding flow end-to-end. Body: {n_actions, email, password}."""

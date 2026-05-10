@@ -20,16 +20,16 @@ Latest result on commit at the time of writing: **16/16 blocked**.
 
 | ID  | Attack | SauronID | Verifier |
 |-----|--------|:--------:|----------|
-| A1  | Forged A-JWT signature | ✅ blocked | A-JWT verify fails on bad signature; `kya-redteam: invalid_ajwt`. |
-| A2  | Replay of a JTI-consumed A-JWT | ✅ blocked | UNIQUE constraint on `ajwt_used_jtis`; `kya-redteam: jti_replay_blocked` + `empirical-suite A2`. |
+| A1  | Forged A-JWT signature | ✅ blocked | A-JWT verify fails on bad signature; `redteam: invalid_ajwt`. |
+| A2  | Replay of a JTI-consumed A-JWT | ✅ blocked | UNIQUE constraint on `ajwt_used_jtis`; `redteam: jti_replay_blocked` + `empirical-suite A2`. |
 | A3  | Per-call signature replay (same nonce) | ✅ blocked | UNIQUE constraint on `agent_call_nonces (agent_id, nonce)`; `empirical-suite A3`. |
 | A4  | Captured A-JWT replayed without per-call sig (cross-endpoint) | ✅ blocked | Per-call sig middleware fails-closed under `SAURON_REQUIRE_CALL_SIG=1`; `empirical-suite A4`. |
 | A5  | Body tampering after per-call signing | ✅ blocked | Sig covers `sha256(body)`; mismatch → 401; `empirical-suite A5`. |
 | A6  | Timestamp outside skew window (replay days later) | ✅ blocked | `SAURON_CALL_SIG_SKEW_MS` enforces ±60 s by default; `empirical-suite A6`. |
 | A7  | Sig from wrong agent's PoP key for claimed agent_id | ✅ blocked | Server verifies sig against the registered `pop_public_key_b64u` for the claimed `agent_id`; `empirical-suite A7`. |
 | A8  | Admin endpoint with wrong/missing key | ✅ blocked | Admin auth middleware; constant-time HMAC compare; `empirical-suite A8`. |
-| A9  | Revoked agent's tokens | ✅ blocked | DB lookup at every verify checks `revoked = 0`; `kya-redteam: revoked_agent_denied` + `empirical-suite A9`. |
-| A10 | Delegated child requesting scope outside parent intent | ✅ blocked | `assert_child_scopes_subset_of_parent`; `kya-redteam: delegation_scope_denied` + `empirical-suite A10`. |
+| A9  | Revoked agent's tokens | ✅ blocked | DB lookup at every verify checks `revoked = 0`; `redteam: revoked_agent_denied` + `empirical-suite A9`. |
+| A10 | Delegated child requesting scope outside parent intent | ✅ blocked | `assert_child_scopes_subset_of_parent`; `redteam: delegation_scope_denied` + `empirical-suite A10`. |
 | A11 | TOCTOU concurrent claim of consent token | ✅ blocked | Atomic `UPDATE WHERE token_used=0` (main.rs:1108-1148); same pattern on payment auth + credential codes + bank nonces. |
 | A12 | Rate limit on /agent/register | ✅ blocked | `risk::check_and_increment` per human_key_image; default prod limit 20/window. |
 | A13 | CORS empty-origins fallback | ✅ blocked | Server hard-panics at startup if `SAURON_ALLOWED_ORIGINS` resolves to no valid origins (main.rs:133-139). |
@@ -149,7 +149,7 @@ sleep 5
 SAURON_URL=http://localhost:3001 SAURON_ADMIN_KEY=super_secret_hackathon_key bash seed.sh
 
 # Run empirical suite
-cd ../kya-redteam
+cd ../redteam
 SAURON_REQUIRE_CALL_SIG=1 \
 SAURON_CORE_URL=http://127.0.0.1:3001 \
 SAURON_ADMIN_KEY=super_secret_hackathon_key \
@@ -159,7 +159,7 @@ node dist/scenarios/empirical-suite.js
 node /tmp/bench-callsig.mjs    # script in this commit's /tmp directory
 ```
 
-Result file: `kya-redteam/empirical-results.json`. Re-run after any security-sensitive change.
+Result file: `redteam/empirical-results.json`. Re-run after any security-sensitive change.
 
 ## Buyer scorecard — precise framing
 

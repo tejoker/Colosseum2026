@@ -127,10 +127,10 @@ for i in $(seq 1 "$SHARED_ITERS"); do
   MATRIX_FAULT_PROBE_PCT="$MATRIX_FAULT_PROBE_PCT" \
   tests/e2e_agent_matrix.sh >"${LOG_DIR}/shared-${i}.matrix.log"
 
-  if [[ -f "${ROOT_DIR}/../kya-redteam/dist/index.js" ]]; then
+  if [[ -f "${ROOT_DIR}/../redteam/dist/index.js" ]]; then
     SAURON_CORE_URL="http://127.0.0.1:${port}" \
     SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
-    node "${ROOT_DIR}/../kya-redteam/dist/index.js" >"${LOG_DIR}/shared-${i}.redteam.log"
+    node "${ROOT_DIR}/../redteam/dist/index.js" >"${LOG_DIR}/shared-${i}.redteam.log"
   fi
 
   kill "$pid" >/dev/null 2>&1 || true

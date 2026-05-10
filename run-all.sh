@@ -28,9 +28,9 @@ step "agentic sdk build + tests"
 install_if_needed "$ROOT/agentic"
 (cd "$ROOT/agentic" && npm run build && npm test)
 
-step "kya-redteam build"
-install_if_needed "$ROOT/kya-redteam"
-(cd "$ROOT/kya-redteam" && npm run build)
+step "redteam build"
+install_if_needed "$ROOT/redteam"
+(cd "$ROOT/redteam" && npm run build)
 
 step "partner portal lint + build"
 install_if_needed "$ROOT/partner-portal"

@@ -53,7 +53,7 @@ Every protected request must include `x-sauron-agent-config-digest` matching the
 3. The agent runtime computes the same digest from its actual loaded config and sends it on every protected call.
 4. If an attacker (or careless operator) flips the system prompt without first calling `POST /agent/{id}/checksum/update`, the runtime's computed digest no longer matches the server's stored value. Every call to a protected endpoint rejects with 401 `agent runtime config digest does not match registered checksum (config drift…)`.
 
-**Empirical proof:** test A16 in `kya-redteam/dist/scenarios/empirical-suite.js` registers an LLM agent, then sends a payment-authorize call with a mismatched digest header. Server returns 401 with `drift` in the body. Verified 16/16 in enforce mode.
+**Empirical proof:** test A16 in `redteam/dist/scenarios/empirical-suite.js` registers an LLM agent, then sends a payment-authorize call with a mismatched digest header. Server returns 401 with `drift` in the body. Verified 16/16 in enforce mode.
 
 **Honesty assumption:** the runtime computes its digest from its actual config. A compromised host can lie — that's gap 3, mitigated by hardware-backed key + attestation (below).
 
@@ -169,7 +169,7 @@ For the security claims to hold, the operator must guarantee:
 
 | Claim | How to verify |
 |---|---|
-| Replay protection | Run `kya-redteam` `jti_replay_blocked` scenario. |
+| Replay protection | Run `redteam` `jti_replay_blocked` scenario. |
 | Per-call signature | Run with `SAURON_REQUIRE_CALL_SIG=1` and execute `call_sig_binding` scenario (4 cases: missing/signed/replay/tamper). |
 | TOCTOU fixes | (Phase 1.3 cargo integration tests TBD.) For now, manual concurrent `curl` against `/kyc/retrieve` with same `consent_token`. |
 | OTS anchor | After a merkle commitment, query the `bitcoin_merkle_anchors` row, extract `ots_receipt_blob`, run `ots verify <blob>` against the original digest. |

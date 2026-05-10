@@ -2,17 +2,23 @@
 
 **The cryptographic agent-binding layer for AI deployments.**
 
-Wherever your AI agents act on behalf of humans or other systems, SauronID sits in the path and turns every call into a signed, replay-protected, intent-leashed, audit-anchored event. An agent that has been registered with SauronID cannot:
+## Why this matters
 
-- replay a captured token,
-- mutate a request body after signing,
-- act outside its declared intent,
-- silently flip its system prompt or tool list,
-- escalate scope across delegation,
-- evade the audit log,
+An AI agent that gets compromised at runtime — by prompt injection, a tampered system prompt, a swapped tool definition, a stolen token — can do real damage in a few HTTP calls. Replay a captured token, mutate the request body after signing, escalate scope through delegation, drift its config without anyone noticing.
+
+**Without SauronID**, an attacker who pwns your agent can do all of the above. **With SauronID**, every one of those produces an HTTP 401 in under 5 ms, on every request. There is no "trust the agent runtime" assumption: each call is independently re-verified against a binding that the operator cannot forge.
+
+This is proven by the [16-attack empirical suite](redteam/) which runs against a live server and reports `16/16 blocked` in fail-closed mode. Anyone can re-run it (`npx tsx redteam/src/scenarios/empirical-suite.ts`).
+
+## What an agent under SauronID cannot do
+
+- replay a captured A-JWT,
+- mutate a request body after signing it,
+- act outside its declared `intent`,
+- silently swap its system prompt, tool list, or model id,
+- escalate scope across delegation (parent → child),
+- evade the merkle-anchored audit log,
 - act after revocation.
-
-These are not aspirational claims. They are tested by the **16-attack empirical suite** (`docs/empirical-comparison.md`) which runs against a live server and reports `16/16 blocked` in fail-closed mode. Anyone can re-run it.
 
 ## What SauronID is, and what it is not
 
@@ -196,6 +202,38 @@ SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
                    audit anchor    audit anchor   storage
 ```
 
+## Repo layout — what is current, what is historical
+
+The repo carries a previous-life of bank-KYC code under `legacy/` and adjacent
+fixtures. The active SauronID surface is a focused subset.
+
+**Current SauronID code** (review these):
+
+```
+core/                  Rust axum service (SauronID core, ~21k lines)
+sauron-dashboard/      Next.js Mandate Console
+clients/python/        Python adapter (SignedAgent + LLM wrappers)
+agentic/               TypeScript adapter
+redteam/               16-attack empirical suite + 18-attack Tavily fuzzer
+scripts/               simulate_real_actions.py, solana_audit.py, etc.
+contracts/             Solana Anchor program (sauron_ledger)
+docs/                  threat-model, operations, production-readiness
+BRANDING.md            Visual identity (Mandate Console)
+SauronID_Pitch_Deck.pdf
+```
+
+**Historical / not part of the SauronID product surface** (do not depend on):
+
+```
+legacy/KYC/            Old bank-KYC ingest. Feature-flagged off by default.
+data/sauron/data/*.csv Banking-era persona/expense fixtures. Unused.
+anomaly-engine/        Old anomaly pipeline. Unused.
+partner-portal/        Bank/retail UI. Demo-quality, not core to SauronID.
+subgraph/              Subgraph schema scaffolding. Inactive.
+```
+
+These exist for git history continuity and may be removed in a future cleanup.
+
 ## Critical files
 
 - Core service: [`core/`](core/) — Rust, axum, ~21k lines.
@@ -203,7 +241,7 @@ SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
 - Brand system: [`BRANDING.md`](BRANDING.md), pitch deck at [`SauronID_Pitch_Deck.pdf`](SauronID_Pitch_Deck.pdf), eye logo at [`logo.svg`](logo.svg).
 - TypeScript client: [`agentic/`](agentic/) — `signCall`, `register`, `popKeys`.
 - Python client: [`clients/python/sauronid_client/`](clients/python/sauronid_client/) — LangChain + OpenAI + Anthropic adapters.
-- Empirical attack suite: [`kya-redteam/`](kya-redteam/) — 9 invariant scenarios + 16-attack empirical suite + 18-attack Tavily fuzzer.
+- Empirical attack suite: [`redteam/`](redteam/) — 9 invariant scenarios + 16-attack empirical suite + 18-attack Tavily fuzzer.
 - Simulation + audit scripts: [`scripts/`](scripts/) — real action receipts, agent stress, Solana devnet setup + wire audit.
 - Custom Solana program: [`contracts/sauron_ledger/`](contracts/sauron_ledger/) — Anchor program (optional; default uses Solana Memo).
 - Operations: [`docs/operations.md`](docs/operations.md) — every env var, every deploy step.

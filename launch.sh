@@ -67,9 +67,9 @@ step "Build Rust core (release)"
 (cd "$ROOT/core" && cargo build --release 2>&1 | tail -2)
 ok "core compiled"
 
-step "Build kya-redteam (TS)"
-(cd "$ROOT/kya-redteam" && (test -d node_modules || npm install --silent) && npm run build --silent)
-ok "kya-redteam compiled"
+step "Build redteam (TS)"
+(cd "$ROOT/redteam" && (test -d node_modules || npm install --silent) && npm run build --silent)
+ok "redteam compiled"
 
 step "Build agentic SDK (TS)"
 (cd "$ROOT/agentic" && (test -d node_modules || npm install --silent) && (test -f tsconfig.json && tsc -p . 2>/dev/null || true))
@@ -173,7 +173,7 @@ fi
 # ────────────────────────────────────────────────────────────────────────
 # 5. Run all suites
 # ────────────────────────────────────────────────────────────────────────
-cd "$ROOT/kya-redteam"
+cd "$ROOT/redteam"
 
 if [[ "$STRICT" = "1" ]]; then
     step "Run 16-attack empirical suite (fail-closed)"

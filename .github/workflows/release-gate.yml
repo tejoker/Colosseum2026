@@ -25,6 +25,12 @@ jobs:
         working-directory: core
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Rust dependency audit (cargo-audit)
+        working-directory: core
+        run: |
+          cargo install --locked cargo-audit || true
+          cargo audit --deny warnings || true   # report-only initially; remove `|| true` once clean
+
       - name: Agentic SDK
         working-directory: agentic
         run: |
@@ -75,3 +81,33 @@ jobs:
 
       - name: Core dev leash smoke
         run: bash core/tests/smoke_dev_leash_demo.sh
+
+      # Empirical 16-attack suite — boots the core in dev mode, runs the
+      # adversarial harness, fails the build on any pass→fail regression.
+      - name: Empirical attack suite (live)
+        working-directory: redteam
+        env:
+          SAURON_REQUIRE_CALL_SIG: "1"
+        run: |
+          # Boot core in background
+          (cd ../core && cargo run --release --bin sauron-core) &
+          CORE_PID=$!
+          # Wait for /health
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3001/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:3001/health || (echo "core never came up" && kill $CORE_PID && exit 1)
+          # Seed users + clients
+          bash ../core/seed.sh || true
+          # Run empirical suite (must stay 16/16)
+          npm ci
+          npx tsx src/scenarios/empirical-suite.ts
+          PASS_COUNT=$(jq '.passed' empirical-results.json)
+          TOTAL=$(jq '.total' empirical-results.json)
+          kill $CORE_PID || true
+          if [ "$PASS_COUNT" != "$TOTAL" ]; then
+            echo "Empirical suite regression: $PASS_COUNT / $TOTAL"
+            exit 1
+          fi
+          echo "Empirical suite OK: $PASS_COUNT / $TOTAL"

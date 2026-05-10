@@ -120,7 +120,7 @@ jobs:
           npm run test:integration
 
       - name: KYA red-team (scripted invariants)
-        working-directory: kya-redteam
+        working-directory: redteam
         env:
           SAURON_CORE_URL: http://localhost:3001
           SAURON_ADMIN_KEY: super_secret_hackathon_key

@@ -6,7 +6,7 @@
 #
 # What this does:
 #   1. Builds the Rust core (release).
-#   2. Builds the TypeScript clients (kya-redteam, agentic, zkp/issuer).
+#   2. Builds the TypeScript clients (redteam, agentic, zkp/issuer).
 #   3. Starts the core in the background, waits for /admin/stats to respond.
 #   4. Seeds 10 dev clients + 10 dev users via core HTTP APIs.
 #   5. Runs the 9-scenario invariant suite.
@@ -74,11 +74,11 @@ ok "core compiled"
 # ────────────────────────────────────────────────────────────────────────
 # 3. Build the TS clients
 # ────────────────────────────────────────────────────────────────────────
-step "Build kya-redteam (TS)"
-cd "$ROOT/kya-redteam"
+step "Build redteam (TS)"
+cd "$ROOT/redteam"
 if [ ! -d node_modules ]; then npm install --silent 2>&1 | tail -2; fi
 npm run build --silent
-ok "kya-redteam compiled"
+ok "redteam compiled"
 
 step "Build agentic SDK (TS)"
 cd "$ROOT/agentic"
@@ -134,7 +134,7 @@ ok "seeded 10 clients + 10 users"
 # suite. Every scenario sends the full header set including the
 # config-digest. This is the production-shape verification.
 # ────────────────────────────────────────────────────────────────────────
-cd "$ROOT/kya-redteam"
+cd "$ROOT/redteam"
 if [ "$ENFORCE_MODE" = "1" ]; then
     step "Run 16-attack empirical suite (fail-closed mode)"
     if node dist/scenarios/empirical-suite.js > /tmp/sauron-empirical.log 2>&1; then

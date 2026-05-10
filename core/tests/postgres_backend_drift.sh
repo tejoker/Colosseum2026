@@ -95,7 +95,7 @@ done
 bash "$ROOT/core/seed.sh" >/dev/null
 
 # 4. Use the existing 8-scenario suite to cause an agent registration
-(cd "$ROOT/kya-redteam" && \
+(cd "$ROOT/redteam" && \
     SAURON_CORE_URL=http://127.0.0.1:3001 \
     SAURON_ADMIN_KEY=super_secret_hackathon_key \
     node dist/index.js >/dev/null 2>&1 || true)

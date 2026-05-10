@@ -198,6 +198,95 @@ export default function DemoPage() {
     }
   }
 
+  /** Killer demo: LLM proposes -> SauronID binds + signs + anchors, all in one. */
+  async function runLlmThenBind() {
+    setLlmRunning(true);
+    setRunning(true);
+    setDone(null);
+    setErr(null);
+    setLlmResult(null);
+    setLlmErr(null);
+    resetSteps();
+
+    try {
+      const res = await fetch(`${DASH_API}/api/live/demo/llm-then-bind`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider:     llmProvider,
+          api_key:      llmApiKey,
+          base_url:     llmBaseUrl,
+          model:        llmModel,
+          user_message: llmPrompt,
+          email:        user.email,
+          password:     user.password,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setLlmErr(JSON.stringify(j.detail ?? j, null, 2));
+        return;
+      }
+      for await (const line of readSseLines(res)) {
+        let evt: Record<string, unknown>;
+        try {
+          evt = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const ev = String(evt.event);
+        if (ev === "llm.start") {
+          pushStep({
+            id: "llm",
+            label: `LLM CALL · ${String(evt.provider)} ${String(evt.model)}`,
+            state: "running",
+          });
+        } else if (ev === "llm.done") {
+          patchStep("llm", {
+            state: "done",
+            detail: {
+              tool_call: JSON.stringify(evt.tool_call),
+              text: String(evt.text ?? ""),
+            },
+          });
+          // Surface the parsed tool call in the LLM result panel too.
+          if (evt.tool_call && typeof evt.tool_call === "object") {
+            setLlmResult({
+              provider: llmProvider,
+              model: llmModel,
+              tool_call: evt.tool_call as { name: string; args: Record<string, unknown> },
+              text: (evt.text as string) ?? null,
+              usage: (evt.usage as Record<string, unknown>) ?? null,
+            });
+          }
+        } else if (ev === "llm.fail") {
+          patchStep("llm", { state: "fail", error: String(evt.reason ?? "unknown") });
+          setLlmErr(String(evt.reason ?? "LLM did not produce a usable tool call"));
+        } else if (ev === "step.start") {
+          pushStep({ id: String(evt.id), label: String(evt.label), state: "running" });
+        } else if (ev === "step.done") {
+          const { event: _e, id, label: _l, ms, ok: _o, ...detail } = evt as {
+            event: string; id: string; label?: string; ms?: number; ok?: boolean;
+          };
+          patchStep(String(id), {
+            state: "done",
+            ms: typeof ms === "number" ? ms : undefined,
+            detail: detail as Record<string, unknown>,
+          });
+        } else if (ev === "step.fail") {
+          patchStep(String(evt.id), { state: "fail", error: String(evt.error ?? "") });
+        } else if (ev === "run.done") {
+          setDone(evt as unknown as RunDone);
+        }
+      }
+    } catch (e) {
+      setLlmErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLlmRunning(false);
+      setRunning(false);
+    }
+  }
+
   function pushStep(next: Step) {
     stepsRef.current = [...stepsRef.current, next];
     setSteps(stepsRef.current);
@@ -686,26 +775,39 @@ export default function DemoPage() {
                       multi
                     />
                   </div>
-                  <button
-                    onClick={callLlm}
-                    disabled={!canRun}
-                    className={[
-                      "rounded-md py-4 px-6 font-mono-label tracking-[0.2em] text-[10.5px]",
-                      "transition-all duration-200",
-                      !canRun
-                        ? "bg-[#0F1A35] text-white/40 cursor-not-allowed"
-                        : "bg-[#2563EB] text-white hover:bg-[#4F8CFE]",
-                    ].join(" ")}
-                    style={canRun ? { boxShadow: "0 0 28px -8px rgba(37,99,235,0.55)" } : {}}
-                  >
-                    {llmRunning
-                      ? llmProvider === "tavily"
-                        ? "SEARCHING…"
-                        : "CALLING MODEL…"
-                      : llmProvider === "tavily"
-                      ? "RUN TAVILY SEARCH →"
-                      : "CALL MODEL →"}
-                  </button>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      onClick={callLlm}
+                      disabled={!canRun}
+                      className={[
+                        "rounded-md py-4 px-6 font-mono-label tracking-[0.2em] text-[10.5px]",
+                        "transition-all duration-200 border",
+                        !canRun
+                          ? "bg-[#0F1A35] text-white/40 cursor-not-allowed border-white/5"
+                          : "bg-transparent text-white/85 border-white/15 hover:border-[#4F8CFE]/60 hover:text-[#4F8CFE]",
+                      ].join(" ")}
+                    >
+                      {llmRunning
+                        ? llmProvider === "tavily" ? "SEARCHING…" : "CALLING MODEL…"
+                        : llmProvider === "tavily" ? "1. RUN TAVILY SEARCH →" : "1. CALL MODEL ONLY →"}
+                    </button>
+                    {llmProvider !== "tavily" && (
+                      <button
+                        onClick={runLlmThenBind}
+                        disabled={!canRun}
+                        className={[
+                          "rounded-md py-4 px-6 font-mono-label tracking-[0.2em] text-[10.5px]",
+                          "transition-all duration-200",
+                          !canRun
+                            ? "bg-[#0F1A35] text-white/40 cursor-not-allowed"
+                            : "bg-[#2563EB] text-white hover:bg-[#4F8CFE]",
+                        ].join(" ")}
+                        style={canRun ? { boxShadow: "0 0 28px -8px rgba(37,99,235,0.55)" } : {}}
+                      >
+                        {llmRunning ? "RUNNING CHAIN…" : "2. CALL + BIND + ANCHOR →"}
+                      </button>
+                    )}
+                  </div>
                   <div className="font-mono-label text-[8.5px] text-white/30 leading-relaxed">
                     {envOk && !llmApiKey
                       ? `USING ${cur?.env_key} FROM .ENV · PASTE A KEY ABOVE TO OVERRIDE`
