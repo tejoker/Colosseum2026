@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Card, PageHeader, StatusPill } from "../shared";
+import { Card, StatusPill } from "../shared";
 
 interface RequestEvent {
   id?: number;
@@ -53,19 +53,7 @@ export default function RequestsPage() {
   }, [load]);
 
   return (
-    <div className="space-y-28">
-      <PageHeader
-        eyebrow="ACTIVITY.LOG"
-        hex="0x300"
-        title={
-          <>
-            Every request to the core,{" "}
-            <em className="not-italic gradient-text font-display">in order</em>.
-          </>
-        }
-        description="Append-only stream of every admin and agent action observed by the SauronID core. Nothing here is editable; every row is also part of the next merkle anchor."
-      />
-
+    <div className="space-y-5">
       <Card title={`STREAM · ${events.length} EVENTS`} hex="0x310">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-6">

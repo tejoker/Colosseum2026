@@ -6,7 +6,6 @@ import {
   Card,
   Kpi,
   Spinner,
-  PageHeader,
   StatusPill,
   fmtNum,
 } from "../shared";
@@ -50,21 +49,8 @@ export default function ClientsPage() {
   const activeCount = data.active_count ?? clientList.length;
 
   return (
-    <div className="space-y-28">
-      <PageHeader
-        eyebrow="CLIENT.DIRECTORY"
-        hex="0x400"
-        title={
-          <>
-            The{" "}
-            <em className="not-italic gradient-text font-display">ring members</em>{" "}
-            entitled to issue.
-          </>
-        }
-        description="Partner sites that hold an authoring slot in the SauronID ring. Anonymous to each other; accountable to the core."
-      />
-
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
         <Kpi label="TOTAL CLIENTS" value={fmtNum(clientList.length)} accent="cyan" />
         <Kpi label="ACTIVE · 90D" value={fmtNum(activeCount)} accent="emerald" />
         <Kpi

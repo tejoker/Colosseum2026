@@ -6,7 +6,6 @@ import {
   Card,
   Spinner,
   Kpi,
-  PageHeader,
   StatusPill,
   fmtNum,
 } from "../shared";
@@ -71,21 +70,8 @@ export default function AnchorsPage() {
   if (!anchor) return <Spinner />;
 
   return (
-    <div className="space-y-28">
-      <PageHeader
-        eyebrow="ANCHOR.PIPELINE"
-        hex="0x200"
-        title={
-          <>
-            Receipts pinned to{" "}
-            <em className="not-italic gradient-text font-display">two chains</em>{" "}
-            in parallel.
-          </>
-        }
-        description="Every batch of agent action receipts is committed to Bitcoin via OpenTimestamps and to Solana via the Memo program. Tampering requires forging both."
-      />
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Kpi
           label="ANCHOR.BATCHES"
           value={fmtNum(anchor.agent_action_batches)}
@@ -197,7 +183,7 @@ function ChainPane({
   verifyCmd: string;
 }) {
   return (
-    <div className="bg-[#0F1A35] p-10 relative overflow-hidden rounded border border-white/5">
+    <div className="bg-[#0F1A35] p-6 relative overflow-hidden rounded border border-white/5">
       <div
         className="absolute -top-16 -right-16 w-40 h-40 rounded-full opacity-20 blur-2xl pointer-events-none"
         style={{ background: color }}

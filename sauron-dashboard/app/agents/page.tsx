@@ -5,7 +5,6 @@ import {
   sauronFetch,
   Card,
   Spinner,
-  PageHeader,
   StatusPill,
   fmtNum,
 } from "../shared";
@@ -97,20 +96,7 @@ export default function AgentsPage() {
   } as Record<Filter, number>;
 
   return (
-    <div className="space-y-28">
-      <PageHeader
-        eyebrow="MANDATE.AGENTS"
-        hex="0x100"
-        title={
-          <>
-            Bound agents.{" "}
-            <em className="not-italic gradient-text font-display">Auditable</em>{" "}
-            keys, signed every step.
-          </>
-        }
-        description="Each agent is a typed binding between a human key-image and a config digest. Revoke any one, anywhere, and its A-JWTs are dead the next call."
-      />
-
+    <div className="space-y-5">
       {/* Filter strip — clickable counter cards with brand-colored active accent */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {FILTERS.map((f) => {

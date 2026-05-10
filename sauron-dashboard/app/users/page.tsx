@@ -1,7 +1,7 @@
 "use client";
 
 import { useDash } from "../context/DashContext";
-import { Card, Kpi, PageHeader, Spinner, fmtNum } from "../shared";
+import { Card, Kpi, Spinner, fmtNum } from "../shared";
 
 export default function UsersPage() {
   const { users, loading } = useDash();
@@ -9,21 +9,8 @@ export default function UsersPage() {
   if (loading) return <Spinner />;
 
   return (
-    <div className="space-y-28">
-      <PageHeader
-        eyebrow="HUMAN.REGISTRY"
-        hex="0x500"
-        title={
-          <>
-            The{" "}
-            <em className="not-italic gradient-text font-display">key images</em>{" "}
-            behind every agent.
-          </>
-        }
-        description="Each human is a stable OPRF key-image. Agents are bound to one. Revoke the human, every agent it owns dies."
-      />
-
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
         <Kpi label="HUMANS" value={fmtNum(users.length)} accent="cyan" />
         <Kpi
           label="JURISDICTIONS"
