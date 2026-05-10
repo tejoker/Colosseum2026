@@ -46,7 +46,7 @@ function Icon({ d }: { d: string }) {
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { stats, offline } = useDash();
+  const { stats, counters, offline } = useDash();
 
   return (
     <aside
@@ -149,11 +149,11 @@ export default function Sidebar() {
                 LIVE
               </span>
             </div>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 pt-1">
-              <Stat label="CLIENTS" value={stats.total_clients} />
-              <Stat label="HUMANS"  value={stats.total_users} />
-              <Stat label="A·MIN"   value={stats.total_tokens_a_issued} />
-              <Stat label="B·SPNT"  value={stats.total_tokens_b_spent} />
+            <div className="grid grid-cols-2 gap-x-3 gap-y-3 pt-1">
+              <Stat label="CLIENTS"  value={stats.total_clients} />
+              <Stat label="HUMANS"   value={stats.total_users} />
+              <Stat label="AGENTS"   value={counters?.agents_active} />
+              <Stat label="RECEIPTS" value={counters?.receipts_total} />
             </div>
           </div>
         ) : (
