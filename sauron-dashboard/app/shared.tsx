@@ -89,6 +89,7 @@ function resolveAccent(accent?: string): string {
 function Sparkline({ data, color }: { data: number[]; color: string }) {
   const W = 44;
   const H = 24;
+  if (data.length < 2) return null;
   const min = Math.min(...data);
   const max = Math.max(...data);
   const range = max - min || 1;
@@ -157,14 +158,16 @@ export function Kpi({
         : "#4F8CFE";
 
   const hasDelta = delta !== undefined;
-  const hasSpark = sparkData && sparkData.length >= 2;
+  const hasSpark = (arr: number[] | undefined): arr is number[] =>
+    arr !== undefined && arr.length >= 2;
 
   return (
     <div className="relative glass rounded-md px-5 py-5 flex flex-col gap-3 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
       {/* Top hairline accent — sweeps in on hover */}
       <span
         aria-hidden
-        className="absolute top-0 left-0 right-0 h-px bg-[#4F8CFE] origin-left scale-x-0 group-hover:scale-x-100 transition-transform duration-500"
+        className="absolute top-0 left-0 right-0 h-px origin-left scale-x-0 group-hover:scale-x-100 transition-transform duration-500"
+        style={{ backgroundColor: accentHex }}
       />
 
       <span className="font-mono-label text-[9px] text-white/45">{label}</span>
@@ -177,7 +180,7 @@ export function Kpi({
       </span>
 
       {/* Bottom row: delta badge (left) + sparkline (right) */}
-      {(hasDelta || hasSpark) && (
+      {(hasDelta || hasSpark(sparkData)) && (
         <div className="flex items-end justify-between gap-2">
           {hasDelta ? (
             <span
@@ -196,7 +199,7 @@ export function Kpi({
           ) : (
             <span />
           )}
-          {hasSpark && <Sparkline data={sparkData!} color={accentHex} />}
+          {hasSpark(sparkData) && <Sparkline data={sparkData} color={accentHex} />}
         </div>
       )}
 
