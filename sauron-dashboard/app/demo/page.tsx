@@ -58,6 +58,8 @@ interface LlmProvider {
   label: string;
   default_model: string;
   needs_base_url: boolean;
+  env_key: string;
+  has_env_key: boolean;
 }
 
 interface LlmCallResult {
@@ -66,6 +68,7 @@ interface LlmCallResult {
   tool_call: { name: string; args: Record<string, unknown> } | null;
   text: string | null;
   usage: Record<string, unknown> | null;
+  key_source?: "body" | "env" | "";
 }
 
 /* ── Seed users ──────────────────────────────────────────────────── */
@@ -602,7 +605,14 @@ export default function DemoPage() {
                         : {}
                     }
                   >
-                    <div className="text-[12.5px] text-white/85">{p.label}</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12.5px] text-white/85">{p.label}</span>
+                      {p.has_env_key && (
+                        <span className="font-mono-label text-[7.5px] text-[#34D399]/85 bg-[#34D399]/10 border border-[#34D399]/25 rounded px-1.5 py-0.5">
+                          .ENV
+                        </span>
+                      )}
+                    </div>
                     <div className="font-mono text-[10px] text-white/35 mt-1 truncate">
                       {p.default_model || "user-chosen"}
                     </div>
@@ -614,35 +624,66 @@ export default function DemoPage() {
 
           {/* Config */}
           <div className="space-y-5 md:col-span-2">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
-              <Field label="API.KEY (PASTED, NOT STORED)" value={llmApiKey} onChange={setLlmApiKey} type="password" />
-              <Field label="MODEL" value={llmModel} onChange={setLlmModel} />
-              {llmProvider === "openai-custom" && (
-                <FieldFull label="BASE.URL (OPENAI-COMPATIBLE)" value={llmBaseUrl} onChange={setLlmBaseUrl} />
-              )}
-              <FieldFull label="USER.MESSAGE" value={llmPrompt} onChange={setLlmPrompt} multi />
-            </div>
-            <button
-              onClick={callLlm}
-              disabled={llmRunning || !llmApiKey}
-              className={[
-                "rounded-md py-4 px-6 font-mono-label tracking-[0.2em] text-[10.5px]",
-                "transition-all duration-200",
-                llmRunning || !llmApiKey
-                  ? "bg-[#0F1A35] text-white/40 cursor-not-allowed"
-                  : "bg-[#2563EB] text-white hover:bg-[#4F8CFE]",
-              ].join(" ")}
-              style={
-                !llmRunning && llmApiKey
-                  ? { boxShadow: "0 0 28px -8px rgba(37,99,235,0.55)" }
-                  : {}
-              }
-            >
-              {llmRunning ? "CALLING MODEL…" : "CALL MODEL →"}
-            </button>
-            <div className="font-mono-label text-[8.5px] text-white/30">
-              KEY IS USED ONLY FOR THIS REQUEST · NEVER PERSISTED
-            </div>
+            {(() => {
+              const cur = providers.find((p) => p.id === llmProvider);
+              const envOk = cur?.has_env_key ?? false;
+              const canRun = llmRunning ? false : (envOk || llmApiKey.length > 0);
+              return (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+                    <Field
+                      label={
+                        envOk
+                          ? `API.KEY (FOUND IN .ENV AS ${cur?.env_key} — OPTIONAL OVERRIDE)`
+                          : `API.KEY (PASTE; SET ${cur?.env_key ?? "PROVIDER_API_KEY"} IN .ENV TO SKIP)`
+                      }
+                      value={llmApiKey}
+                      onChange={setLlmApiKey}
+                      type="password"
+                    />
+                    <Field
+                      label={llmProvider === "tavily" ? "MODE" : "MODEL"}
+                      value={llmModel}
+                      onChange={setLlmModel}
+                    />
+                    {llmProvider === "openai-custom" && (
+                      <FieldFull label="BASE.URL (OPENAI-COMPATIBLE)" value={llmBaseUrl} onChange={setLlmBaseUrl} />
+                    )}
+                    <FieldFull
+                      label={llmProvider === "tavily" ? "SEARCH.QUERY" : "USER.MESSAGE"}
+                      value={llmPrompt}
+                      onChange={setLlmPrompt}
+                      multi
+                    />
+                  </div>
+                  <button
+                    onClick={callLlm}
+                    disabled={!canRun}
+                    className={[
+                      "rounded-md py-4 px-6 font-mono-label tracking-[0.2em] text-[10.5px]",
+                      "transition-all duration-200",
+                      !canRun
+                        ? "bg-[#0F1A35] text-white/40 cursor-not-allowed"
+                        : "bg-[#2563EB] text-white hover:bg-[#4F8CFE]",
+                    ].join(" ")}
+                    style={canRun ? { boxShadow: "0 0 28px -8px rgba(37,99,235,0.55)" } : {}}
+                  >
+                    {llmRunning
+                      ? llmProvider === "tavily"
+                        ? "SEARCHING…"
+                        : "CALLING MODEL…"
+                      : llmProvider === "tavily"
+                      ? "RUN TAVILY SEARCH →"
+                      : "CALL MODEL →"}
+                  </button>
+                  <div className="font-mono-label text-[8.5px] text-white/30 leading-relaxed">
+                    {envOk && !llmApiKey
+                      ? `USING ${cur?.env_key} FROM .ENV · PASTE A KEY ABOVE TO OVERRIDE`
+                      : "KEY IS USED ONLY FOR THIS REQUEST · NEVER PERSISTED"}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
 

@@ -1742,16 +1742,80 @@ async def live_demo_attack_catalog():
 #   together        → api.together.xyz (OpenAI-compatible)
 #   openai-custom   → caller-supplied base_url, OpenAI-compatible schema
 
+# Provider config — { id → {base_url, env_key, label, default_model, needs_base_url} }
+# env_key: name of the .env variable that, if present, fills the API key
+# automatically so the user doesn't have to paste it in the browser.
 _LLM_PROVIDERS = {
-    "anthropic": {"base_url": "https://api.anthropic.com/v1/messages"},
-    "openai":    {"base_url": "https://api.openai.com/v1/chat/completions"},
-    "gemini":    {"base_url": "https://generativelanguage.googleapis.com/v1beta/models"},
-    "mistral":   {"base_url": "https://api.mistral.ai/v1/chat/completions"},
-    "deepseek":  {"base_url": "https://api.deepseek.com/v1/chat/completions"},
-    "qwen":      {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"},
-    "groq":      {"base_url": "https://api.groq.com/openai/v1/chat/completions"},
-    "together":  {"base_url": "https://api.together.xyz/v1/chat/completions"},
-    "openai-custom": {"base_url": ""},  # caller supplies
+    "anthropic": {
+        "base_url": "https://api.anthropic.com/v1/messages",
+        "env_key":  "ANTHROPIC_API_KEY",
+        "label":    "Anthropic Claude",
+        "default_model": "claude-sonnet-4-5",
+        "needs_base_url": False,
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1/chat/completions",
+        "env_key":  "OPENAI_API_KEY",
+        "label":    "OpenAI / Codex",
+        "default_model": "gpt-4.1-mini",
+        "needs_base_url": False,
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/models",
+        "env_key":  "GEMINI_API_KEY",
+        "label":    "Google Gemini",
+        "default_model": "gemini-1.5-flash",
+        "needs_base_url": False,
+    },
+    "mistral": {
+        "base_url": "https://api.mistral.ai/v1/chat/completions",
+        "env_key":  "MISTRAL_API_KEY",
+        "label":    "Mistral",
+        "default_model": "mistral-medium-latest",
+        "needs_base_url": False,
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1/chat/completions",
+        "env_key":  "DEEPSEEK_API_KEY",
+        "label":    "DeepSeek",
+        "default_model": "deepseek-chat",
+        "needs_base_url": False,
+    },
+    "qwen": {
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "env_key":  "QWEN_API_KEY",
+        "label":    "Qwen (DashScope)",
+        "default_model": "qwen-plus",
+        "needs_base_url": False,
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1/chat/completions",
+        "env_key":  "GROQ_API_KEY",
+        "label":    "Groq",
+        "default_model": "llama-3.3-70b-versatile",
+        "needs_base_url": False,
+    },
+    "together": {
+        "base_url": "https://api.together.xyz/v1/chat/completions",
+        "env_key":  "TOGETHER_API_KEY",
+        "label":    "Together AI",
+        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "needs_base_url": False,
+    },
+    "tavily": {
+        "base_url": "https://api.tavily.com/search",
+        "env_key":  "TAVILY_API_KEY",
+        "label":    "Tavily Search",
+        "default_model": "search",      # not a model — Tavily has one search service
+        "needs_base_url": False,
+    },
+    "openai-custom": {
+        "base_url": "",                  # caller supplies
+        "env_key":  "OPENAI_CUSTOM_API_KEY",
+        "label":    "Custom OpenAI-compatible",
+        "default_model": "",
+        "needs_base_url": True,
+    },
 }
 
 
@@ -1759,16 +1823,57 @@ _LLM_PROVIDERS = {
 async def live_demo_llm_providers():
     return {
         "providers": [
-            {"id": "anthropic", "label": "Anthropic Claude", "default_model": "claude-sonnet-4-5", "needs_base_url": False},
-            {"id": "openai",    "label": "OpenAI / Codex",   "default_model": "gpt-4.1-mini",      "needs_base_url": False},
-            {"id": "gemini",    "label": "Google Gemini",     "default_model": "gemini-1.5-flash",  "needs_base_url": False},
-            {"id": "mistral",   "label": "Mistral",            "default_model": "mistral-medium-latest", "needs_base_url": False},
-            {"id": "deepseek",  "label": "DeepSeek",           "default_model": "deepseek-chat",     "needs_base_url": False},
-            {"id": "qwen",      "label": "Qwen (DashScope)",   "default_model": "qwen-plus",         "needs_base_url": False},
-            {"id": "groq",      "label": "Groq",               "default_model": "llama-3.3-70b-versatile", "needs_base_url": False},
-            {"id": "together",  "label": "Together AI",        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "needs_base_url": False},
-            {"id": "openai-custom", "label": "Custom OpenAI-compatible", "default_model": "", "needs_base_url": True},
+            {
+                "id":             pid,
+                "label":          spec["label"],
+                "default_model":  spec["default_model"],
+                "needs_base_url": spec["needs_base_url"],
+                "env_key":        spec["env_key"],
+                "has_env_key":    bool(os.getenv(spec["env_key"], "").strip()),
+            }
+            for pid, spec in _LLM_PROVIDERS.items()
         ]
+    }
+
+
+def _llm_call_tavily(api_key: str, query: str) -> dict:
+    """Tavily isn't a chat model — it's a search-augmented retrieval API.
+    Treated as 'one search per call'. Surfaces an answer + top results.
+    """
+    body = {
+        "api_key":          api_key,
+        "query":            query,
+        "search_depth":     "basic",
+        "include_answer":   True,
+        "max_results":      5,
+        "include_domains":  [],
+    }
+    r = httpx.post("https://api.tavily.com/search", json=body, timeout=60)
+    r.raise_for_status()
+    j = r.json()
+    answer = j.get("answer") or ""
+    results = j.get("results") or []
+    # Synthesise a tool_call shape so the dashboard can render it identically.
+    return {
+        "provider": "tavily", "model": "tavily/search",
+        "tool_call": {
+            "name": "tavily_search",
+            "args": {
+                "query": query,
+                "answer": answer,
+                "top_results": [
+                    {
+                        "title": r.get("title", ""),
+                        "url":   r.get("url", ""),
+                        "score": r.get("score", 0.0),
+                    }
+                    for r in results
+                ],
+            },
+        },
+        "text":  answer,
+        "usage": {"results": len(results)},
+        "raw":   j,
     }
 
 
@@ -1886,16 +1991,33 @@ def _llm_call_gemini(
 async def live_demo_llm_call(req: Request):
     """Call any LLM provider with a single tool definition; surface the tool_use.
 
-    Body: {provider, api_key, base_url?, model, system_prompt, user_message,
+    Body: {provider, api_key?, base_url?, model, system_prompt, user_message,
            tool_name, tool_schema}
-    Returns: {provider, model, tool_call, text, usage} (raw provider response also
-    included for transparency).
+
+    If api_key is empty, the server falls back to the env var named in the
+    provider's `env_key` (e.g. ANTHROPIC_API_KEY). This lets you set keys in
+    .env and never paste them in the browser.
+
+    Returns: {provider, model, tool_call, text, usage, key_source}.
     """
     body = await req.json()
     provider = (body.get("provider") or "").strip()
-    api_key = (body.get("api_key") or "").strip()
-    if not provider or not api_key:
-        raise HTTPException(status_code=400, detail="provider and api_key required")
+    if not provider or provider not in _LLM_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"unknown provider: {provider!r}")
+
+    spec = _LLM_PROVIDERS[provider]
+    body_key = (body.get("api_key") or "").strip()
+    env_key  = os.getenv(spec["env_key"], "").strip()
+    api_key  = body_key or env_key
+    key_source = "body" if body_key else ("env" if env_key else "")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"no api_key supplied and {spec['env_key']} is not set in the "
+                "environment. Either paste a key in the dashboard or add it to .env."
+            ),
+        )
 
     model = (body.get("model") or "").strip()
     system_prompt = body.get("system_prompt") or "You are a payment-initiating agent. When asked to pay, call the pay_merchant tool with the amount, currency and merchant_id."
@@ -1913,11 +2035,13 @@ async def live_demo_llm_call(req: Request):
     }
 
     try:
-        if provider == "anthropic":
-            res = _llm_call_anthropic(api_key, model or "claude-sonnet-4-5",
+        if provider == "tavily":
+            res = _llm_call_tavily(api_key, user_message)
+        elif provider == "anthropic":
+            res = _llm_call_anthropic(api_key, model or spec["default_model"],
                                        system_prompt, user_message, tool_name, tool_schema)
         elif provider == "gemini":
-            res = _llm_call_gemini(api_key, model or "gemini-1.5-flash",
+            res = _llm_call_gemini(api_key, model or spec["default_model"],
                                     system_prompt, user_message, tool_name, tool_schema)
         elif provider == "openai-custom":
             base = (body.get("base_url") or "").strip()
@@ -1925,19 +2049,19 @@ async def live_demo_llm_call(req: Request):
                 raise HTTPException(status_code=400, detail="base_url required for openai-custom")
             res = _llm_call_openai_compatible(base, api_key, model,
                                                system_prompt, user_message, tool_name, tool_schema)
-        elif provider in _LLM_PROVIDERS:
-            base = _LLM_PROVIDERS[provider]["base_url"]
-            res = _llm_call_openai_compatible(base, api_key, model,
-                                               system_prompt, user_message, tool_name, tool_schema)
         else:
-            raise HTTPException(status_code=400, detail=f"unknown provider: {provider}")
+            base = spec["base_url"]
+            res = _llm_call_openai_compatible(base, api_key, model or spec["default_model"],
+                                               system_prompt, user_message, tool_name, tool_schema)
+        res["key_source"] = key_source
         return res
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=502,
             detail={"error": "upstream LLM error",
                     "status": e.response.status_code,
-                    "body": e.response.text[:500]},
+                    "body": e.response.text[:500],
+                    "key_source": key_source},
         )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"upstream LLM unreachable: {e}")
