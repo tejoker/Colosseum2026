@@ -293,7 +293,7 @@ export function Kpi({
   accent?: string;
 }) {
   return (
-    <div className="relative glass rounded-md p-4 flex flex-col gap-2 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
+    <div className="relative glass rounded-md px-5 py-5 flex flex-col gap-3 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
       {/* Top hairline accent — sweeps in on hover */}
       <span
         aria-hidden
@@ -301,7 +301,7 @@ export function Kpi({
       />
       <span className="font-mono-label text-[9px] text-white/45">{label}</span>
       <span
-        className={`text-[26px] tabular-nums leading-none ${resolveAccent(accent)}`}
+        className={`text-[28px] tabular-nums leading-none ${resolveAccent(accent)}`}
         style={{ fontFamily: "Satoshi, system-ui, sans-serif", fontWeight: 500, letterSpacing: "-0.025em" }}
       >
         {value}
@@ -393,12 +393,12 @@ export function Card({
     <div
       className={[
         bare ? "" : "glass",
-        "relative rounded-md p-5",
+        "relative rounded-md p-7",
         className ?? "",
       ].join(" ")}
     >
       {title && (
-        <div className="mb-4">
+        <div className="mb-6">
           <MonoLabel label={title} hex={hex} />
         </div>
       )}

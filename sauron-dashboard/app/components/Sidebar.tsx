@@ -26,6 +26,8 @@ const LINKS = [
     icon: "M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" },
   { href: "/users",    label: "Humans",    hex: "0x006",
     icon: "M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 7a4 4 0 110-8 4 4 0 010 8zM23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" },
+  { href: "/demo",     label: "Live Demo", hex: "0x009",
+    icon: "M13 10V3L4 14h7v7l9-11h-7z" },
 ];
 
 function Icon({ d }: { d: string }) {

@@ -241,7 +241,7 @@ export default function OverviewPage() {
       )}
 
       {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         <Kpi
           label="ACTIVE AGENTS"
           value={fmtNum(activeAgents)}
@@ -497,7 +497,7 @@ function Meta({ label, value }: { label: string; value: string }) {
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-2 font-normal">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-3 font-normal">
       {children}
     </th>
   );
@@ -514,7 +514,7 @@ function Td({
   dim?: boolean;
   muted?: boolean;
 }) {
-  const base = "px-2 py-2 align-middle whitespace-nowrap";
+  const base = "px-2 py-3 align-middle whitespace-nowrap";
   let cls = "text-white/85";
   if (mono) cls = "font-mono text-[11.5px] text-white/85";
   if (mono && dim) cls = "font-mono text-[11.5px] text-white/45";

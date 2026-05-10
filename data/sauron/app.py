@@ -1506,6 +1506,112 @@ async def live_ping():
         )
 
 
+# ─── Interactive demo ──────────────────────────────────────────────────────
+# /api/live/demo/run executes the full simulate_real_actions.py flow against
+# the live core and returns a structured summary. The dashboard's /demo page
+# calls this. The script is the source of truth for the agent-binding flow,
+# so the demo is provably what production looks like.
+# ──────────────────────────────────────────────────────────────────────────
+
+import subprocess as _subprocess  # noqa: E402
+import re as _re  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SIMULATE_SCRIPT = _REPO_ROOT / "scripts" / "simulate_real_actions.py"
+
+
+def _parse_simulate_output(stdout: str) -> dict:
+    """Pull structured info out of the script's print statements."""
+    agent_id = None
+    digest = None
+    receipts: list[dict] = []
+    anchor_id = None
+    for line in stdout.splitlines():
+        m = _re.search(r"agent_id=(agt_\w+)", line)
+        if m:
+            agent_id = m.group(1)
+            continue
+        m = _re.search(r"config_digest=(sha256:\w+)", line)
+        if m:
+            digest = m.group(1).rstrip("…")
+            continue
+        m = _re.search(r"receipt_id=(ar_\w+)", line)
+        if m:
+            receipts.append({"receipt_id": m.group(1)})
+            continue
+        m = _re.search(r"action_hash=(\w+)", line)
+        if m and receipts:
+            receipts[-1]["action_hash"] = m.group(1).rstrip("…")
+            continue
+        m = _re.search(r"anchor_id['\"]?:\s*['\"]?(aaa_\w+)", line)
+        if m:
+            anchor_id = m.group(1)
+    return {
+        "agent_id": agent_id,
+        "config_digest": digest,
+        "receipts": receipts,
+        "anchor_id": anchor_id,
+    }
+
+
+@app.post("/api/live/demo/run")
+async def live_demo_run(req: Request):
+    """Run the full agent-binding flow end-to-end. Body: {n_actions, email, password}."""
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    n_actions = max(1, min(int(body.get("n_actions", 1) or 1), 5))
+    email = (body.get("email") or "alice@sauron.dev").strip()
+    password = (body.get("password") or "pass_alice").strip()
+
+    if not _SIMULATE_SCRIPT.exists():
+        raise HTTPException(status_code=500, detail=f"script missing: {_SIMULATE_SCRIPT}")
+
+    cmd = [
+        "python3", str(_SIMULATE_SCRIPT),
+        "--n-actions", str(n_actions),
+        "--email", email,
+        "--password", password,
+    ]
+    env = os.environ.copy()
+    env.setdefault("SAURON_CORE_URL", _live.SAURON_URL)
+    env.setdefault("SAURON_ADMIN_KEY", os.getenv("SAURON_ADMIN_KEY", ADMIN_KEY))
+    env.setdefault(
+        "SAURONID_AGENT_ACTION_TOOL",
+        str(_REPO_ROOT / "core" / "target" / "release" / "agent-action-tool"),
+    )
+
+    try:
+        proc = _subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, env=env, cwd=str(_REPO_ROOT)
+        )
+    except _subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="demo script timeout (>120s)")
+
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "ok": False,
+                "error": "simulate_real_actions.py exited non-zero",
+                "stderr": proc.stderr[-2000:],
+                "stdout_tail": proc.stdout[-2000:],
+            },
+        )
+
+    parsed = _parse_simulate_output(proc.stdout)
+    anchor = _live.fetch_anchor_status()
+    return {
+        "ok": True,
+        "n_actions_requested": n_actions,
+        "user": email,
+        **parsed,
+        "anchor_status": anchor,
+        "stdout": proc.stdout,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8002, reload=False)
