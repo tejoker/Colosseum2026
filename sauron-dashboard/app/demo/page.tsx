@@ -53,6 +53,21 @@ interface AttackResult {
   detail: string;
 }
 
+interface LlmProvider {
+  id: string;
+  label: string;
+  default_model: string;
+  needs_base_url: boolean;
+}
+
+interface LlmCallResult {
+  provider: string;
+  model: string;
+  tool_call: { name: string; args: Record<string, unknown> } | null;
+  text: string | null;
+  usage: Record<string, unknown> | null;
+}
+
 /* ── Seed users ──────────────────────────────────────────────────── */
 
 const SEED_USERS = [
@@ -113,12 +128,71 @@ export default function DemoPage() {
   const [attackResults, setAttackResults] = useState<Record<string, AttackResult>>({});
   const [attackInFlight, setAttackInFlight] = useState<string | null>(null);
 
+  // LLM
+  const [providers, setProviders] = useState<LlmProvider[]>([]);
+  const [llmProvider, setLlmProvider] = useState("anthropic");
+  const [llmApiKey, setLlmApiKey] = useState("");
+  const [llmBaseUrl, setLlmBaseUrl] = useState("");
+  const [llmModel, setLlmModel] = useState("");
+  const [llmPrompt, setLlmPrompt] = useState(
+    "Send 15.00 EUR to mch_demo_payments for invoice INV-2026-001."
+  );
+  const [llmResult, setLlmResult] = useState<LlmCallResult | null>(null);
+  const [llmRunning, setLlmRunning] = useState(false);
+  const [llmErr, setLlmErr] = useState<string | null>(null);
+
   useEffect(() => {
     fetch(`${DASH_API}/api/live/demo/attacks`)
       .then((r) => r.json())
       .then((j) => setCatalog(j.attacks ?? []))
       .catch(() => {});
+    fetch(`${DASH_API}/api/live/demo/llm-providers`)
+      .then((r) => r.json())
+      .then((j: { providers: LlmProvider[] }) => {
+        setProviders(j.providers ?? []);
+        const def = j.providers?.find((p) => p.id === "anthropic");
+        if (def) setLlmModel(def.default_model);
+      })
+      .catch(() => {});
   }, []);
+
+  function selectProvider(id: string) {
+    setLlmProvider(id);
+    const p = providers.find((x) => x.id === id);
+    if (p) setLlmModel(p.default_model);
+    if (id !== "openai-custom") setLlmBaseUrl("");
+    setLlmResult(null);
+    setLlmErr(null);
+  }
+
+  async function callLlm() {
+    setLlmRunning(true);
+    setLlmResult(null);
+    setLlmErr(null);
+    try {
+      const res = await fetch(`${DASH_API}/api/live/demo/llm-call`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: llmProvider,
+          api_key: llmApiKey,
+          base_url: llmBaseUrl,
+          model: llmModel,
+          user_message: llmPrompt,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setLlmErr(JSON.stringify(j.detail ?? j, null, 2));
+        return;
+      }
+      setLlmResult((await res.json()) as LlmCallResult);
+    } catch (e) {
+      setLlmErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLlmRunning(false);
+    }
+  }
 
   function pushStep(next: Step) {
     stepsRef.current = [...stepsRef.current, next];
@@ -499,6 +573,135 @@ export default function DemoPage() {
         </>
       )}
 
+      {/* ── Real LLM call (multi-provider) ─────────────────────── */}
+
+      <Card title="REAL.LLM.CALL" hex="0x915">
+        <p className="text-[13px] text-white/55 leading-[1.7] max-w-2xl mb-8">
+          Pick any provider, paste your key, hit RUN. The dashboard sends a
+          short prompt + one tool definition (<code className="text-white/75">pay_merchant</code>) to the model
+          and surfaces the structured tool call. Pair this with the binding
+          flow above to see the real round-trip: model proposes → SauronID
+          ratifies + signs + anchors.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
+          {/* Provider */}
+          <div className="space-y-3 md:col-span-1">
+            <div className="font-mono-label text-[9px] text-white/45">PROVIDER</div>
+            <div className="grid grid-cols-1 gap-2 max-h-[260px] overflow-y-auto pr-1">
+              {providers.map((p) => {
+                const active = llmProvider === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => selectProvider(p.id)}
+                    className="bg-[#0F1A35] py-3 px-4 transition-colors text-left rounded border border-white/5"
+                    style={
+                      active
+                        ? { boxShadow: "inset 2px 0 0 0 #4F8CFE, 0 0 18px -10px rgba(79,140,254,0.6)" }
+                        : {}
+                    }
+                  >
+                    <div className="text-[12.5px] text-white/85">{p.label}</div>
+                    <div className="font-mono text-[10px] text-white/35 mt-1 truncate">
+                      {p.default_model || "user-chosen"}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Config */}
+          <div className="space-y-5 md:col-span-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+              <Field label="API.KEY (PASTED, NOT STORED)" value={llmApiKey} onChange={setLlmApiKey} type="password" />
+              <Field label="MODEL" value={llmModel} onChange={setLlmModel} />
+              {llmProvider === "openai-custom" && (
+                <FieldFull label="BASE.URL (OPENAI-COMPATIBLE)" value={llmBaseUrl} onChange={setLlmBaseUrl} />
+              )}
+              <FieldFull label="USER.MESSAGE" value={llmPrompt} onChange={setLlmPrompt} multi />
+            </div>
+            <button
+              onClick={callLlm}
+              disabled={llmRunning || !llmApiKey}
+              className={[
+                "rounded-md py-4 px-6 font-mono-label tracking-[0.2em] text-[10.5px]",
+                "transition-all duration-200",
+                llmRunning || !llmApiKey
+                  ? "bg-[#0F1A35] text-white/40 cursor-not-allowed"
+                  : "bg-[#2563EB] text-white hover:bg-[#4F8CFE]",
+              ].join(" ")}
+              style={
+                !llmRunning && llmApiKey
+                  ? { boxShadow: "0 0 28px -8px rgba(37,99,235,0.55)" }
+                  : {}
+              }
+            >
+              {llmRunning ? "CALLING MODEL…" : "CALL MODEL →"}
+            </button>
+            <div className="font-mono-label text-[8.5px] text-white/30">
+              KEY IS USED ONLY FOR THIS REQUEST · NEVER PERSISTED
+            </div>
+          </div>
+        </div>
+
+        {llmErr && (
+          <pre className="font-mono text-[11px] text-[#F87171]/85 whitespace-pre-wrap leading-relaxed bg-[#06090F] border border-[#F87171]/20 rounded p-4 mb-6">
+            {llmErr}
+          </pre>
+        )}
+
+        {llmResult && (
+          <div className="space-y-5 pt-6 border-t border-white/5">
+            <div className="flex items-center gap-4">
+              <StatusPill
+                status={llmResult.tool_call ? "ok" : "warn"}
+                label={llmResult.tool_call ? "TOOL.CALL" : "NO.TOOL.USE"}
+              />
+              <span className="font-mono-label text-[9px] text-white/45">
+                {llmResult.provider.toUpperCase()} · {llmResult.model}
+              </span>
+            </div>
+            {llmResult.tool_call ? (
+              <div className="bg-[#06090F] border border-white/5 rounded p-5">
+                <div className="font-mono-label text-[9px] text-white/45 mb-3">
+                  PROPOSED.ACTION
+                </div>
+                <div className="font-mono text-[12px] text-[#4F8CFE] mb-3">
+                  {llmResult.tool_call.name}(
+                </div>
+                <div className="ml-4 space-y-1">
+                  {Object.entries(llmResult.tool_call.args).map(([k, v]) => (
+                    <div key={k} className="font-mono text-[11.5px]">
+                      <span className="text-white/45">{k}: </span>
+                      <span className="text-white/85">{JSON.stringify(v)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="font-mono text-[12px] text-[#4F8CFE] mt-3">)</div>
+                <div className="font-mono-label text-[8.5px] text-white/30 tracking-[0.18em] mt-5 pt-4 border-t border-white/5 leading-relaxed">
+                  AT THIS POINT SAURONID WOULD SIGN THIS WITH THE AGENT&apos;S
+                  RING + POP KEYS, ENFORCE THE INTENT MAX-AMOUNT + ALLOWLIST,
+                  AND ANCHOR THE RECEIPT. RUN THE BINDING FLOW ABOVE TO SEE THAT.
+                </div>
+              </div>
+            ) : (
+              llmResult.text && (
+                <pre className="font-mono text-[11.5px] text-white/70 whitespace-pre-wrap leading-relaxed bg-[#06090F] border border-white/5 rounded p-5">
+                  {llmResult.text}
+                </pre>
+              )
+            )}
+            {llmResult.usage && (
+              <div className="font-mono-label text-[8.5px] text-white/35 tracking-[0.18em]">
+                USAGE · {Object.entries(llmResult.usage).map(([k, v]) => `${k}=${v}`).join(" · ")}
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
       {/* ── Attack panel ─────────────────────────────────────── */}
 
       <Card title="ATTACK.SIMULATOR" hex="0x920">
@@ -644,16 +847,18 @@ function Field({
   label,
   value,
   onChange,
+  type = "text",
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  type?: "text" | "password";
 }) {
   return (
     <label className="block">
       <div className="font-mono-label text-[9px] text-white/45 mb-2">{label}</div>
       <input
-        type="text"
+        type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="w-full bg-[#06090F] border border-white/10 rounded px-3 py-2.5 text-[12.5px] text-white font-mono focus:outline-none focus:border-[#4F8CFE]/50 focus:bg-[#0A1128] transition-colors"

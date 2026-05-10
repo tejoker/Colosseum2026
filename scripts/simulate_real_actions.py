@@ -410,6 +410,30 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "currency": currency,
             })
 
+        with em.step(f"egress.{i}", "/agent/egress/log (signed outbound report)") as s:
+            egress_body = {
+                "agent_id": bundle.agent_id,
+                "target_host": "api.merchant-demo.example",
+                "target_path": f"/charge/{payment_ref}",
+                "method": "POST",
+                "body_hash_hex": hashlib.sha256(
+                    json.dumps({"amount": amount_minor, "currency": currency},
+                               separators=(",", ":")).encode()
+                ).hexdigest(),
+                "status_code": 200,
+            }
+            body_bytes = json.dumps(egress_body, separators=(",", ":")).encode("utf-8")
+            sig_h = bundle.sign_headers("POST", "/agent/egress/log", body_bytes)
+            r = requests.post(
+                f"{CORE_URL}/agent/egress/log",
+                headers={"content-type": "application/json", **sig_h},
+                data=body_bytes, timeout=10,
+            )
+            if not r.ok:
+                raise RuntimeError(f"egress/log: {r.status_code} {r.text}")
+            s.add(target=egress_body["target_host"] + egress_body["target_path"],
+                  egress_id=r.json().get("id"))
+
     with em.step("anchor", "/admin/anchor/agent-actions/run") as s:
         run = admin_post("/admin/anchor/agent-actions/run")
         s.add(anchor_id=run.get("anchor_id") or "—")
@@ -453,6 +477,14 @@ ATTACKS = {
     "forged_agent_id": {
         "label": "Sign with one agent's PoP, claim a different agent_id",
         "expect": "401 — PoP / agent_id mismatch",
+    },
+    "revocation": {
+        "label": "Use an agent's A-JWT after the agent was revoked",
+        "expect": "valid=false — Agent has been revoked",
+    },
+    "delegation_escalation": {
+        "label": "Child agent registers with scope NOT in parent intent",
+        "expect": "400 — child scope must be subset of parent",
     },
 }
 
@@ -560,6 +592,79 @@ def cmd_attack(args: argparse.Namespace) -> int:
             blocked = not r.ok
             status = r.status_code
             detail = r.text[:160]
+            s.add(status=status, blocked=blocked, detail=detail)
+
+    elif args.kind == "revocation":
+        # Provision agent, mint A-JWT + PoP, REVOKE the agent, then try to use the A-JWT
+        ajwt, jti = issue_ajwt(bundle)
+        with em.step("attack.revoke", "DELETE /agent/{id}") as s:
+            r = requests.delete(
+                f"{CORE_URL}/agent/{bundle.agent_id}",
+                headers={"x-sauron-session": bundle.session},
+                timeout=10,
+            )
+            s.add(status=r.status_code)
+        with em.step("attack.use_revoked", "POST /agent/verify with revoked agent's A-JWT") as s:
+            # Try a PoP-bound verify — same flow as replay_jti but on a revoked agent
+            r = post_json("/agent/pop/challenge", {"agent_id": bundle.agent_id},
+                          {"x-sauron-session": bundle.session})
+            # /agent/pop/challenge itself may already reject revoked agents
+            if r.ok:
+                pj = r.json()
+                pop_jws = make_pop_jws(bundle.pop_sk, pj["challenge"])
+                r2 = post_json("/agent/verify", {
+                    "ajwt": ajwt, "pop_challenge_id": pj["pop_challenge_id"],
+                    "pop_jws": pop_jws, "consume_jti": True,
+                })
+                j = r2.json()
+                blocked = (j.get("valid") is False)
+                status = r2.status_code
+                detail = j.get("error") or "unexpected: agent appears not revoked"
+            else:
+                # PoP challenge endpoint refused first
+                blocked = True
+                status = r.status_code
+                detail = r.text[:160]
+            s.add(status=status, blocked=blocked, detail=detail)
+
+    elif args.kind == "delegation_escalation":
+        # Try to register a CHILD agent that escalates scope beyond parent's intent
+        # bundle is the parent (intent.scope=["payment_initiation"]).
+        em.emit("attack.note", note="parent agent intent is payment_initiation only")
+        with em.step("attack.escalate", "/agent/register child with extra scope") as s:
+            child_intent = {
+                "scope": ["payment_initiation", "admin_takeover", "exfiltrate"],
+                "maxAmount": 100.0,
+                "currency": "EUR",
+                "constraints": {"merchant_allowlist": ["mch_demo_payments"]},
+            }
+            ring2 = keygen_ring()
+            pop2 = Ed25519PrivateKey.generate()
+            pop2_pub = pop2.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+            body = {
+                "human_key_image": bundle.human_ki,
+                "agent_type": "llm",
+                "checksum_inputs": {
+                    "model_id": "claude-opus-4-7",
+                    "system_prompt": f"escalating child {time.time()}",
+                    "tools": ["search"],
+                },
+                "agent_checksum": "",
+                "intent_json": json.dumps(child_intent, separators=(",", ":")),
+                "public_key_hex": ring2["public_key_hex"],
+                "ring_key_image_hex": ring2["ring_key_image_hex"],
+                "pop_jkt": b64u(hashlib.sha256(pop2_pub).digest()),
+                "pop_public_key_b64u": b64u(pop2_pub),
+                "ttl_secs": 3600,
+                "parent_agent_id": bundle.agent_id,    # delegate from bundle
+            }
+            r = post_json("/agent/register", body, {"x-sauron-session": bundle.session})
+            blocked = not r.ok
+            status = r.status_code
+            detail = r.text[:200]
             s.add(status=status, blocked=blocked, detail=detail)
 
     elif args.kind == "forged_agent_id":

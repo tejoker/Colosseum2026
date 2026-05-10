@@ -1718,8 +1718,229 @@ async def live_demo_attack_catalog():
              "expect": "401 — config drift"},
             {"kind": "forged_agent_id",  "label": "Sign with one agent's PoP, claim a different agent_id",
              "expect": "401 — config drift / PoP mismatch"},
+            {"kind": "revocation",       "label": "Use an agent's A-JWT after revocation",
+             "expect": "401 — Agent has been revoked"},
+            {"kind": "delegation_escalation", "label": "Child agent claims scope outside parent intent",
+             "expect": "400 — child scope must be subset of parent"},
         ]
     }
+
+
+# ─── Multi-provider LLM call ───────────────────────────────────────────────
+# /api/live/demo/llm-call accepts {provider, api_key, base_url?, model,
+# system_prompt, user_message, tool_name, tool_schema}. It dispatches to the
+# right provider format (Anthropic / OpenAI-compatible / Gemini), parses the
+# tool-use response, and returns a normalised payload the dashboard can show.
+# Providers covered:
+#   anthropic       → api.anthropic.com /v1/messages
+#   openai          → api.openai.com /v1/chat/completions  (also: Codex, others)
+#   gemini          → generativelanguage.googleapis.com (functionDeclarations)
+#   mistral         → api.mistral.ai (OpenAI-compatible)
+#   deepseek        → api.deepseek.com (OpenAI-compatible)
+#   qwen            → dashscope.aliyuncs.com (OpenAI-compatible mode)
+#   groq            → api.groq.com (OpenAI-compatible)
+#   together        → api.together.xyz (OpenAI-compatible)
+#   openai-custom   → caller-supplied base_url, OpenAI-compatible schema
+
+_LLM_PROVIDERS = {
+    "anthropic": {"base_url": "https://api.anthropic.com/v1/messages"},
+    "openai":    {"base_url": "https://api.openai.com/v1/chat/completions"},
+    "gemini":    {"base_url": "https://generativelanguage.googleapis.com/v1beta/models"},
+    "mistral":   {"base_url": "https://api.mistral.ai/v1/chat/completions"},
+    "deepseek":  {"base_url": "https://api.deepseek.com/v1/chat/completions"},
+    "qwen":      {"base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"},
+    "groq":      {"base_url": "https://api.groq.com/openai/v1/chat/completions"},
+    "together":  {"base_url": "https://api.together.xyz/v1/chat/completions"},
+    "openai-custom": {"base_url": ""},  # caller supplies
+}
+
+
+@app.get("/api/live/demo/llm-providers")
+async def live_demo_llm_providers():
+    return {
+        "providers": [
+            {"id": "anthropic", "label": "Anthropic Claude", "default_model": "claude-sonnet-4-5", "needs_base_url": False},
+            {"id": "openai",    "label": "OpenAI / Codex",   "default_model": "gpt-4.1-mini",      "needs_base_url": False},
+            {"id": "gemini",    "label": "Google Gemini",     "default_model": "gemini-1.5-flash",  "needs_base_url": False},
+            {"id": "mistral",   "label": "Mistral",            "default_model": "mistral-medium-latest", "needs_base_url": False},
+            {"id": "deepseek",  "label": "DeepSeek",           "default_model": "deepseek-chat",     "needs_base_url": False},
+            {"id": "qwen",      "label": "Qwen (DashScope)",   "default_model": "qwen-plus",         "needs_base_url": False},
+            {"id": "groq",      "label": "Groq",               "default_model": "llama-3.3-70b-versatile", "needs_base_url": False},
+            {"id": "together",  "label": "Together AI",        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "needs_base_url": False},
+            {"id": "openai-custom", "label": "Custom OpenAI-compatible", "default_model": "", "needs_base_url": True},
+        ]
+    }
+
+
+def _llm_call_anthropic(
+    api_key: str, model: str, system_prompt: str,
+    user_message: str, tool_name: str, tool_schema: dict,
+) -> dict:
+    body = {
+        "model": model,
+        "max_tokens": 1024,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_message}],
+        "tools": [{
+            "name": tool_name,
+            "description": f"Execute the {tool_name} action through SauronID.",
+            "input_schema": tool_schema,
+        }],
+    }
+    r = httpx.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json=body, timeout=60,
+    )
+    r.raise_for_status()
+    j = r.json()
+    tool_use = next((c for c in (j.get("content") or []) if c.get("type") == "tool_use"), None)
+    text = "".join(c.get("text", "") for c in (j.get("content") or []) if c.get("type") == "text")
+    return {
+        "provider": "anthropic", "model": model,
+        "tool_call": tool_use and {"name": tool_use["name"], "args": tool_use["input"]},
+        "text": text, "usage": j.get("usage"), "raw": j,
+    }
+
+
+def _llm_call_openai_compatible(
+    base_url: str, api_key: str, model: str, system_prompt: str,
+    user_message: str, tool_name: str, tool_schema: dict,
+) -> dict:
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_message},
+        ],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "description": f"Execute the {tool_name} action through SauronID.",
+                "parameters": tool_schema,
+            },
+        }],
+        "tool_choice": "auto",
+    }
+    r = httpx.post(
+        base_url,
+        headers={"authorization": f"Bearer {api_key}", "content-type": "application/json"},
+        json=body, timeout=60,
+    )
+    r.raise_for_status()
+    j = r.json()
+    msg = (j.get("choices") or [{}])[0].get("message") or {}
+    tool_calls = msg.get("tool_calls") or []
+    tool = tool_calls[0] if tool_calls else None
+    args = None
+    if tool:
+        try:
+            args = json.loads(tool["function"]["arguments"])
+        except Exception:
+            args = {"_raw": tool["function"].get("arguments")}
+    return {
+        "provider": "openai-compatible", "model": model,
+        "tool_call": tool and {"name": tool["function"]["name"], "args": args},
+        "text": msg.get("content"),
+        "usage": j.get("usage"), "raw": j,
+    }
+
+
+def _llm_call_gemini(
+    api_key: str, model: str, system_prompt: str,
+    user_message: str, tool_name: str, tool_schema: dict,
+) -> dict:
+    base = "https://generativelanguage.googleapis.com/v1beta/models"
+    url = f"{base}/{model}:generateContent?key={api_key}"
+    body = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+        "tools": [{
+            "function_declarations": [{
+                "name": tool_name,
+                "description": f"Execute the {tool_name} action through SauronID.",
+                "parameters": tool_schema,
+            }],
+        }],
+        "tool_config": {"function_calling_config": {"mode": "AUTO"}},
+    }
+    r = httpx.post(url, json=body, timeout=60)
+    r.raise_for_status()
+    j = r.json()
+    parts = (((j.get("candidates") or [{}])[0]).get("content") or {}).get("parts") or []
+    fn = next((p for p in parts if p.get("functionCall")), None)
+    text = "".join(p.get("text", "") for p in parts if "text" in p)
+    return {
+        "provider": "gemini", "model": model,
+        "tool_call": fn and {"name": fn["functionCall"]["name"], "args": fn["functionCall"].get("args", {})},
+        "text": text, "usage": j.get("usageMetadata"), "raw": j,
+    }
+
+
+@app.post("/api/live/demo/llm-call")
+async def live_demo_llm_call(req: Request):
+    """Call any LLM provider with a single tool definition; surface the tool_use.
+
+    Body: {provider, api_key, base_url?, model, system_prompt, user_message,
+           tool_name, tool_schema}
+    Returns: {provider, model, tool_call, text, usage} (raw provider response also
+    included for transparency).
+    """
+    body = await req.json()
+    provider = (body.get("provider") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    if not provider or not api_key:
+        raise HTTPException(status_code=400, detail="provider and api_key required")
+
+    model = (body.get("model") or "").strip()
+    system_prompt = body.get("system_prompt") or "You are a payment-initiating agent. When asked to pay, call the pay_merchant tool with the amount, currency and merchant_id."
+    user_message = body.get("user_message") or "Send 15.00 EUR to mch_demo_payments for invoice INV-2026-001."
+    tool_name = body.get("tool_name") or "pay_merchant"
+    tool_schema = body.get("tool_schema") or {
+        "type": "object",
+        "properties": {
+            "amount":      {"type": "number",  "description": "Amount in major units"},
+            "currency":    {"type": "string",  "description": "ISO-4217 currency code (e.g. EUR)"},
+            "merchant_id": {"type": "string",  "description": "Merchant identifier"},
+            "memo":        {"type": "string",  "description": "Free-form memo / reference"},
+        },
+        "required": ["amount", "currency", "merchant_id"],
+    }
+
+    try:
+        if provider == "anthropic":
+            res = _llm_call_anthropic(api_key, model or "claude-sonnet-4-5",
+                                       system_prompt, user_message, tool_name, tool_schema)
+        elif provider == "gemini":
+            res = _llm_call_gemini(api_key, model or "gemini-1.5-flash",
+                                    system_prompt, user_message, tool_name, tool_schema)
+        elif provider == "openai-custom":
+            base = (body.get("base_url") or "").strip()
+            if not base:
+                raise HTTPException(status_code=400, detail="base_url required for openai-custom")
+            res = _llm_call_openai_compatible(base, api_key, model,
+                                               system_prompt, user_message, tool_name, tool_schema)
+        elif provider in _LLM_PROVIDERS:
+            base = _LLM_PROVIDERS[provider]["base_url"]
+            res = _llm_call_openai_compatible(base, api_key, model,
+                                               system_prompt, user_message, tool_name, tool_schema)
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown provider: {provider}")
+        return res
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "upstream LLM error",
+                    "status": e.response.status_code,
+                    "body": e.response.text[:500]},
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"upstream LLM unreachable: {e}")
 
 
 @app.post("/api/live/demo/run")
