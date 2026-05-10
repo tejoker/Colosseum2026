@@ -1,17 +1,21 @@
 import { NextResponse, NextRequest } from "next/server";
+import { adminKeyOrResponse, coreApiUrl, requireAdminProxyAuth } from "../../_adminProxy";
 
 /**
  * Server-side proxy for all /admin/* endpoints.
  * Injects SAURON_ADMIN_KEY — never exposed to the browser.
  */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  const authError = requireAdminProxyAuth(req);
+  if (authError) return authError;
+
   const { path } = await params;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-  const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
-  const upstream = `${apiUrl}/admin/${path.join("/")}`;
+  const adminKey = adminKeyOrResponse();
+  if (typeof adminKey !== "string") return adminKey;
+  const upstream = `${coreApiUrl()}/admin/${path.join("/")}`;
 
   try {
     const res = await fetch(upstream, { headers: { "x-admin-key": adminKey } });
@@ -26,10 +30,13 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  const authError = requireAdminProxyAuth(req);
+  if (authError) return authError;
+
   const { path } = await params;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-  const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
-  const upstream = `${apiUrl}/admin/${path.join("/")}`;
+  const adminKey = adminKeyOrResponse();
+  if (typeof adminKey !== "string") return adminKey;
+  const upstream = `${coreApiUrl()}/admin/${path.join("/")}`;
   const body = await req.text();
 
   try {

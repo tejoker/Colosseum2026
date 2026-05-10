@@ -59,17 +59,19 @@ export default function AnomaliesPage() {
   const sevMap: Record<string, number> = {};
   (data.by_severity ?? []).forEach((s) => { sevMap[s.severity] = s.count; });
 
-  const filtered = filter === "all" ? data.events : data.events.filter((e) => e.severity === filter);
+  const events = data.events ?? [];
+  const filtered = filter === "all" ? events : events.filter((e) => e.severity === filter);
 
-  const typeLabels = data.by_type.map((t) => t.anomaly_type);
-  const typeValues = data.by_type.map((t) => t.count);
+  const byType = data.by_type ?? [];
+  const typeLabels = byType.map((t) => t.anomaly_type);
+  const typeValues = byType.map((t) => t.count);
 
   return (
     <div className="space-y-6 max-w-[1200px]">
       <h1 className="text-lg font-bold text-neutral-900">Anomalies</h1>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <Kpi label="Total Anomalies" value={fmtNum(data.events.length)} />
+        <Kpi label="Total Anomalies" value={fmtNum(events.length)} />
         <Kpi label="High Severity" value={fmtNum(sevMap["high"] || 0)} accent="text-red-600" />
         {ml && <Kpi label="ML Detected" value={fmtNum(ml.total)} accent="text-purple-600" />}
         {ml?.precision_proxy != null && <Kpi label="ML Precision" value={`${(ml.precision_proxy * 100).toFixed(1)}%`} />}

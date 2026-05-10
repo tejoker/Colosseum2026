@@ -1,63 +1,103 @@
 "use client";
 
 import { useDash } from "../context/DashContext";
-import { Kpi, Card, fmtNum } from "../shared";
+import { Card, Kpi, PageHeader, Spinner, fmtNum } from "../shared";
 
 export default function UsersPage() {
   const { users, loading } = useDash();
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="w-8 h-8 border-4 border-neutral-900 border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
+  if (loading) return <Spinner />;
 
   return (
-    <div className="space-y-6 max-w-[1200px]">
-      <h1 className="text-lg font-bold text-neutral-900">User Registry</h1>
+    <div className="space-y-7">
+      <PageHeader
+        eyebrow="HUMAN.REGISTRY"
+        hex="0x500"
+        title={
+          <>
+            The{" "}
+            <em className="not-italic gradient-text font-display">key images</em>{" "}
+            behind every agent.
+          </>
+        }
+        description="Each human is a stable OPRF key-image. Agents are bound to one. Revoke the human, every agent it owns dies."
+      />
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <Kpi label="Total Users" value={fmtNum(users.length)} />
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <Kpi label="HUMANS" value={fmtNum(users.length)} accent="cyan" />
+        <Kpi
+          label="JURISDICTIONS"
+          value={fmtNum(new Set(users.map((u) => u.nationality)).size)}
+          sub="DISTINCT NATIONALITIES"
+        />
+        <Kpi
+          label="WITH NATIONALITY"
+          value={fmtNum(users.filter((u) => u.nationality).length)}
+          sub="OPRF-VERIFIED"
+        />
       </div>
 
-      <Card>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-neutral-200 text-neutral-400">
-                <th className="text-left py-2 font-medium">First Name</th>
-                <th className="text-left py-2 font-medium">Last Name</th>
-                <th className="text-left py-2 font-medium">Nationality</th>
-                <th className="text-left py-2 font-medium">Key Image</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((u, i) => (
-                <tr key={i} className="border-b border-neutral-100 hover:bg-neutral-50">
-                  <td className="py-2 font-medium text-neutral-700">{u.first_name}</td>
-                  <td className="py-2 text-neutral-700">{u.last_name}</td>
-                  <td className="py-2 text-neutral-500">{u.nationality}</td>
-                  <td className="py-2 font-mono text-neutral-400 text-[10px]">
-                    {u.key_image_hex?.slice(0, 16)}...
-                  </td>
+      <Card title={`USER.LIST · ${users.length}`} hex="0x510">
+        <div className="overflow-x-auto -mx-2">
+          {users.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-2">
+              <span className="font-mono-label text-[9.5px] text-white/35">EMPTY</span>
+              <p className="text-[12px] text-white/45">No users registered yet.</p>
+            </div>
+          ) : (
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left">
+                  <Th>FIRST NAME</Th>
+                  <Th>LAST NAME</Th>
+                  <Th>NATIONALITY</Th>
+                  <Th>KEY.IMAGE</Th>
                 </tr>
-              ))}
-              {users.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="py-8 text-center text-neutral-400">
-                    No users registered
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <div className="mt-3 text-[10px] text-neutral-400 text-right">
-          {users.length} users
+              </thead>
+              <tbody>
+                {users.map((u, i) => (
+                  <tr key={u.key_image_hex ?? i} className="border-t border-white/[0.04]">
+                    <Td>{u.first_name}</Td>
+                    <Td>{u.last_name}</Td>
+                    <Td muted>{u.nationality}</Td>
+                    <Td mono dim>{u.key_image_hex?.slice(0, 18)}…</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </Card>
     </div>
+  );
+}
+
+function Th({ children }: { children: React.ReactNode }) {
+  return (
+    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-2 font-normal">
+      {children}
+    </th>
+  );
+}
+
+function Td({
+  children,
+  mono,
+  dim,
+  muted,
+}: {
+  children: React.ReactNode;
+  mono?: boolean;
+  dim?: boolean;
+  muted?: boolean;
+}) {
+  let cls = "text-white/85";
+  if (mono) cls = "font-mono text-[11px] text-white/85";
+  if (mono && dim) cls = "font-mono text-[11px] text-white/40";
+  if (muted) cls = "text-white/55";
+  return (
+    <td className={`px-2 py-2 align-middle whitespace-nowrap ${cls}`}>
+      {children}
+    </td>
   );
 }

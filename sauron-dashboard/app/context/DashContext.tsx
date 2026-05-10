@@ -19,10 +19,8 @@ export interface LiveStats {
 export interface LiveClient {
   name:            string;
   public_key_hex:  string;
-  private_key_hex: string;
   key_image_hex:   string;
   client_type:     "FULL_KYC" | "ZKP_ONLY" | "BANK";
-  tokens_a:        number;
   tokens_b:        number;
 }
 
@@ -56,7 +54,7 @@ export function DashProvider({ children }: { children: React.ReactNode }) {
     try {
       const [sRes, cRes, uRes] = await Promise.all([
         fetch(`/api/admin/stats`),
-        fetch(`${API}/dev/clients`),
+        fetch(`/api/admin/clients`),
         fetch(`/api/admin/users`),
       ]);
       if (sRes.ok)  setStats(await sRes.json());

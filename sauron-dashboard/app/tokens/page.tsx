@@ -33,9 +33,10 @@ export default function TokensPage() {
 
   if (!data) return <Spinner />;
 
-  const cs = data.credit_summary;
-  const filtered = data.clients.filter((c) =>
-    c.name.toLowerCase().includes(search.toLowerCase()),
+  const cs = data.credit_summary ?? {};
+  const clientsArr = data.clients ?? [];
+  const filtered = clientsArr.filter((c) =>
+    (c.name ?? "").toLowerCase().includes(search.toLowerCase()),
   );
 
   return (

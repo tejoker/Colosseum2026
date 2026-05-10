@@ -1,23 +1,49 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Card } from "../shared";
+import { Card, PageHeader, StatusPill } from "../shared";
 
 interface RequestEvent {
-  client_name: string;
-  request_type: string;
-  timestamp: string;
-  success: boolean;
+  id?: number;
+  timestamp: number | string;
+  action_type?: string;
+  request_type?: string;       // legacy shape compat
+  status?: string;             // "OK" | "FAIL" | other
+  success?: boolean;           // legacy shape compat
+  detail?: string;
+  client_name?: string;
+}
+
+function fmtTs(ts: number | string): string {
+  if (typeof ts === "string") return ts;
+  if (!ts) return "—";
+  return new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+function actionType(e: RequestEvent): string {
+  return (e.action_type ?? e.request_type ?? "UNKNOWN").toUpperCase();
+}
+
+function isOk(e: RequestEvent): boolean {
+  if (typeof e.success === "boolean") return e.success;
+  if (e.status) return e.status.toUpperCase() === "OK";
+  return true;
 }
 
 export default function RequestsPage() {
   const [events, setEvents] = useState<RequestEvent[]>([]);
+  const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
     try {
+      setLoading(true);
       const res = await fetch(`/api/admin/requests`);
       if (res.ok) setEvents(await res.json());
-    } catch {}
+    } catch {
+      /* swallow — empty is fine */
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -27,76 +53,131 @@ export default function RequestsPage() {
   }, [load]);
 
   return (
-    <div className="space-y-6 max-w-[1200px]">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-bold text-neutral-900">Activity Log</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-neutral-400">{events.length} events</span>
+    <div className="space-y-7">
+      <PageHeader
+        eyebrow="ACTIVITY.LOG"
+        hex="0x300"
+        title={
+          <>
+            Every request to the core,{" "}
+            <em className="not-italic gradient-text font-display">in order</em>.
+          </>
+        }
+        description="Append-only stream of every admin and agent action observed by the SauronID core. Nothing here is editable; every row is also part of the next merkle anchor."
+      />
+
+      <Card title={`STREAM · ${events.length} EVENTS`} hex="0x310">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <StatusPill
+              status={loading ? "warn" : "ok"}
+              label={loading ? "REFRESHING" : "LIVE · 5S"}
+            />
+            <span className="font-mono-label text-[9px] text-white/35">
+              POLLING /api/admin/requests
+            </span>
+          </div>
           <button
             onClick={load}
-            className="px-3 py-1.5 text-xs border border-neutral-200 rounded-md hover:bg-neutral-50 transition-colors"
+            className="font-mono-label text-[9.5px] text-white/55 hover:text-[#4F8CFE] border border-white/10 hover:border-[#4F8CFE]/40 rounded-full px-3.5 py-1.5 transition-colors"
           >
-            Refresh
+            REFRESH NOW
           </button>
         </div>
-      </div>
 
-      <Card>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-neutral-200 text-neutral-400">
-                <th className="text-left py-2 font-medium">#</th>
-                <th className="text-left py-2 font-medium">Client</th>
-                <th className="text-left py-2 font-medium">Type</th>
-                <th className="text-left py-2 font-medium">Timestamp</th>
-                <th className="text-center py-2 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {events.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="py-8 text-center text-neutral-400">
-                    No activity yet
-                  </td>
+        <div className="overflow-x-auto -mx-2">
+          {events.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-2">
+              <span className="font-mono-label text-[9.5px] text-white/35">EMPTY</span>
+              <p className="text-[12px] text-white/45">
+                No activity yet — agents have not called the core.
+              </p>
+            </div>
+          ) : (
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left">
+                  <Th right>#</Th>
+                  <Th>TYPE</Th>
+                  <Th>DETAIL</Th>
+                  <Th>TIMESTAMP</Th>
+                  <Th>STATUS</Th>
                 </tr>
-              ) : (
-                events.map((e, i) => (
-                  <tr key={i} className="border-b border-neutral-100 hover:bg-neutral-50">
-                    <td className="py-2 tabular-nums text-neutral-400">{i + 1}</td>
-                    <td className="py-2 font-medium text-neutral-700">{e.client_name}</td>
-                    <td className="py-2">
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded ${
-                          e.request_type === "register"
-                            ? "bg-blue-50 text-blue-700"
-                            : e.request_type === "login"
-                              ? "bg-green-50 text-green-700"
-                              : "bg-neutral-100 text-neutral-600"
-                        }`}
-                      >
-                        {e.request_type}
-                      </span>
-                    </td>
-                    <td className="py-2 text-neutral-400 tabular-nums">{e.timestamp}</td>
-                    <td className="py-2 text-center">
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                          e.success
-                            ? "bg-green-50 text-green-700"
-                            : "bg-red-50 text-red-600"
-                        }`}
-                      >
-                        {e.success ? "OK" : "FAIL"}
-                      </span>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {events.map((e, i) => {
+                  const ok = isOk(e);
+                  return (
+                    <tr key={e.id ?? i} className="border-t border-white/[0.04]">
+                      <Td right muted mono>
+                        {String(e.id ?? i + 1).padStart(4, "0")}
+                      </Td>
+                      <Td>
+                        <span className="font-mono-label text-[9px] text-[#4F8CFE]/85 bg-[#4F8CFE]/10 px-1.5 py-0.5 rounded">
+                          {actionType(e)}
+                        </span>
+                      </Td>
+                      <Td muted mono>
+                        {(e.detail ?? e.client_name ?? "").slice(0, 60) || "—"}
+                      </Td>
+                      <Td muted mono>
+                        {fmtTs(e.timestamp)}
+                      </Td>
+                      <Td>
+                        <StatusPill
+                          status={ok ? "ok" : "err"}
+                          label={ok ? "OK" : (e.status ?? "FAIL").toUpperCase()}
+                        />
+                      </Td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       </Card>
     </div>
+  );
+}
+
+function Th({ children, right }: { children: React.ReactNode; right?: boolean }) {
+  return (
+    <th
+      className={[
+        "font-mono-label text-[8.5px] text-white/40 px-2 py-2 font-normal",
+        right ? "text-right" : "",
+      ].join(" ")}
+    >
+      {children}
+    </th>
+  );
+}
+
+function Td({
+  children,
+  mono,
+  muted,
+  right,
+}: {
+  children: React.ReactNode;
+  mono?: boolean;
+  muted?: boolean;
+  right?: boolean;
+}) {
+  let cls = "text-white/85";
+  if (mono) cls = "font-mono text-[11px] text-white/75";
+  if (muted) cls = "text-white/50";
+  if (mono && muted) cls = "font-mono text-[11px] text-white/45";
+  return (
+    <td
+      className={[
+        "px-2 py-2 align-middle whitespace-nowrap",
+        right ? "text-right tabular-nums" : "",
+        cls,
+      ].join(" ")}
+    >
+      {children}
+    </td>
   );
 }

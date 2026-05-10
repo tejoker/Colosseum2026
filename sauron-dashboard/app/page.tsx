@@ -2,183 +2,531 @@
 
 import { useEffect, useState } from "react";
 import "./chartSetup";
-import { Line, Bar } from "react-chartjs-2";
-import { sauronFetch, Kpi, Card, Spinner, fmtNum, fmtPct, fmtUsd } from "./shared";
-import { useDash } from "./context/DashContext";
+import { BRAND } from "./chartSetup";
+import { Line, Doughnut } from "react-chartjs-2";
+import {
+  sauronFetch,
+  Kpi,
+  Card,
+  Spinner,
+  PageHeader,
+  StatusPill,
+  fmtNum,
+} from "./shared";
 
-interface OverviewData {
-  kpis: Record<string, number>;
-  daily: { dates: string[]; credit_a: number[]; credit_b: number[] };
-  rings: { labels: string[]; names: string[]; counts: number[] };
+/* ── Live data shapes (match /api/live/* in data/sauron/app.py) ──────── */
+
+interface LiveOverview {
+  kpis: {
+    total_users: number;
+    total_clients: number;
+    total_agents: number;
+    active_agents: number;
+    total_api_calls?: number;
+    total_kyc_retrievals?: number;
+    total_agent_calls?: number;
+    tokens_b_issued?: number;
+    tokens_b_spent?: number;
+  };
+  daily?: { dates: string[]; credit_a: number[]; credit_b: number[] };
+  rings?: { names: string[]; counts: number[] };
+  anchor?: AnchorStatus;
+  controls?: Record<string, unknown>;
 }
 
-interface AnomalyEvent {
-  anomaly_type: string;
-  severity: string;
-  description?: string;
-  date?: string;
-  name?: string;
+interface AnchorStatus {
+  bitcoin_total: number;
+  bitcoin_pending_upgrade: number;
+  bitcoin_upgraded: number;
+  solana_total: number;
+  solana_unconfirmed: number;
+  solana_confirmed: number;
+  agent_action_batches: number;
+  last_batch_at: number;
+  last_batch_n_actions: number;
 }
 
-interface InsightsData {
-  avg_churn_risk: number;
-  avg_trust_score: number;
-  ml_anomalies_detected: number;
-  at_risk_clients: { client_id: number; name: string; churn_risk: number }[];
+interface ActionReceipt {
+  receipt_id: string;
+  action_hash: string;
+  agent_id: string;
+  status: string;
+  policy_version: string;
+  created_at: number;
 }
 
-interface GdprData {
-  total_users: number;
-  eu_eea_scope: number;
-  pending_purge: number;
+interface AgentRow {
+  agent_id: string;
+  human_key_image: string;
+  agent_checksum: string;
+  assurance_level: string;
+  issued_at: number;
+  expires_at: number;
+  revoked: boolean;
+  has_pop: boolean;
+  agent_type: string;
 }
 
-interface PipelineData {
-  total_events?: number;
-  throughput?: number;
-  throughput_eps?: number;
-  total_fraud?: number;
-  total_block?: number;
-  fraud_detected?: number;
-  live?: boolean;
+interface HealthSummary {
+  ok: boolean;
+  runtime: string;
+  call_sig_enforce: boolean;
+  require_agent_type: boolean;
+  warnings?: string[];
 }
 
-const CHART_OPTS = {
+const LINE_OPTS = {
   responsive: true,
   maintainAspectRatio: false,
-  plugins: { legend: { display: false } },
+  interaction: { mode: "index" as const, intersect: false },
+  plugins: {
+    legend: {
+      display: true,
+      position: "top" as const,
+      align: "end" as const,
+      labels: {
+        boxWidth: 8,
+        boxHeight: 8,
+        usePointStyle: true,
+        pointStyle: "circle" as const,
+        font: { family: "'Space Mono', monospace", size: 9 },
+        color: "rgba(255,255,255,0.6)",
+      },
+    },
+  },
   scales: {
-    x: { grid: { display: false } },
-    y: { beginAtZero: true, grid: { color: "#f3f4f6" } },
+    x: {
+      grid: { display: false, drawTicks: false },
+      ticks: {
+        maxTicksLimit: 6,
+        font: { family: "'Space Mono', monospace", size: 9 },
+        color: "rgba(255,255,255,0.35)",
+      },
+      border: { display: false },
+    },
+    y: {
+      beginAtZero: true,
+      grid: { color: "rgba(255,255,255,0.04)", drawTicks: false },
+      ticks: {
+        font: { family: "'Space Mono', monospace", size: 9 },
+        color: "rgba(255,255,255,0.35)",
+        padding: 8,
+      },
+      border: { display: false },
+    },
   },
 };
 
+const DOUGHNUT_OPTS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  cutout: "68%",
+  plugins: {
+    legend: {
+      display: true,
+      position: "bottom" as const,
+      labels: {
+        boxWidth: 8,
+        boxHeight: 8,
+        padding: 12,
+        usePointStyle: true,
+        pointStyle: "rect" as const,
+        font: { family: "'Space Mono', monospace", size: 9 },
+        color: "rgba(255,255,255,0.55)",
+      },
+    },
+  },
+};
+
+function fmtAgo(unixSec: number): string {
+  if (!unixSec) return "—";
+  const sec = Math.floor(Date.now() / 1000) - unixSec;
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
+/* ────────────────────────────────────────────────────────────────────── */
+
 export default function OverviewPage() {
-  const { stats, offline } = useDash();
-  const [data, setData] = useState<OverviewData | null>(null);
-  const [anomalies, setAnomalies] = useState<AnomalyEvent[]>([]);
-  const [insights, setInsights] = useState<InsightsData | null>(null);
-  const [gdpr, setGdpr] = useState<GdprData | null>(null);
-  const [pipeline, setPipeline] = useState<PipelineData | null>(null);
+  const [overview, setOverview] = useState<LiveOverview | null>(null);
+  const [actions, setActions] = useState<ActionReceipt[]>([]);
+  const [agents, setAgents] = useState<AgentRow[]>([]);
+  const [health, setHealth] = useState<HealthSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([
-      sauronFetch<OverviewData>("overview").catch(() => null),
-      sauronFetch<{ events: AnomalyEvent[] }>("anomalies").catch(() => ({ events: [] })),
-      sauronFetch<InsightsData>("insights").catch(() => null),
-      sauronFetch<GdprData>("gdpr/stats").catch(() => null),
-      sauronFetch<PipelineData>("pipeline-stats").catch(() => null),
-    ]).then(([o, a, i, g, p]) => {
-      setData(o);
-      setAnomalies(a.events?.slice(0, 8) ?? []);
-      setInsights(i);
-      setGdpr(g);
-      setPipeline(p);
-    });
+    let cancelled = false;
+    async function load() {
+      try {
+        const [o, a, ag, h] = await Promise.all([
+          sauronFetch<LiveOverview>("overview").catch(() => null),
+          sauronFetch<ActionReceipt[]>("agent_actions/recent").catch(() => []),
+          sauronFetch<AgentRow[]>("agents").catch(() => []),
+          sauronFetch<HealthSummary>("health").catch(() => null),
+        ]);
+        if (cancelled) return;
+        setOverview(o);
+        setActions((a as ActionReceipt[]).slice(0, 8));
+        setAgents(ag as AgentRow[]);
+        setHealth(h);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      }
+    }
+    load();
+    const id = setInterval(load, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
-  if (!data && !stats && !offline) return <Spinner />;
-  if (!data && !stats && offline) {
+  if (error) {
     return (
-      <div className="space-y-4 max-w-[900px]">
-        <h1 className="text-lg font-bold text-neutral-900">Platform Overview</h1>
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
-          Backend offline. Start core API on port 3001, then refresh dashboard.
-        </div>
-      </div>
+      <Card title="LIVE.SOURCE.UNREACHABLE" hex="0xFFF">
+        <code className="block mt-2 text-[11px] text-[#F87171]/80 font-mono leading-relaxed">
+          {error}
+        </code>
+        <p className="mt-3 text-[12px] text-white/55">
+          The mandate console could not reach the SauronID core or the analytics
+          shim. Check both processes are up: <code className="text-white/75">launch.sh</code>.
+        </p>
+      </Card>
     );
   }
+  if (!overview) return <Spinner />;
 
-  const k = data?.kpis ?? {};
+  const k = overview.kpis;
+  const anchor = overview.anchor;
+  const activeAgents = agents.filter((a) => !a.revoked).length;
+  const revokedAgents = agents.length - activeAgents;
+  const popBoundAgents = agents.filter((a) => a.has_pop && !a.revoked).length;
 
   return (
-    <div className="space-y-6 max-w-[1200px]">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-bold text-neutral-900">Platform Overview</h1>
-        {offline && <span className="text-xs px-2.5 py-1 rounded-full bg-red-50 text-red-600 font-medium">Backend offline</span>}
-      </div>
+    <div className="space-y-8">
+      <PageHeader
+        eyebrow="MANDATE.OVERVIEW"
+        hex="0x001"
+        title={
+          <>
+            Every agent action,
+            <br />
+            <em className="not-italic gradient-text font-display">witnessed</em>{" "}
+            and anchored.
+          </>
+        }
+        description="Pre-execution governance for autonomous AI. Agents register, sign every call, and have their actions cryptographically committed to Bitcoin and Solana."
+      />
 
-      {/* KPI grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-        <Kpi label="KYC Completions" value={fmtNum(k.total_full_kyc ?? stats?.total_users)} />
-        <Kpi label="Attribute Queries" value={fmtNum(k.total_reduced)} />
-        <Kpi label="Active Clients" value={fmtNum(k.active_clients ?? stats?.total_clients)} />
-        <Kpi label="KYC Revenue" value={fmtUsd(k.kyc_revenue_usd)} accent="text-green-600" />
-        <Kpi label="Credit A Earned" value={fmtNum(k.credit_a_earned)} accent="text-blue-600" />
-        <Kpi label="Credit B Purchased" value={fmtNum(k.credit_b_purchased)} accent="text-orange-500" />
-        <Kpi label="Query Revenue" value={fmtUsd(k.query_revenue_usd)} accent="text-green-600" />
-        <Kpi label="Failure Rate" value={fmtPct(k.failure_rate)} accent={(k.failure_rate ?? 0) > 5 ? "text-red-600" : "text-neutral-900"} />
-        <Kpi label="Exchange Rate" value={stats ? `1:${stats.exchange_rate}` : "\u2014"} />
-        {gdpr && <Kpi label="GDPR Pending" value={fmtNum(gdpr.pending_purge)} accent={gdpr.pending_purge > 0 ? "text-amber-600" : "text-green-600"} />}
-        {pipeline && <Kpi label="Pipeline EPS" value={(pipeline.throughput ?? pipeline.throughput_eps ?? 0).toFixed(1)} sub={pipeline.total_events != null ? `${fmtNum(pipeline.total_events)} events` : undefined} />}
-      </div>
-
-      {/* Charts row */}
-      {data && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <Card title="Daily Credit Activity (90 days)">
-            <div className="h-60">
-              <Line
-                data={{
-                  labels: data.daily.dates,
-                  datasets: [
-                    { label: "Credit A", data: data.daily.credit_a, borderColor: "#3b82f6", backgroundColor: "rgba(59,130,246,0.08)", fill: true, tension: 0.3, pointRadius: 0 },
-                    { label: "Credit B", data: data.daily.credit_b, borderColor: "#f97316", backgroundColor: "rgba(249,115,22,0.08)", fill: true, tension: 0.3, pointRadius: 0 },
-                  ],
-                }}
-                options={{ ...CHART_OPTS, plugins: { legend: { display: true, position: "top" as const, labels: { boxWidth: 10, font: { size: 11 } } } } }}
-              />
-            </div>
-          </Card>
-
-          <Card title="Ring Sizes">
-            <div className="h-60">
-              <Bar
-                data={{
-                  labels: data.rings.names,
-                  datasets: [{ data: data.rings.counts, backgroundColor: "#6366f1", borderRadius: 4 }],
-                }}
-                options={CHART_OPTS}
-              />
-            </div>
-          </Card>
+      {/* Health bar — replaces the green/amber slab with branded glass strip */}
+      {health && (
+        <div className="glass rounded-md px-4 py-3 flex items-center justify-between flex-wrap gap-3 animate-fade-in-up">
+          <div className="flex items-center gap-3 flex-wrap">
+            <StatusPill
+              status={health.ok ? "ok" : "warn"}
+              label={health.ok ? "CORE.HEALTHY" : "CORE.DEGRADED"}
+            />
+            <Meta label="RUNTIME" value={health.runtime} />
+            <Meta label="CALL.SIG" value={health.call_sig_enforce ? "ENFORCED" : "OFF"} />
+            <Meta label="AGENT.TYPE" value={health.require_agent_type ? "REQUIRED" : "OPTIONAL"} />
+          </div>
+          {(health.warnings?.length ?? 0) > 0 && (
+            <span className="font-mono-label text-[9.5px] text-[#FCD34D]/85 max-w-md text-right">
+              ⚠ {health.warnings![0]}
+            </span>
+          )}
         </div>
       )}
 
-      {/* Bottom row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card title="Recent Anomalies">
-          {anomalies.length === 0 ? (
-            <p className="text-sm text-neutral-400">No recent anomalies</p>
-          ) : (
-            <div className="space-y-1.5 max-h-60 overflow-auto">
-              {anomalies.map((a, i) => (
-                <div key={i} className="flex items-center gap-2 text-xs py-1.5 border-b border-neutral-100 last:border-0">
-                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${a.severity === "high" ? "bg-red-500" : a.severity === "medium" ? "bg-amber-500" : "bg-blue-400"}`} />
-                  <span className="font-mono text-neutral-500">{a.anomaly_type}</span>
-                  {a.name && <span className="text-neutral-400">{a.name}</span>}
-                  <span className="ml-auto text-neutral-300 tabular-nums">{a.date?.slice(0, 10)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
+      {/* KPI strip */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <Kpi
+          label="ACTIVE AGENTS"
+          value={fmtNum(activeAgents)}
+          sub={`${revokedAgents} REVOKED`}
+          accent="emerald"
+        />
+        <Kpi
+          label="POP-BOUND"
+          value={fmtNum(popBoundAgents)}
+          sub="HARDWARE-SHAPED KEY"
+          accent="cyan"
+        />
+        <Kpi
+          label="HUMANS"
+          value={fmtNum(k.total_users)}
+          sub="OPRF KEY IMAGES"
+        />
+        <Kpi
+          label="CLIENTS"
+          value={fmtNum(k.total_clients)}
+          sub="RING MEMBERS"
+        />
+        <Kpi
+          label="ANCHOR BATCHES"
+          value={fmtNum(anchor?.agent_action_batches ?? 0)}
+          sub={anchor?.last_batch_at ? `LAST ${fmtAgo(anchor.last_batch_at).toUpperCase()}` : "NO ANCHORS YET"}
+          accent="violet"
+        />
+        <Kpi
+          label="BTC / SOL"
+          value={`${anchor?.bitcoin_total ?? 0} / ${anchor?.solana_total ?? 0}`}
+          sub={`${anchor?.bitcoin_upgraded ?? 0} BTC · ${anchor?.solana_confirmed ?? 0} SOL`}
+          accent="amber"
+        />
+      </div>
 
-        <Card title="At-Risk Clients">
-          {insights && insights.at_risk_clients.length > 0 ? (
-            <div className="space-y-1.5 max-h-60 overflow-auto">
-              {insights.at_risk_clients.slice(0, 8).map((c) => (
-                <div key={c.client_id} className="flex items-center gap-2 text-xs py-1.5 border-b border-neutral-100 last:border-0">
-                  <span className="font-medium text-neutral-700">{c.name}</span>
-                  <span className="ml-auto text-red-600 font-mono">{fmtPct(c.churn_risk * 100)} churn</span>
-                </div>
-              ))}
+      {/* Activity + anchor pipeline */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2">
+          <Card title="AGENT.ACTIVITY · 90D" hex="0x010">
+            <div className="h-64">
+              <Line
+                data={{
+                  labels: overview.daily?.dates ?? [],
+                  datasets: [
+                    {
+                      label: "Action receipts",
+                      data: overview.daily?.credit_a ?? [],
+                      borderColor: BRAND.blue,
+                      backgroundColor: (ctx: { chart: { ctx: CanvasRenderingContext2D; chartArea: { top: number; bottom: number } | null } }) => {
+                        const chart = ctx.chart;
+                        const { ctx: c, chartArea } = chart;
+                        if (!chartArea) return "rgba(79,140,254,0.12)";
+                        const g = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+                        g.addColorStop(0, "rgba(79,140,254,0.32)");
+                        g.addColorStop(1, "rgba(79,140,254,0.00)");
+                        return g;
+                      },
+                      fill: true,
+                      tension: 0.35,
+                      pointRadius: 0,
+                      pointHoverRadius: 4,
+                      pointHoverBackgroundColor: BRAND.blue,
+                      borderWidth: 1.6,
+                    },
+                    {
+                      label: "API requests",
+                      data: overview.daily?.credit_b ?? [],
+                      borderColor: BRAND.cyan,
+                      backgroundColor: "rgba(0,200,255,0.05)",
+                      fill: false,
+                      tension: 0.35,
+                      pointRadius: 0,
+                      pointHoverRadius: 4,
+                      pointHoverBackgroundColor: BRAND.cyan,
+                      borderWidth: 1.2,
+                      borderDash: [4, 4],
+                    },
+                  ],
+                }}
+                options={LINE_OPTS}
+              />
             </div>
-          ) : (
-            <p className="text-sm text-neutral-400">No at-risk clients</p>
-          )}
+          </Card>
+        </div>
+
+        <Card title="ANCHOR.PIPELINE" hex="0x011">
+          <div className="h-64 relative">
+            <Doughnut
+              data={{
+                labels: ["BTC upgraded", "BTC pending", "SOL confirmed", "SOL unconfirmed"],
+                datasets: [
+                  {
+                    data: [
+                      anchor?.bitcoin_upgraded ?? 0,
+                      anchor?.bitcoin_pending_upgrade ?? 0,
+                      anchor?.solana_confirmed ?? 0,
+                      anchor?.solana_unconfirmed ?? 0,
+                    ],
+                    backgroundColor: [
+                      BRAND.amber,
+                      "rgba(252,211,77,0.32)",
+                      BRAND.violet,
+                      "rgba(167,139,250,0.32)",
+                    ],
+                    borderWidth: 0,
+                    spacing: 2,
+                  },
+                ],
+              }}
+              options={DOUGHNUT_OPTS}
+            />
+            {/* Center label */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center pb-12 pointer-events-none">
+              <div className="font-mono-label text-[9px] text-white/45">TOTAL</div>
+              <div
+                className="text-[26px] tabular-nums text-white"
+                style={{ fontFamily: "Satoshi, system-ui, sans-serif", fontWeight: 500 }}
+              >
+                {(anchor?.bitcoin_total ?? 0) + (anchor?.solana_total ?? 0)}
+              </div>
+            </div>
+          </div>
         </Card>
       </div>
+
+      {/* Agent registry + recent receipts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card title="ACTION.RECEIPTS · RECENT" hex="0x020">
+          <div className="overflow-y-auto max-h-80 -mx-2">
+            {actions.length === 0 ? (
+              <Empty hint="No action receipts. Run the receipt-verify flow to anchor agent decisions." />
+            ) : (
+              <table className="w-full text-[12px]">
+                <thead className="sticky top-0 backdrop-blur bg-[#0F1A35]/70 z-10">
+                  <tr className="text-left">
+                    <Th>WHEN</Th>
+                    <Th>AGENT</Th>
+                    <Th>HASH</Th>
+                    <Th>STATUS</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {actions.map((r) => (
+                    <tr key={r.receipt_id} className="border-t border-white/[0.04]">
+                      <Td muted>{fmtAgo(r.created_at)}</Td>
+                      <Td mono>{r.agent_id.slice(0, 14)}…</Td>
+                      <Td mono dim>{r.action_hash.slice(0, 12)}…</Td>
+                      <Td>
+                        <StatusPill
+                          status={r.status === "approved" ? "ok" : "muted"}
+                          label={r.status.toUpperCase()}
+                        />
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </Card>
+
+        <Card title="AGENT.REGISTRY" hex="0x021">
+          <div className="overflow-y-auto max-h-80 -mx-2">
+            {agents.length === 0 ? (
+              <Empty hint="No agents registered. Bind your first agent via the Python adapter." />
+            ) : (
+              <table className="w-full text-[12px]">
+                <thead className="sticky top-0 backdrop-blur bg-[#0F1A35]/70 z-10">
+                  <tr className="text-left">
+                    <Th>AGENT</Th>
+                    <Th>TYPE</Th>
+                    <Th>ASSURANCE</Th>
+                    <Th>POP</Th>
+                    <Th>STATE</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {agents.slice(0, 12).map((a) => (
+                    <tr key={a.agent_id} className="border-t border-white/[0.04]">
+                      <Td mono>{a.agent_id.slice(0, 14)}…</Td>
+                      <Td muted>{a.agent_type || "—"}</Td>
+                      <Td muted>{a.assurance_level}</Td>
+                      <Td>
+                        {a.has_pop ? (
+                          <span className="text-[#34D399]" aria-label="proof-of-possession bound">●</span>
+                        ) : (
+                          <span className="text-white/25">○</span>
+                        )}
+                      </Td>
+                      <Td>
+                        <StatusPill
+                          status={a.revoked ? "err" : "ok"}
+                          label={a.revoked ? "REVOKED" : "ACTIVE"}
+                        />
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* Ring memberships — minimal stat strip rather than another chart */}
+      <Card title="RING.MEMBERSHIP" hex="0x030">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-px bg-white/[0.04] rounded overflow-hidden">
+          {(overview.rings?.names ?? []).map((name, i) => (
+            <div
+              key={name}
+              className="bg-[#0F1A35] p-5 flex flex-col gap-2 group hover:bg-[#0F1A35]/60 transition-colors"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-mono-label text-[9px] text-white/45">
+                  {name.toUpperCase()}
+                </span>
+                <span
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{
+                    backgroundColor: [BRAND.blue, BRAND.cyan, BRAND.violet][i] ?? BRAND.blue,
+                    boxShadow: `0 0 12px ${[BRAND.blue, BRAND.cyan, BRAND.violet][i] ?? BRAND.blue}`,
+                  }}
+                />
+              </div>
+              <div
+                className="text-[32px] tabular-nums text-white"
+                style={{ fontFamily: "Satoshi, system-ui, sans-serif", fontWeight: 500, letterSpacing: "-0.025em" }}
+              >
+                {fmtNum(overview.rings?.counts[i] ?? 0)}
+              </div>
+              <div className="font-mono-label text-[8.5px] text-white/30">
+                MEMBERS
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ── Local atoms ──────────────────────────────────────────────────── */
+
+function Meta({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="flex items-center gap-2">
+      <span className="font-mono-label text-[8.5px] text-white/35">{label}</span>
+      <span className="font-mono-label text-[9px] text-white/75">{value}</span>
+    </span>
+  );
+}
+
+function Th({ children }: { children: React.ReactNode }) {
+  return (
+    <th className="font-mono-label text-[8.5px] text-white/40 px-2 py-2 font-normal">
+      {children}
+    </th>
+  );
+}
+
+function Td({
+  children,
+  mono,
+  dim,
+  muted,
+}: {
+  children: React.ReactNode;
+  mono?: boolean;
+  dim?: boolean;
+  muted?: boolean;
+}) {
+  const base = "px-2 py-2 align-middle whitespace-nowrap";
+  let cls = "text-white/85";
+  if (mono) cls = "font-mono text-[11.5px] text-white/85";
+  if (mono && dim) cls = "font-mono text-[11.5px] text-white/45";
+  if (muted) cls = "text-white/55";
+  return <td className={`${base} ${cls}`}>{children}</td>;
+}
+
+function Empty({ hint }: { hint: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-10 gap-2">
+      <span className="font-mono-label text-[9.5px] text-white/35">EMPTY</span>
+      <p className="text-[12px] text-white/45 max-w-xs text-center leading-relaxed">{hint}</p>
     </div>
   );
 }

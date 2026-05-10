@@ -1,14 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { sauronFetch, Kpi, Card, Spinner, fmtNum } from "../shared";
+import {
+  sauronFetch,
+  Card,
+  Kpi,
+  Spinner,
+  PageHeader,
+  StatusPill,
+  fmtNum,
+} from "../shared";
 
 interface ClientRow {
   client_id: number;
   name: string;
   type: string;
-  balance_a?: number;
-  balance_b?: number;
   last_active?: string;
   total_verifications?: number;
   is_active?: boolean;
@@ -30,101 +36,170 @@ export default function ClientsPage() {
 
   if (!data) return <Spinner />;
 
-  const filtered = data.clients.filter((c) => {
+  // /api/live/clients returns AdminClient[] directly; legacy returns {clients}.
+  const clientList: ClientsData["clients"] = Array.isArray(data)
+    ? (data as unknown as ClientsData["clients"])
+    : data.clients ?? [];
+
+  const filtered = clientList.filter((c) => {
     if (typeFilter !== "all" && c.type !== typeFilter) return false;
-    return c.name.toLowerCase().includes(search.toLowerCase());
+    return (c.name ?? "").toLowerCase().includes(search.toLowerCase());
   });
 
-  const types = [...new Set(data.clients.map((c) => c.type))];
+  const types = [...new Set(clientList.map((c) => c.type ?? ""))].filter(Boolean);
+  const activeCount = data.active_count ?? clientList.length;
 
   return (
-    <div className="space-y-6 max-w-[1200px]">
-      <h1 className="text-lg font-bold text-neutral-900">Client Directory</h1>
+    <div className="space-y-7">
+      <PageHeader
+        eyebrow="CLIENT.DIRECTORY"
+        hex="0x400"
+        title={
+          <>
+            The{" "}
+            <em className="not-italic gradient-text font-display">ring members</em>{" "}
+            entitled to issue.
+          </>
+        }
+        description="Partner sites that hold an authoring slot in the SauronID ring. Anonymous to each other; accountable to the core."
+      />
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <Kpi label="Total Clients" value={fmtNum(data.clients.length)} />
-        <Kpi label="Active (90d)" value={fmtNum(data.active_count)} accent="text-green-600" />
-        <Kpi label="Inactive" value={fmtNum(data.clients.length - data.active_count)} accent={data.clients.length - data.active_count > 0 ? "text-amber-600" : "text-neutral-400"} />
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <Kpi label="TOTAL CLIENTS" value={fmtNum(clientList.length)} accent="cyan" />
+        <Kpi label="ACTIVE · 90D" value={fmtNum(activeCount)} accent="emerald" />
+        <Kpi
+          label="DORMANT"
+          value={fmtNum(clientList.length - activeCount)}
+          sub="NO ACTIVITY · 90D"
+        />
       </div>
 
-      <Card>
-        <div className="flex items-center gap-3 mb-4">
+      <Card title={`CLIENT.LIST · ${filtered.length}`} hex="0x410">
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
           <input
             type="text"
-            placeholder="Search clients..."
+            placeholder="search clients…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="px-3 py-1.5 text-xs border border-neutral-200 rounded-md focus:outline-none focus:border-neutral-400 w-56"
+            className="bg-[#06090F] border border-white/10 rounded px-3 py-2 text-[12.5px] text-white placeholder:text-white/30 font-mono w-56 focus:outline-none focus:border-[#4F8CFE]/50 focus:bg-[#0A1128] transition-colors"
           />
           <select
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
-            className="px-3 py-1.5 text-xs border border-neutral-200 rounded-md focus:outline-none"
+            className="bg-[#06090F] border border-white/10 rounded px-3 py-2 text-[12.5px] text-white font-mono focus:outline-none focus:border-[#4F8CFE]/50"
           >
-            <option value="all">All Types</option>
+            <option value="all" className="bg-[#06090F]">
+              ALL TYPES
+            </option>
             {types.map((t) => (
-              <option key={t} value={t}>
-                {t}
+              <option key={t} value={t} className="bg-[#06090F]">
+                {t.toUpperCase()}
               </option>
             ))}
           </select>
-          <span className="text-xs text-neutral-400 ml-auto">
-            {filtered.length} clients
+          <span className="font-mono-label text-[9px] text-white/35 ml-auto">
+            {filtered.length} / {clientList.length}
           </span>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-neutral-200 text-neutral-400">
-                <th className="text-left py-2 font-medium">Name</th>
-                <th className="text-left py-2 font-medium">Type</th>
-                <th className="text-right py-2 font-medium">Balance A</th>
-                <th className="text-right py-2 font-medium">Balance B</th>
-                <th className="text-right py-2 font-medium">Verifications</th>
-                <th className="text-center py-2 font-medium">Status</th>
-                <th className="text-right py-2 font-medium">Last Active</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((c) => (
-                <tr key={c.client_id} className="border-b border-neutral-100 hover:bg-neutral-50">
-                  <td className="py-2 font-medium text-neutral-700">{c.name}</td>
-                  <td className="py-2">
-                    <span
-                      className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        c.type === "full_identification"
-                          ? "bg-blue-50 text-blue-700"
-                          : "bg-purple-50 text-purple-700"
-                      }`}
-                    >
-                      {c.type}
-                    </span>
-                  </td>
-                  <td className="py-2 text-right tabular-nums text-blue-600">
-                    {fmtNum(c.balance_a ?? 0)}
-                  </td>
-                  <td className="py-2 text-right tabular-nums text-orange-500">
-                    {fmtNum(c.balance_b ?? 0)}
-                  </td>
-                  <td className="py-2 text-right tabular-nums">
-                    {fmtNum(c.total_verifications ?? 0)}
-                  </td>
-                  <td className="py-2 text-center">
-                    <span
-                      className={`w-2 h-2 rounded-full inline-block ${
-                        c.is_active ? "bg-green-500" : "bg-neutral-300"
-                      }`}
-                    />
-                  </td>
-                  <td className="py-2 text-right text-neutral-400">
-                    {c.last_active?.slice(0, 10) ?? "---"}
-                  </td>
+
+        <div className="overflow-x-auto -mx-2">
+          {filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-2">
+              <span className="font-mono-label text-[9.5px] text-white/35">
+                NO MATCHES
+              </span>
+              <p className="text-[12px] text-white/45">
+                Adjust the filter or clear the search.
+              </p>
+            </div>
+          ) : (
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left">
+                  <Th>NAME</Th>
+                  <Th>TYPE</Th>
+                  <Th right>VERIFICATIONS</Th>
+                  <Th>STATE</Th>
+                  <Th>LAST.ACTIVE</Th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filtered.map((c, i) => (
+                  <tr
+                    key={c.client_id ?? c.name ?? i}
+                    className="border-t border-white/[0.04]"
+                  >
+                    <Td>{c.name}</Td>
+                    <Td>
+                      <span
+                        className={[
+                          "font-mono-label text-[9px] px-1.5 py-0.5 rounded",
+                          c.type === "full_identification"
+                            ? "bg-[#4F8CFE]/12 text-[#4F8CFE]"
+                            : "bg-[#A78BFA]/12 text-[#A78BFA]",
+                        ].join(" ")}
+                      >
+                        {(c.type ?? "").toUpperCase()}
+                      </span>
+                    </Td>
+                    <Td right>{fmtNum(c.total_verifications ?? 0)}</Td>
+                    <Td>
+                      <StatusPill
+                        status={c.is_active ? "ok" : "muted"}
+                        label={c.is_active ? "ACTIVE" : "DORMANT"}
+                      />
+                    </Td>
+                    <Td muted mono>
+                      {c.last_active?.slice(0, 10) ?? "—"}
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </Card>
     </div>
+  );
+}
+
+function Th({ children, right }: { children: React.ReactNode; right?: boolean }) {
+  return (
+    <th
+      className={[
+        "font-mono-label text-[8.5px] text-white/40 px-2 py-2 font-normal",
+        right ? "text-right" : "",
+      ].join(" ")}
+    >
+      {children}
+    </th>
+  );
+}
+
+function Td({
+  children,
+  mono,
+  muted,
+  right,
+}: {
+  children: React.ReactNode;
+  mono?: boolean;
+  muted?: boolean;
+  right?: boolean;
+}) {
+  let cls = "text-white/85";
+  if (mono) cls = "font-mono text-[11px] text-white/75";
+  if (muted) cls = "text-white/50";
+  if (mono && muted) cls = "font-mono text-[11px] text-white/45";
+  return (
+    <td
+      className={[
+        "px-2 py-2 align-middle whitespace-nowrap",
+        right ? "text-right tabular-nums" : "",
+        cls,
+      ].join(" ")}
+    >
+      {children}
+    </td>
   );
 }
