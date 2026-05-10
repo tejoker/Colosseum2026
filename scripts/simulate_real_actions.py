@@ -1,24 +1,22 @@
 """End-to-end real action-receipt simulation.
 
-This is the FULL agent-binding flow that produces real `agent_action_receipts`
-rows in the SauronID core. Unlike `simulate_agents.py` (which only registers
-agents and writes egress logs), this script exercises:
+Two modes:
 
-  - /user/auth                  human session
-  - /agent/register             agent + ring keys + PoP key  (server-computed checksum)
-  - /agent/token                A-JWT
-  - /agent/pop/challenge        one-time PoP challenge
-  - /agent/action/challenge     canonical envelope          [per-call signed]
-  - agent-action-tool sign-challenge   ring signature over canonical
-  - /agent/payment/authorize    full proof: A-JWT + PoP JWS + ring sig + per-call sig
-                                → INSERT INTO agent_action_receipts
-  - /admin/anchor/agent-actions/run    fires merkle batch onto BTC + Solana
+  python3 scripts/simulate_real_actions.py run     [--stream] [--n-actions N] [intent overrides]
+  python3 scripts/simulate_real_actions.py attack  <kind>
 
-Each successful payment_authorize produces ONE row in `agent_action_receipts`.
-Those rows are the leaves of the next anchor batch.
+`run` performs the FULL agent-binding flow against the live core:
+  /user/auth -> /agent/register -> /agent/token -> /agent/pop/challenge ->
+  /agent/action/challenge -> agent-action-tool sign-challenge ->
+  /agent/payment/authorize (per-call sig + PoP JWS + ring sig + A-JWT) ->
+  /admin/anchor/agent-actions/run
 
-Run:
-    python3 scripts/simulate_real_actions.py [--n-actions 2]
+In --stream mode it emits one NDJSON event per step on stdout, suitable
+for SSE forwarding by the dashboard's analytics shim.
+
+`attack` provisions a fresh agent then performs ONE deliberately-broken
+request against /agent/egress/log (which gates on per-call sig + agent
+config-digest + agent_id). Each attack proves a specific defence.
 """
 
 from __future__ import annotations
@@ -32,12 +30,10 @@ import secrets
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Iterator
 
 import requests
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 CORE_URL = os.getenv("SAURON_CORE_URL", "http://127.0.0.1:3001")
@@ -58,8 +54,6 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-# ─── Per-call signature (DPoP-style, what require_call_signature checks) ──
-
 def sign_call_headers(
     sk: Ed25519PrivateKey, agent_id: str, config_digest: str,
     method: str, path: str, body_bytes: bytes,
@@ -78,8 +72,6 @@ def sign_call_headers(
     }
 
 
-# ─── PoP JWS over a one-time challenge string ────────────────────────
-
 def make_pop_jws(sk: Ed25519PrivateKey, challenge: str) -> str:
     header = b64u(json.dumps({"alg": "EdDSA", "typ": "JWT"}, separators=(",", ":")).encode())
     payload = b64u(challenge.encode("utf-8"))
@@ -87,8 +79,6 @@ def make_pop_jws(sk: Ed25519PrivateKey, challenge: str) -> str:
     sig = sk.sign(signing_input)
     return f"{header}.{payload}.{b64u(sig)}"
 
-
-# ─── Ring keys via agent-action-tool ─────────────────────────────────
 
 def keygen_ring() -> dict[str, str]:
     out = subprocess.run(
@@ -108,272 +98,558 @@ def sign_ring_challenge(secret_hex: str, challenge_json: str) -> dict[str, Any]:
     return json.loads(out)
 
 
-# ─── HTTP helpers ───────────────────────────────────────────────────
+# ─── HTTP wrappers ──────────────────────────────────────────────────
 
 def post_json(path: str, body: dict, headers: dict | None = None) -> requests.Response:
     h = {"content-type": "application/json"}
     if headers:
         h.update(headers)
-    return requests.post(f"{CORE_URL}{path}", headers=h,
-                         data=json.dumps(body, separators=(",", ":")), timeout=15)
+    return requests.post(
+        f"{CORE_URL}{path}", headers=h,
+        data=json.dumps(body, separators=(",", ":")), timeout=15,
+    )
 
 
 def admin_get(path: str) -> Any:
-    r = requests.get(f"{CORE_URL}{path}",
-                     headers={"x-admin-key": ADMIN_KEY}, timeout=10)
+    r = requests.get(f"{CORE_URL}{path}", headers={"x-admin-key": ADMIN_KEY}, timeout=10)
     r.raise_for_status()
     return r.json()
 
 
 def admin_post(path: str) -> Any:
-    r = requests.post(f"{CORE_URL}{path}",
-                      headers={"x-admin-key": ADMIN_KEY}, timeout=30)
+    r = requests.post(f"{CORE_URL}{path}", headers={"x-admin-key": ADMIN_KEY}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
-# ─── Flow steps ─────────────────────────────────────────────────────
+# ─── Step emitter ───────────────────────────────────────────────────
 
-def step_user_auth(email: str, password: str) -> tuple[str, str]:
-    r = post_json("/user/auth", {"email": email, "password": password})
-    r.raise_for_status()
-    j = r.json()
-    return j["session"], j["key_image"]
+class StepStream:
+    """Emits NDJSON events to stdout when streaming, else pretty-prints."""
+
+    def __init__(self, stream: bool):
+        self.stream = stream
+
+    def emit(self, event: str, **fields):
+        evt = {"event": event, **fields}
+        if self.stream:
+            print(json.dumps(evt, separators=(",", ":")), flush=True)
+        else:
+            ts = time.strftime("%H:%M:%S")
+            label = fields.get("label", event)
+            ms = fields.get("ms")
+            ms_str = f"  [{ms}ms]" if ms is not None else ""
+            ok = "✓" if fields.get("ok", True) else "✗"
+            print(f"  {ts} {ok} {label}{ms_str}", flush=True)
+            for k, v in fields.items():
+                if k in ("label", "ms", "ok"):
+                    continue
+                if isinstance(v, str) and len(v) > 60:
+                    v = v[:60] + "…"
+                print(f"      {k}={v}")
+
+    def step(self, step_id: str, label: str):
+        return _StepCtx(self, step_id, label)
 
 
-def step_register_agent(
-    session: str, human_ki: str,
-    ring_pub_hex: str, ring_ki_hex: str,
-    pop_pub_b64u: str, pop_jkt: str,
-) -> tuple[str, str, str]:
-    """Returns (agent_id, agent_checksum, intent_json_used)."""
-    intent = {
+class _StepCtx:
+    def __init__(self, em: StepStream, step_id: str, label: str):
+        self.em = em
+        self.step_id = step_id
+        self.label = label
+        self.t0 = 0.0
+        self.detail: dict[str, Any] = {}
+
+    def __enter__(self):
+        self.t0 = time.perf_counter()
+        self.em.emit("step.start", id=self.step_id, label=self.label)
+        return self
+
+    def add(self, **fields):
+        self.detail.update(fields)
+
+    def __exit__(self, exc_type, exc, tb):
+        ms = int((time.perf_counter() - self.t0) * 1000)
+        if exc:
+            self.em.emit("step.fail", id=self.step_id, label=self.label, ms=ms,
+                         error=str(exc), **self.detail)
+            return False
+        self.em.emit("step.done", id=self.step_id, label=self.label, ms=ms, ok=True,
+                     **self.detail)
+
+
+# ─── Bundle: a freshly-registered agent ─────────────────────────────
+
+class AgentBundle:
+    """Everything the script needs to call protected endpoints as one agent."""
+
+    def __init__(self):
+        self.session: str = ""
+        self.human_ki: str = ""
+        self.ring_secret_hex: str = ""
+        self.ring_public_hex: str = ""
+        self.ring_ki_hex: str = ""
+        self.pop_sk: Ed25519PrivateKey | None = None
+        self.pop_pub_b64u: str = ""
+        self.pop_jkt: str = ""
+        self.agent_id: str = ""
+        self.config_digest: str = ""
+
+    def sign_headers(self, method: str, path: str, body_bytes: bytes) -> dict[str, str]:
+        assert self.pop_sk is not None
+        return sign_call_headers(
+            self.pop_sk, self.agent_id, self.config_digest, method, path, body_bytes
+        )
+
+
+# ─── Provisioning helper (shared by run + attacks) ──────────────────
+
+def provision_agent(
+    em: StepStream,
+    email: str,
+    password: str,
+    intent: dict | None = None,
+) -> AgentBundle:
+    bundle = AgentBundle()
+
+    # 1. user_auth
+    with em.step("auth", "/user/auth") as s:
+        r = post_json("/user/auth", {"email": email, "password": password})
+        r.raise_for_status()
+        j = r.json()
+        bundle.session = j["session"]
+        bundle.human_ki = j["key_image"]
+        s.add(human_key_image=bundle.human_ki[:16] + "…")
+
+    # 2. keygen ring + PoP
+    with em.step("keygen", "keygen ring + PoP") as s:
+        ring = keygen_ring()
+        bundle.ring_secret_hex = ring["secret_hex"]
+        bundle.ring_public_hex = ring["public_key_hex"]
+        bundle.ring_ki_hex = ring["ring_key_image_hex"]
+
+        bundle.pop_sk = Ed25519PrivateKey.generate()
+        pop_pub_raw = bundle.pop_sk.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        bundle.pop_pub_b64u = b64u(pop_pub_raw)
+        bundle.pop_jkt = b64u(hashlib.sha256(pop_pub_raw).digest())
+        s.add(
+            ring_pub=bundle.ring_public_hex[:16] + "…",
+            pop_jkt=bundle.pop_jkt[:14] + "…",
+        )
+
+    # 3. /agent/register
+    final_intent = intent or {
         "scope": ["payment_initiation"],
-        "maxAmount": 100.0,                 # 100.00 EUR cap
+        "maxAmount": 100.0,
         "currency": "EUR",
-        "constraints": {
-            "merchant_allowlist": ["mch_demo_payments"],
-        },
+        "constraints": {"merchant_allowlist": ["mch_demo_payments"]},
     }
-    intent_json = json.dumps(intent, separators=(",", ":"))
-    body = {
-        "human_key_image": human_ki,
-        "agent_type": "llm",
-        "checksum_inputs": {
-            "model_id": "claude-opus-4-7",
-            "system_prompt": f"sim agent {time.time()}",
-            "tools": ["search", "pay"],
-        },
-        "agent_checksum": "",                # server computes
-        "intent_json": intent_json,
-        "public_key_hex": ring_pub_hex,
-        "ring_key_image_hex": ring_ki_hex,
-        "pop_jkt": pop_jkt,
-        "pop_public_key_b64u": pop_pub_b64u,
-        "ttl_secs": 3600,
-    }
-    r = post_json("/agent/register", body, {"x-sauron-session": session})
-    if not r.ok:
-        raise RuntimeError(f"register_agent failed: HTTP {r.status_code} {r.text}")
-    agent_id = r.json()["agent_id"]
-    rec = requests.get(f"{CORE_URL}/agent/{agent_id}", timeout=10)
-    rec.raise_for_status()
-    return agent_id, rec.json()["agent_checksum"], intent_json
+    with em.step("register", "/agent/register") as s:
+        body = {
+            "human_key_image": bundle.human_ki,
+            "agent_type": "llm",
+            "checksum_inputs": {
+                "model_id": (intent or {}).get("model_id", "claude-opus-4-7"),
+                "system_prompt": (intent or {}).get(
+                    "system_prompt", f"Demo agent {time.time()}"
+                ),
+                "tools": (intent or {}).get("tools", ["search", "pay"]),
+            },
+            "agent_checksum": "",
+            "intent_json": json.dumps(final_intent, separators=(",", ":")),
+            "public_key_hex": bundle.ring_public_hex,
+            "ring_key_image_hex": bundle.ring_ki_hex,
+            "pop_jkt": bundle.pop_jkt,
+            "pop_public_key_b64u": bundle.pop_pub_b64u,
+            "ttl_secs": 3600,
+        }
+        r = post_json("/agent/register", body, {"x-sauron-session": bundle.session})
+        if not r.ok:
+            raise RuntimeError(f"register failed: {r.status_code} {r.text}")
+        bundle.agent_id = r.json()["agent_id"]
+        rec = requests.get(f"{CORE_URL}/agent/{bundle.agent_id}", timeout=10).json()
+        bundle.config_digest = rec["agent_checksum"]
+        s.add(
+            agent_id=bundle.agent_id,
+            config_digest=bundle.config_digest[:24] + "…",
+        )
+
+    return bundle
 
 
-def step_issue_ajwt(session: str, agent_id: str) -> tuple[str, str]:
-    """Returns (ajwt_compact, jti)."""
-    r = post_json("/agent/token", {"agent_id": agent_id, "ttl_secs": 600},
-                  {"x-sauron-session": session})
-    if not r.ok:
-        raise RuntimeError(f"issue token failed: {r.text}")
+def issue_ajwt(bundle: AgentBundle) -> tuple[str, str]:
+    r = post_json(
+        "/agent/token",
+        {"agent_id": bundle.agent_id, "ttl_secs": 600},
+        {"x-sauron-session": bundle.session},
+    )
+    r.raise_for_status()
     ajwt = r.json()["ajwt"]
-    # decode jti claim from middle segment
     parts = ajwt.split(".")
     payload_b = parts[1] + "=" * (-len(parts[1]) % 4)
     claims = json.loads(base64.urlsafe_b64decode(payload_b.encode()))
     return ajwt, claims["jti"]
 
 
-def step_pop_challenge(session: str, agent_id: str) -> tuple[str, str]:
-    r = post_json("/agent/pop/challenge", {"agent_id": agent_id},
-                  {"x-sauron-session": session})
-    if not r.ok:
-        raise RuntimeError(f"pop challenge failed: {r.text}")
-    j = r.json()
-    return j["pop_challenge_id"], j["challenge"]
+# ─── Full run ───────────────────────────────────────────────────────
 
+def cmd_run(args: argparse.Namespace) -> int:
+    em = StepStream(stream=args.stream)
 
-def step_action_challenge(
-    pop_sk: Ed25519PrivateKey, agent_id: str, config_digest: str,
-    human_ki: str, payment_ref: str, merchant_id: str, amount_minor: int,
-    currency: str, ajwt_jti: str,
-) -> dict:
-    """Returns the canonical envelope JSON (with ring keys + signer index)."""
-    body = {
-        "agent_id": agent_id,
-        "human_key_image": human_ki,
-        "action": "payment_initiation",
-        "resource": payment_ref,
-        "merchant_id": merchant_id,
-        "amount_minor": amount_minor,
-        "currency": currency,
-        "ajwt_jti": ajwt_jti,
-        "ttl_secs": 120,
-    }
-    body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
-    sig_headers = sign_call_headers(
-        pop_sk, agent_id, config_digest,
-        "POST", "/agent/action/challenge", body_bytes,
+    em.emit("run.begin",
+            email=args.email, n_actions=args.n_actions,
+            core=CORE_URL)
+
+    intent = None
+    if any([args.model_id, args.system_prompt, args.tools,
+            args.max_amount, args.currency, args.merchant_allowlist]):
+        intent = {
+            "scope": (args.intent_scope.split(",") if args.intent_scope
+                      else ["payment_initiation"]),
+            "maxAmount": float(args.max_amount or 100.0),
+            "currency": (args.currency or "EUR").upper(),
+            "constraints": {
+                "merchant_allowlist": (
+                    args.merchant_allowlist.split(",") if args.merchant_allowlist
+                    else ["mch_demo_payments"]
+                )
+            },
+            "model_id": args.model_id or "claude-opus-4-7",
+            "system_prompt": args.system_prompt or f"Demo agent {time.time()}",
+            "tools": args.tools.split(",") if args.tools else ["search", "pay"],
+        }
+
+    bundle = provision_agent(em, args.email, args.password, intent=intent)
+
+    receipts: list[dict] = []
+    for i in range(args.n_actions):
+        amount_minor = 1500 + (i * 250)
+        merchant_id = (
+            (intent or {}).get("constraints", {}).get("merchant_allowlist", [""])[0]
+            or "mch_demo_payments"
+        )
+        currency = ((intent or {}).get("currency", "EUR")).upper()
+        payment_ref = f"pay_demo_{int(time.time() * 1000)}_{i}"
+
+        with em.step(f"ajwt.{i}", f"/agent/token (action {i + 1})") as s:
+            ajwt, jti = issue_ajwt(bundle)
+            s.add(jti=jti[:14] + "…")
+
+        with em.step(f"pop.{i}", "/agent/pop/challenge → JWS") as s:
+            r = post_json(
+                "/agent/pop/challenge",
+                {"agent_id": bundle.agent_id},
+                {"x-sauron-session": bundle.session},
+            )
+            r.raise_for_status()
+            pj = r.json()
+            pop_jws = make_pop_jws(bundle.pop_sk, pj["challenge"])
+            s.add(challenge_id=pj["pop_challenge_id"][:14] + "…")
+
+        with em.step(f"action.{i}", "/agent/action/challenge") as s:
+            body = {
+                "agent_id": bundle.agent_id,
+                "human_key_image": bundle.human_ki,
+                "action": "payment_initiation",
+                "resource": payment_ref,
+                "merchant_id": merchant_id,
+                "amount_minor": amount_minor,
+                "currency": currency,
+                "ajwt_jti": jti,
+                "ttl_secs": 120,
+            }
+            body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            sig_h = bundle.sign_headers("POST", "/agent/action/challenge", body_bytes)
+            r = requests.post(
+                f"{CORE_URL}/agent/action/challenge",
+                headers={"content-type": "application/json", **sig_h},
+                data=body_bytes, timeout=15,
+            )
+            if not r.ok:
+                raise RuntimeError(f"action/challenge: {r.status_code} {r.text}")
+            ch = r.json()
+
+        with em.step(f"ring.{i}", "ring-sign canonical envelope") as s:
+            ring_proof = sign_ring_challenge(bundle.ring_secret_hex, json.dumps(ch))
+            s.add(envelope_nonce=ch["envelope"]["nonce"][:14] + "…")
+
+        with em.step(f"authorize.{i}", "/agent/payment/authorize") as s:
+            body = {
+                "ajwt": ajwt,
+                "amount_minor": amount_minor,
+                "currency": currency,
+                "payment_ref": payment_ref,
+                "merchant_id": merchant_id,
+                "pop_challenge_id": pj["pop_challenge_id"],
+                "pop_jws": pop_jws,
+                "agent_action": ring_proof,
+            }
+            body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            sig_h = bundle.sign_headers("POST", "/agent/payment/authorize", body_bytes)
+            r = requests.post(
+                f"{CORE_URL}/agent/payment/authorize",
+                headers={"content-type": "application/json", **sig_h},
+                data=body_bytes, timeout=15,
+            )
+            if not r.ok:
+                raise RuntimeError(f"payment_authorize: {r.status_code} {r.text}")
+            res = r.json()
+            rcpt = res.get("action_receipt", {})
+            s.add(
+                receipt_id=rcpt.get("receipt_id"),
+                action_hash=(rcpt.get("action_hash", "") or "")[:24] + "…",
+                amount_eur=f"{amount_minor / 100:.2f}",
+            )
+            receipts.append({
+                "receipt_id": rcpt.get("receipt_id"),
+                "action_hash": rcpt.get("action_hash"),
+                "amount_minor": amount_minor,
+                "currency": currency,
+            })
+
+    with em.step("anchor", "/admin/anchor/agent-actions/run") as s:
+        run = admin_post("/admin/anchor/agent-actions/run")
+        s.add(anchor_id=run.get("anchor_id") or "—")
+
+    anchor = admin_get("/admin/anchor/status")
+    em.emit(
+        "run.done",
+        agent_id=bundle.agent_id,
+        config_digest=bundle.config_digest,
+        receipts=receipts,
+        anchor_id=run.get("anchor_id"),
+        anchor_status=anchor,
     )
-    headers = {"content-type": "application/json", **sig_headers}
-    r = requests.post(f"{CORE_URL}/agent/action/challenge",
-                      headers=headers, data=body_bytes, timeout=15)
-    if not r.ok:
-        raise RuntimeError(f"action/challenge failed: HTTP {r.status_code} {r.text}")
-    return r.json()
+    return 0
 
 
-def step_payment_authorize(
-    pop_sk: Ed25519PrivateKey, agent_id: str, config_digest: str,
-    ajwt: str, amount_minor: int, currency: str,
-    payment_ref: str, merchant_id: str,
-    pop_challenge_id: str, pop_jws: str,
-    ring_proof: dict[str, Any],
-) -> dict:
-    body = {
-        "ajwt": ajwt,
-        "amount_minor": amount_minor,
-        "currency": currency,
-        "payment_ref": payment_ref,
-        "merchant_id": merchant_id,
-        "pop_challenge_id": pop_challenge_id,
-        "pop_jws": pop_jws,
-        "agent_action": ring_proof,
+# ─── Attacks ────────────────────────────────────────────────────────
+#
+# All attacks target /agent/egress/log because it is the simplest
+# protected endpoint (per-call sig + agent config-digest + agent_id).
+# Each attack performs ONE deliberately-broken request and asserts
+# the server rejection matches the expected defence.
+
+ATTACKS = {
+    "replay_jti": {
+        "label": "Replay an A-JWT (jti single-use)",
+        "expect": "first OK, second 401 jti replay",
+    },
+    "tamper_body": {
+        "label": "Tamper request body after signing",
+        "expect": "401 — call signature mismatch",
+    },
+    "replay_nonce": {
+        "label": "Reuse the same per-call nonce",
+        "expect": "409 — call nonce replay",
+    },
+    "drift_digest": {
+        "label": "Drift x-sauron-agent-config-digest header",
+        "expect": "401 — config drift",
+    },
+    "forged_agent_id": {
+        "label": "Sign with one agent's PoP, claim a different agent_id",
+        "expect": "401 — PoP / agent_id mismatch",
+    },
+}
+
+
+def cmd_attack(args: argparse.Namespace) -> int:
+    em = StepStream(stream=args.stream)
+
+    if args.kind not in ATTACKS:
+        em.emit("attack.error", error=f"unknown attack kind: {args.kind}")
+        return 2
+
+    spec = ATTACKS[args.kind]
+    em.emit("attack.begin", kind=args.kind, label=spec["label"], expect=spec["expect"])
+
+    bundle = provision_agent(em, args.email, args.password)
+
+    egress_path = "/agent/egress/log"
+    base_body = {
+        "agent_id": bundle.agent_id,
+        "target_host": "api.example.com",
+        "target_path": "/v1/demo",
+        "method": "GET",
+        "body_hash_hex": "",
+        "status_code": 200,
     }
-    body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
-    sig_headers = sign_call_headers(
-        pop_sk, agent_id, config_digest,
-        "POST", "/agent/payment/authorize", body_bytes,
-    )
-    headers = {"content-type": "application/json", **sig_headers}
-    r = requests.post(f"{CORE_URL}/agent/payment/authorize",
-                      headers=headers, data=body_bytes, timeout=15)
-    if not r.ok:
-        raise RuntimeError(f"payment_authorize failed: HTTP {r.status_code} {r.text}")
-    return r.json()
+    body_bytes = json.dumps(base_body, separators=(",", ":")).encode("utf-8")
+
+    blocked = False
+    status = 0
+    detail = ""
+
+    if args.kind == "replay_jti":
+        # Properly replay jti: do a real /agent/verify with PoP twice.
+        ajwt, jti = issue_ajwt(bundle)
+
+        def verify_with_pop() -> tuple[int, dict]:
+            r = post_json("/agent/pop/challenge", {"agent_id": bundle.agent_id},
+                          {"x-sauron-session": bundle.session})
+            r.raise_for_status()
+            pj = r.json()
+            pop_jws = make_pop_jws(bundle.pop_sk, pj["challenge"])
+            r = post_json("/agent/verify", {
+                "ajwt": ajwt,
+                "pop_challenge_id": pj["pop_challenge_id"],
+                "pop_jws": pop_jws,
+                "consume_jti": True,
+            })
+            return r.status_code, r.json()
+
+        with em.step("attack.first", "first /agent/verify (legit) — consumes jti") as s:
+            st1, j1 = verify_with_pop()
+            s.add(status=st1, valid=j1.get("valid"), jti_consumed=j1.get("valid"))
+        with em.step("attack.replay", "replay same A-JWT (jti reuse)") as s:
+            st2, j2 = verify_with_pop()
+            blocked = (j2.get("valid") is False)
+            status = st2
+            detail = j2.get("error") or json.dumps(j2)[:120]
+            s.add(status=status, blocked=blocked, detail=detail)
+
+    elif args.kind == "tamper_body":
+        sig_h = bundle.sign_headers("POST", egress_path, body_bytes)
+        # send a different body with the same headers
+        tampered = {**base_body, "target_path": "/v1/totally-different"}
+        tampered_bytes = json.dumps(tampered, separators=(",", ":")).encode("utf-8")
+        with em.step("attack.tamper", "POST /agent/egress/log with tampered body") as s:
+            r = requests.post(
+                f"{CORE_URL}{egress_path}",
+                headers={"content-type": "application/json", **sig_h},
+                data=tampered_bytes, timeout=10,
+            )
+            blocked = not r.ok
+            status = r.status_code
+            detail = r.text[:160]
+            s.add(status=status, blocked=blocked, detail=detail)
+
+    elif args.kind == "replay_nonce":
+        sig_h = bundle.sign_headers("POST", egress_path, body_bytes)
+        with em.step("attack.first", "first POST (legit)") as s:
+            r1 = requests.post(
+                f"{CORE_URL}{egress_path}",
+                headers={"content-type": "application/json", **sig_h},
+                data=body_bytes, timeout=10,
+            )
+            s.add(status=r1.status_code)
+        with em.step("attack.replay", "second POST same nonce") as s:
+            r2 = requests.post(
+                f"{CORE_URL}{egress_path}",
+                headers={"content-type": "application/json", **sig_h},
+                data=body_bytes, timeout=10,
+            )
+            blocked = not r2.ok
+            status = r2.status_code
+            detail = r2.text[:160]
+            s.add(status=status, blocked=blocked, detail=detail)
+
+    elif args.kind == "drift_digest":
+        sig_h = bundle.sign_headers("POST", egress_path, body_bytes)
+        sig_h["x-sauron-agent-config-digest"] = "sha256:" + "0" * 64
+        with em.step("attack.drift", "POST with wrong config-digest") as s:
+            r = requests.post(
+                f"{CORE_URL}{egress_path}",
+                headers={"content-type": "application/json", **sig_h},
+                data=body_bytes, timeout=10,
+            )
+            blocked = not r.ok
+            status = r.status_code
+            detail = r.text[:160]
+            s.add(status=status, blocked=blocked, detail=detail)
+
+    elif args.kind == "forged_agent_id":
+        # Make a SECOND agent under the same human, then sign with agent #2's
+        # PoP key but claim agent #1's agent_id in the header.
+        em.emit("attack.note", note="provisioning a second agent under the same human…")
+        bundle2 = provision_agent(em, args.email, args.password)
+        forged_body = {**base_body, "agent_id": bundle.agent_id}  # claim #1
+        forged_bytes = json.dumps(forged_body, separators=(",", ":")).encode("utf-8")
+        # but sign with bundle2's PoP key, while claiming bundle.agent_id
+        sig_h = bundle2.sign_headers("POST", egress_path, forged_bytes)
+        sig_h["x-sauron-agent-id"] = bundle.agent_id  # impersonation
+        with em.step("attack.forge", "POST claiming agent #1, signed by #2") as s:
+            r = requests.post(
+                f"{CORE_URL}{egress_path}",
+                headers={"content-type": "application/json", **sig_h},
+                data=forged_bytes, timeout=10,
+            )
+            blocked = not r.ok
+            status = r.status_code
+            detail = r.text[:160]
+            s.add(status=status, blocked=blocked, detail=detail)
+
+    em.emit("attack.done",
+            kind=args.kind,
+            label=spec["label"],
+            expect=spec["expect"],
+            blocked=blocked,
+            status=status,
+            detail=detail)
+    return 0 if blocked else 1
 
 
-# ─── Main orchestration ─────────────────────────────────────────────
+# ─── CLI ────────────────────────────────────────────────────────────
+
+def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--n-actions", type=int, default=2)
+    p.add_argument("--email",     default="alice@sauron.dev")
+    p.add_argument("--password",  default="pass_alice")
+    p.add_argument("--stream",    action="store_true",
+                   help="emit one NDJSON event per step on stdout")
+    # Intent overrides
+    p.add_argument("--model-id",   dest="model_id",   default="")
+    p.add_argument("--system-prompt", dest="system_prompt", default="")
+    p.add_argument("--tools",      default="")        # comma-separated
+    p.add_argument("--max-amount", dest="max_amount", default="")
+    p.add_argument("--currency",   default="")
+    p.add_argument("--merchant-allowlist", dest="merchant_allowlist", default="")
+    p.add_argument("--intent-scope", dest="intent_scope", default="")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n-actions", type=int, default=2,
-                    help="how many real action receipts to generate (default 2)")
-    ap.add_argument("--email", default="alice@sauron.dev")
-    ap.add_argument("--password", default="pass_alice")
+    sub = ap.add_subparsers(dest="cmd")
+
+    p_run = sub.add_parser("run")
+    _add_common(p_run)
+    p_run.set_defaults(func=cmd_run)
+
+    p_attack = sub.add_parser("attack")
+    p_attack.add_argument("kind", choices=list(ATTACKS.keys()))
+    _add_common(p_attack)
+    p_attack.set_defaults(func=cmd_attack)
+
+    # Backward compat: when invoked without a subcommand, default to `run`.
+    # Existing callers (FastAPI demo endpoint) pass --n-actions/--email/etc.
+    _add_common(ap)
+    ap.set_defaults(func=cmd_run)
+
     args = ap.parse_args()
 
-    # liveness
-    r = requests.get(f"{CORE_URL}/health", timeout=3)
-    if r.status_code != 200 or not r.json().get("ok"):
-        print(f"core not healthy at {CORE_URL}", file=sys.stderr)
+    # liveness probe
+    try:
+        r = requests.get(f"{CORE_URL}/health", timeout=3)
+        if r.status_code != 200 or not r.json().get("ok"):
+            print(f"core not healthy at {CORE_URL}", file=sys.stderr)
+            return 2
+    except Exception as e:
+        print(f"core unreachable: {e}", file=sys.stderr)
         return 2
 
-    print("== before ==")
-    before = admin_get("/admin/anchor/status")
-    actions_before = admin_get("/admin/agent_actions/recent")
-    print(f"  receipts={len(actions_before)} batches={before['agent_action_batches']} "
-          f"btc_total={before['bitcoin_total']} sol_total={before['solana_total']}")
-
-    # 1. Auth
-    print("\n== 1. user_auth ==")
-    session, human_ki = step_user_auth(args.email, args.password)
-    print(f"  session ok, key_image={human_ki[:24]}…")
-
-    # 2. Generate ring + PoP keys
-    print("\n== 2. keygen (ring + PoP) ==")
-    ring = keygen_ring()
-    pop_sk = Ed25519PrivateKey.generate()
-    pop_pub_raw = pop_sk.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    pop_pub_b64u = b64u(pop_pub_raw)
-    pop_jkt = b64u(hashlib.sha256(pop_pub_raw).digest())
-    print(f"  ring_pub={ring['public_key_hex'][:18]}… pop_jkt={pop_jkt[:14]}…")
-
-    # 3. Register agent (paid scope: payment_initiation, EUR cap 100, allowlist)
-    print("\n== 3. register agent ==")
-    agent_id, config_digest, intent_json = step_register_agent(
-        session, human_ki,
-        ring["public_key_hex"], ring["ring_key_image_hex"],
-        pop_pub_b64u, pop_jkt,
-    )
-    print(f"  agent_id={agent_id}")
-    print(f"  config_digest={config_digest[:24]}…")
-
-    # 4..N: produce action receipts
-    successes = 0
-    for i in range(args.n_actions):
-        amount_minor = 1500 + (i * 250)   # 15.00, 17.50, … each ≤ maxAmount=100.00
-        merchant_id = "mch_demo_payments"
-        payment_ref = f"pay_demo_{int(time.time() * 1000)}_{i}"
-
-        print(f"\n== 4.{i + 1} action receipt for {amount_minor / 100:.2f} EUR ==")
-
-        # 4a. fresh A-JWT (each receipt consumes the jti)
-        ajwt, jti = step_issue_ajwt(session, agent_id)
-
-        # 4b. fresh PoP challenge → JWS (single-use)
-        pch_id, challenge = step_pop_challenge(session, agent_id)
-        pop_jws = make_pop_jws(pop_sk, challenge)
-
-        # 4c. action challenge → canonical envelope
-        ch = step_action_challenge(
-            pop_sk, agent_id, config_digest,
-            human_ki, payment_ref, merchant_id, amount_minor,
-            "EUR", jti,
-        )
-
-        # 4d. ring-sign canonical
-        ring_proof = sign_ring_challenge(ring["secret_hex"], json.dumps(ch))
-
-        # 4e. payment_authorize (creates receipt)
-        try:
-            res = step_payment_authorize(
-                pop_sk, agent_id, config_digest, ajwt,
-                amount_minor, "EUR", payment_ref, merchant_id,
-                pch_id, pop_jws, ring_proof,
-            )
-        except Exception as e:
-            print(f"  FAILED: {e}")
-            continue
-        rcpt = res.get("action_receipt", {})
-        successes += 1
-        print(f"  receipt_id={rcpt.get('receipt_id')}")
-        print(f"  action_hash={rcpt.get('action_hash', '')[:24]}…")
-        print(f"  status={rcpt.get('status')}")
-
-    print(f"\n== {successes}/{args.n_actions} action receipts created ==")
-
-    # 5. Force anchor batch (BTC + Solana if SAURON_SOLANA_ENABLED=1)
-    print("\n== 5. trigger anchor batch ==")
-    run = admin_post("/admin/anchor/agent-actions/run")
-    print(f"  result: {run}")
-
-    # 6. After-state
-    print("\n== after ==")
-    time.sleep(1)
-    after = admin_get("/admin/anchor/status")
-    actions_after = admin_get("/admin/agent_actions/recent")
-    print(f"  receipts={len(actions_after)} batches={after['agent_action_batches']} "
-          f"btc_total={after['bitcoin_total']} sol_total={after['solana_total']}")
-    print(f"  delta: receipts +{len(actions_after) - len(actions_before)}, "
-          f"batches +{after['agent_action_batches'] - before['agent_action_batches']}, "
-          f"BTC +{after['bitcoin_total'] - before['bitcoin_total']}, "
-          f"SOL +{after['solana_total'] - before['solana_total']}")
-    return 0 if successes > 0 else 1
+    func = getattr(args, "func", cmd_run)  # default = run for backward compat
+    try:
+        return func(args)
+    except Exception as e:
+        if args.stream:
+            print(json.dumps({"event": "fatal", "error": str(e)}), flush=True)
+        else:
+            print(f"FATAL: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

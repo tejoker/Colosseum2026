@@ -1554,6 +1554,173 @@ def _parse_simulate_output(stdout: str) -> dict:
     }
 
 
+_DEMO_ATTACKS = [
+    "replay_jti", "tamper_body", "replay_nonce", "drift_digest", "forged_agent_id",
+]
+
+
+def _demo_subprocess_args(body: dict, *, stream: bool, attack: str | None = None) -> list[str]:
+    """Build the simulate_real_actions.py argv for a given demo body."""
+    args = ["python3", "-u", str(_SIMULATE_SCRIPT)]
+    if attack:
+        args += ["attack", attack]
+    else:
+        args += ["run"]
+    if stream:
+        args += ["--stream"]
+
+    n_actions = max(1, min(int(body.get("n_actions") or 1), 5))
+    args += ["--n-actions", str(n_actions)]
+    args += ["--email", (body.get("email") or "alice@sauron.dev").strip()]
+    args += ["--password", (body.get("password") or "pass_alice").strip()]
+
+    # Optional intent overrides — only forwarded when set
+    for key, flag in [
+        ("model_id", "--model-id"),
+        ("system_prompt", "--system-prompt"),
+        ("tools", "--tools"),
+        ("max_amount", "--max-amount"),
+        ("currency", "--currency"),
+        ("merchant_allowlist", "--merchant-allowlist"),
+        ("intent_scope", "--intent-scope"),
+    ]:
+        v = body.get(key)
+        if v in (None, "", []):
+            continue
+        if isinstance(v, list):
+            v = ",".join(str(x) for x in v)
+        args += [flag, str(v)]
+    return args
+
+
+def _demo_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("SAURON_CORE_URL", _live.SAURON_URL)
+    env.setdefault("SAURON_ADMIN_KEY", os.getenv("SAURON_ADMIN_KEY", ADMIN_KEY))
+    env.setdefault(
+        "SAURONID_AGENT_ACTION_TOOL",
+        str(_REPO_ROOT / "core" / "target" / "release" / "agent-action-tool"),
+    )
+    return env
+
+
+@app.post("/api/live/demo/stream")
+async def live_demo_stream(req: Request):
+    """Server-sent-events feed of one full demo run.
+
+    Body: {n_actions, email, password, model_id?, system_prompt?, tools?,
+           max_amount?, currency?, merchant_allowlist?}
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+
+    if not _SIMULATE_SCRIPT.exists():
+        raise HTTPException(status_code=500, detail=f"script missing: {_SIMULATE_SCRIPT}")
+
+    cmd = _demo_subprocess_args(body, stream=True)
+    env = _demo_subprocess_env()
+
+    async def event_stream() -> AsyncIterator[str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=str(_REPO_ROOT),
+        )
+        assert proc.stdout is not None
+        try:
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                # Pass through as a single SSE message
+                yield f"data: {line}\n\n"
+        finally:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+        if proc.returncode and proc.returncode != 0:
+            stderr = (await proc.stderr.read()).decode("utf-8", errors="replace")[-1500:] if proc.stderr else ""
+            yield f"data: {json.dumps({'event': 'subprocess.exit', 'returncode': proc.returncode, 'stderr_tail': stderr})}\n\n"
+        yield "event: end\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/live/demo/attack/{kind}")
+async def live_demo_attack(kind: str, req: Request):
+    """Provision a fresh agent then perform one negative test against it.
+
+    Body: {email, password}
+    Returns the same NDJSON events as `/api/live/demo/stream` would emit.
+    """
+    if kind not in _DEMO_ATTACKS:
+        raise HTTPException(status_code=400, detail=f"unknown attack: {kind}")
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+
+    cmd = _demo_subprocess_args(body, stream=True, attack=kind)
+    env = _demo_subprocess_env()
+
+    async def event_stream() -> AsyncIterator[str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=str(_REPO_ROOT),
+        )
+        assert proc.stdout is not None
+        try:
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                yield f"data: {line}\n\n"
+        finally:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+        yield "event: end\ndata: {}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/live/demo/attacks")
+async def live_demo_attack_catalog():
+    return {
+        "attacks": [
+            {"kind": "replay_jti",       "label": "Replay an A-JWT (jti single-use)",
+             "expect": "second call rejected: A-JWT jti replay"},
+            {"kind": "tamper_body",      "label": "Tamper request body after signing",
+             "expect": "401 — call signature verification failed"},
+            {"kind": "replay_nonce",     "label": "Reuse the same per-call nonce",
+             "expect": "409 — call nonce replay"},
+            {"kind": "drift_digest",     "label": "Drift x-sauron-agent-config-digest header",
+             "expect": "401 — config drift"},
+            {"kind": "forged_agent_id",  "label": "Sign with one agent's PoP, claim a different agent_id",
+             "expect": "401 — config drift / PoP mismatch"},
+        ]
+    }
+
+
 @app.post("/api/live/demo/run")
 async def live_demo_run(req: Request):
     """Run the full agent-binding flow end-to-end. Body: {n_actions, email, password}."""
