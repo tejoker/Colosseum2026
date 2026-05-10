@@ -7,21 +7,15 @@ export const DASH_API = process.env.NEXT_PUBLIC_DASH_API_URL || "http://localhos
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface LiveStats {
-  total_users:            number;
-  total_clients:          number;
-  total_tokens_a_issued:  number;
-  total_tokens_a_burned:  number;
-  total_tokens_b_issued:  number;
-  total_tokens_b_spent:   number;
-  exchange_rate:          number;
+  total_users:   number;
+  total_clients: number;
 }
 
 export interface LiveClient {
-  name:            string;
-  public_key_hex:  string;
-  key_image_hex:   string;
-  client_type:     "FULL_KYC" | "ZKP_ONLY" | "BANK";
-  tokens_b:        number;
+  name:           string;
+  public_key_hex: string;
+  key_image_hex:  string;
+  client_type:    string;
 }
 
 export interface LiveUser {

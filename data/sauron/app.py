@@ -1405,9 +1405,12 @@ async def live_overview():
     by_day_requests = _Counter(int(r.get("timestamp", 0)) // 86400 for r in requests)
 
     daily = {
-        "dates": [_time.strftime("%Y-%m-%d", _time.gmtime(d * 86400)) for d in days],
-        "credit_a": [by_day_actions.get(d, 0) for d in days],
-        "credit_b": [by_day_requests.get(d, 0) for d in days],
+        "dates":         [_time.strftime("%Y-%m-%d", _time.gmtime(d * 86400)) for d in days],
+        "actions":       [by_day_actions.get(d, 0) for d in days],
+        "api_requests":  [by_day_requests.get(d, 0) for d in days],
+        # Backward-compat aliases for any older client; remove once nothing reads them.
+        "credit_a":      [by_day_actions.get(d, 0) for d in days],
+        "credit_b":      [by_day_requests.get(d, 0) for d in days],
     }
 
     # Ring sizes: surface what we actually have from live state.
@@ -1421,19 +1424,17 @@ async def live_overview():
 
     return {
         "kpis": {
-            "total_users": stats.get("total_users", 0),
-            "total_clients": stats.get("total_clients", 0),
-            "total_agents": len(agents),
-            "active_agents": sum(1 for a in agents if not a.get("revoked")),
-            "total_api_calls": stats.get("total_api_calls", 0),
+            "total_users":          stats.get("total_users", 0),
+            "total_clients":        stats.get("total_clients", 0),
+            "total_agents":         len(agents),
+            "active_agents":        sum(1 for a in agents if not a.get("revoked")),
+            "total_api_calls":      stats.get("total_api_calls", 0),
             "total_kyc_retrievals": stats.get("total_kyc_retrievals", 0),
-            "total_agent_calls": stats.get("total_agent_calls", 0),
-            "tokens_b_issued": stats.get("total_tokens_b_issued", 0),
-            "tokens_b_spent": stats.get("total_tokens_b_spent", 0),
+            "total_agent_calls":    stats.get("total_agent_calls", 0),
         },
-        "daily": daily,
-        "rings": rings,
-        "anchor": anchor,
+        "daily":    daily,
+        "rings":    rings,
+        "anchor":   anchor,
         "controls": stats.get("controls", {}),
     }
 

@@ -25,10 +25,15 @@ interface LiveOverview {
     total_api_calls?: number;
     total_kyc_retrievals?: number;
     total_agent_calls?: number;
-    tokens_b_issued?: number;
-    tokens_b_spent?: number;
   };
-  daily?: { dates: string[]; credit_a: number[]; credit_b: number[] };
+  daily?: {
+    dates: string[];
+    actions?: number[];
+    api_requests?: number[];
+    /** legacy aliases — still present for one release */
+    credit_a?: number[];
+    credit_b?: number[];
+  };
   rings?: { names: string[]; counts: number[] };
   anchor?: AnchorStatus;
   controls?: Record<string, unknown>;
@@ -289,7 +294,7 @@ export default function OverviewPage() {
                   datasets: [
                     {
                       label: "Action receipts",
-                      data: overview.daily?.credit_a ?? [],
+                      data: overview.daily?.actions ?? overview.daily?.credit_a ?? [],
                       borderColor: BRAND.blue,
                       backgroundColor: (ctx: { chart: { ctx: CanvasRenderingContext2D; chartArea: { top: number; bottom: number } | null } }) => {
                         const chart = ctx.chart;
@@ -309,7 +314,7 @@ export default function OverviewPage() {
                     },
                     {
                       label: "API requests",
-                      data: overview.daily?.credit_b ?? [],
+                      data: overview.daily?.api_requests ?? overview.daily?.credit_b ?? [],
                       borderColor: BRAND.cyan,
                       backgroundColor: "rgba(0,200,255,0.05)",
                       fill: false,
