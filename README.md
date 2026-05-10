@@ -65,7 +65,7 @@ Honest table. Re-verifiable from the source.
 ## Quickstart (one command, 60 seconds)
 
 ```bash
-git clone https://github.com/your-org/sauronid && cd sauronid
+git clone https://github.com/tejoker/Colosseum2026 sauronid && cd sauronid
 ./quickstart.sh
 ```
 
@@ -77,7 +77,57 @@ To run in fail-closed (production-like) mode:
 SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
 ```
 
+For a full local demo (core + analytics shim + branded Next.js dashboard) in one shot:
+
+```bash
+./launch.sh
+# core      → http://127.0.0.1:3001
+# analytics → http://127.0.0.1:8002
+# dashboard → http://127.0.0.1:3000   (Mandate Console)
+```
+
 To deploy in production: see [docs/operations.md](docs/operations.md).
+
+## Mandate Console — the web dashboard
+
+A branded Next.js console at `sauron-dashboard/` reads only live data from the running core (no parquet, no fixtures). Six routes:
+
+| Route | What it shows |
+|---|---|
+| `/` Overview | Active agents, PoP-bound count, daily action receipts (90d gradient line), anchor pipeline doughnut, ring memberships |
+| `/agents` | Agent registry with PoP / config-digest / action + egress counters, filter strip (TOTAL / ACTIVE / REVOKED / NO·POP) |
+| `/anchors` | Anchor batches, BTC OTS upgraded vs pending, Solana confirmed vs unconfirmed, recent receipts |
+| `/clients` | Partner-site ring members, search + type filter |
+| `/users` | OPRF key-image registry (humans), nationality breakdown |
+| `/requests` | Append-only activity log, polled every 5 s |
+
+Visual identity is in [`BRANDING.md`](BRANDING.md): dark navy canvas (`#06090F`), Sauron Blue / Ice Blue / Cyan, Instrument Serif display, Space Mono structural labels, Satoshi UI body. Investor pitch deck: [`SauronID_Pitch_Deck.pdf`](SauronID_Pitch_Deck.pdf).
+
+## End-to-end simulation
+
+Once the stack is up (`./launch.sh`), four scripts under [`scripts/`](scripts/) drive the full flow:
+
+```bash
+# Register N agents per seeded human + signed egress logs
+python3 scripts/simulate_agents.py
+
+# Full real action-receipt flow:
+#   user_auth → agent_register (ring + PoP + intent) → A-JWT → action/challenge
+#   → agent-action-tool sign-challenge → payment_authorize (per-call sig + PoP JWS)
+#   → POST /admin/anchor/agent-actions/run
+# Each iteration writes a row into agent_action_receipts and triggers a real
+# Bitcoin OTS anchor (and Solana when SAURON_SOLANA_ENABLED=1).
+python3 scripts/simulate_real_actions.py --n-actions 2
+
+# Solana devnet keypair generation + airdrop with multi-RPC retry
+python3 scripts/solana_devnet_setup.py
+
+# Independent Solana wire-format audit (re-implements the Rust transaction
+# encoder in Python and posts to devnet)
+python3 scripts/solana_audit.py
+```
+
+After `simulate_real_actions.py`, the dashboard's Anchors page populates with real `agent_action_receipts`, the BTC anchor count advances, and (with Solana enabled) so does the Solana count.
 
 ## Integrate with your AI agent
 
@@ -149,9 +199,12 @@ SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
 ## Critical files
 
 - Core service: [`core/`](core/) — Rust, axum, ~21k lines.
+- Mandate Console: [`sauron-dashboard/`](sauron-dashboard/) — Next.js + Chart.js, dark branded UI reading live core data only.
+- Brand system: [`BRANDING.md`](BRANDING.md), pitch deck at [`SauronID_Pitch_Deck.pdf`](SauronID_Pitch_Deck.pdf), eye logo at [`logo.svg`](logo.svg).
 - TypeScript client: [`agentic/`](agentic/) — `signCall`, `register`, `popKeys`.
 - Python client: [`clients/python/sauronid_client/`](clients/python/sauronid_client/) — LangChain + OpenAI + Anthropic adapters.
-- Empirical attack suite: [`kya-redteam/`](kya-redteam/) — 9 invariant scenarios + 16-attack empirical suite.
+- Empirical attack suite: [`kya-redteam/`](kya-redteam/) — 9 invariant scenarios + 16-attack empirical suite + 18-attack Tavily fuzzer.
+- Simulation + audit scripts: [`scripts/`](scripts/) — real action receipts, agent stress, Solana devnet setup + wire audit.
 - Custom Solana program: [`contracts/sauron_ledger/`](contracts/sauron_ledger/) — Anchor program (optional; default uses Solana Memo).
 - Operations: [`docs/operations.md`](docs/operations.md) — every env var, every deploy step.
 - Threat model: [`docs/threat-model.md`](docs/threat-model.md) — what we protect against, what we don't.
