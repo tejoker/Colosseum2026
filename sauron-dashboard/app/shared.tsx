@@ -85,34 +85,123 @@ function resolveAccent(accent?: string): string {
   return ACCENT_MAP[accent] ?? "text-white";
 }
 
-/* ── KPI tile — glass surface, mono label, gradient hairline divider ───── */
+/* ── Sparkline helper — inline SVG polyline ──────────────────────── */
+function Sparkline({ data, color }: { data: number[]; color: string }) {
+  const W = 44;
+  const H = 24;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const pts = data
+    .map((v, i) => {
+      const x = (i / (data.length - 1)) * W;
+      const y = H - ((v - min) / range) * (H - 2) - 1;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <svg
+      width={W}
+      height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      className="flex-shrink-0 overflow-visible"
+      aria-hidden
+    >
+      <polyline
+        points={pts}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={0.8}
+      />
+    </svg>
+  );
+}
+
+/* Accent colour → raw hex for sparkline stroke */
+const ACCENT_HEX: Record<string, string> = {
+  blue:    "#4F8CFE",
+  cyan:    "#00C8FF",
+  red:     "#F87171",
+  emerald: "#34D399",
+  amber:   "#FCD34D",
+  violet:  "#A78BFA",
+  white:   "#FFFFFF",
+};
+
+/* ── KPI tile — glass surface, mono label, optional delta + sparkline */
 export function Kpi({
   label,
   value,
   sub,
   accent,
+  delta,
+  sparkData,
 }: {
   label: string;
   value: string | number;
   sub?: string;
   accent?: string;
+  delta?: number;
+  sparkData?: number[];
 }) {
+  const accentClass = resolveAccent(accent);
+  const accentHex =
+    accent && ACCENT_HEX[accent]
+      ? ACCENT_HEX[accent]
+      : accent?.startsWith("#")
+        ? accent
+        : "#4F8CFE";
+
+  const hasDelta = delta !== undefined;
+  const hasSpark = sparkData && sparkData.length >= 2;
+
   return (
-    <div className="relative glass rounded-md px-7 py-8 flex flex-col gap-5 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
+    <div className="relative glass rounded-md px-5 py-5 flex flex-col gap-3 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
       {/* Top hairline accent — sweeps in on hover */}
       <span
         aria-hidden
         className="absolute top-0 left-0 right-0 h-px bg-[#4F8CFE] origin-left scale-x-0 group-hover:scale-x-100 transition-transform duration-500"
       />
+
       <span className="font-mono-label text-[9px] text-white/45">{label}</span>
+
       <span
-        className={`text-[32px] tabular-nums leading-none ${resolveAccent(accent)}`}
+        className={`text-[28px] tabular-nums leading-none ${accentClass}`}
         style={{ fontFamily: "Satoshi, system-ui, sans-serif", fontWeight: 500, letterSpacing: "-0.025em" }}
       >
         {value}
       </span>
-      {sub && (
-        <span className="text-[10.5px] text-white/35 font-mono-label tracking-[0.12em] mt-1">
+
+      {/* Bottom row: delta badge (left) + sparkline (right) */}
+      {(hasDelta || hasSpark) && (
+        <div className="flex items-end justify-between gap-2">
+          {hasDelta ? (
+            <span
+              className={[
+                "font-mono-label text-[7.5px] tracking-[0.08em]",
+                delta > 0
+                  ? "text-[#34D399]/85"
+                  : delta < 0
+                    ? "text-[#F87171]/85"
+                    : "text-white/25",
+              ].join(" ")}
+            >
+              {delta > 0 ? `↑ +${delta}` : delta < 0 ? `↓ ${delta}` : "─ 0"}
+              {" · 7D"}
+            </span>
+          ) : (
+            <span />
+          )}
+          {hasSpark && <Sparkline data={sparkData!} color={accentHex} />}
+        </div>
+      )}
+
+      {sub && !hasDelta && (
+        <span className="font-mono-label text-[10px] text-white/35 tracking-[0.12em]">
           {sub}
         </span>
       )}
@@ -200,12 +289,12 @@ export function Card({
     <div
       className={[
         bare ? "" : "glass",
-        "relative rounded-md px-10 pt-10 pb-12",
+        "relative rounded-md px-6 pt-5 pb-7",
         className ?? "",
       ].join(" ")}
     >
       {title && (
-        <div className="mb-12">
+        <div className="mb-5">
           <MonoLabel label={title} hex={hex} />
         </div>
       )}
