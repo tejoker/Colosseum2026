@@ -71,7 +71,7 @@ export default function AnchorsPage() {
   if (!anchor) return <Spinner />;
 
   return (
-    <div className="space-y-12">
+    <div className="space-y-14">
       <PageHeader
         eyebrow="ANCHOR.PIPELINE"
         hex="0x200"
@@ -113,7 +113,7 @@ export default function AnchorsPage() {
 
       {/* Two-chain explainer */}
       <Card title="DUAL.CHAIN.PROOF" hex="0x210">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-white/[0.04] rounded overflow-hidden">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <ChainPane
             chain="BTC"
             color="#FCD34D"
@@ -197,12 +197,12 @@ function ChainPane({
   verifyCmd: string;
 }) {
   return (
-    <div className="bg-[#0F1A35] p-6 relative overflow-hidden">
+    <div className="bg-[#0F1A35] p-8 relative overflow-hidden rounded border border-white/5">
       <div
         className="absolute -top-16 -right-16 w-40 h-40 rounded-full opacity-20 blur-2xl pointer-events-none"
         style={{ background: color }}
       />
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex items-center justify-between mb-7">
         <span className="font-mono-label text-[9.5px]" style={{ color }}>
           {chain} · CHAIN
         </span>
@@ -212,17 +212,17 @@ function ChainPane({
         />
       </div>
       <h3
-        className="font-display text-[24px] text-white leading-tight mb-3"
+        className="font-display text-[26px] text-white leading-tight mb-5"
         style={{ letterSpacing: "-0.01em" }}
       >
         {title}
       </h3>
-      <p className="text-[13px] text-white/55 leading-relaxed mb-4">{blurb}</p>
-      <div className="border-t border-white/5 pt-4">
-        <div className="font-mono-label text-[8.5px] text-white/35 mb-2">
+      <p className="text-[13px] text-white/55 leading-[1.7] mb-7">{blurb}</p>
+      <div className="border-t border-white/5 pt-6">
+        <div className="font-mono-label text-[8.5px] text-white/35 mb-3">
           INDEPENDENT.VERIFY
         </div>
-        <code className="block bg-[#06090F] border border-white/5 rounded px-3 py-2 font-mono text-[11.5px] text-[#4F8CFE]">
+        <code className="block bg-[#06090F] border border-white/5 rounded px-4 py-3 font-mono text-[11.5px] text-[#4F8CFE]">
           $ {verifyCmd}
         </code>
       </div>

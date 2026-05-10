@@ -71,7 +71,7 @@ export default function DemoPage() {
   }
 
   return (
-    <div className="space-y-12">
+    <div className="space-y-14">
       <PageHeader
         eyebrow="LIVE.DEMO"
         hex="0x900"
@@ -87,13 +87,13 @@ export default function DemoPage() {
 
       {/* Control panel */}
       <Card title="DEMO.CONTROLS" hex="0x901">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-10 mb-10">
           {/* Human picker */}
           <div className="space-y-4">
             <div className="font-mono-label text-[9px] text-white/45">
               SIGN AS HUMAN
             </div>
-            <div className="grid grid-cols-2 gap-px bg-white/[0.04] rounded overflow-hidden">
+            <div className="grid grid-cols-2 gap-3">
               {SEED_USERS.map((u) => {
                 const active = u.email === user.email;
                 return (
@@ -101,7 +101,7 @@ export default function DemoPage() {
                     key={u.email}
                     onClick={() => setUser(u)}
                     className={[
-                      "bg-[#0F1A35] py-3 px-3 transition-colors text-left",
+                      "bg-[#0F1A35] py-4 px-4 transition-colors text-left rounded border border-white/5",
                       active ? "" : "hover:bg-[#0F1A35]/60",
                     ].join(" ")}
                     style={
@@ -130,13 +130,13 @@ export default function DemoPage() {
             <div className="font-mono-label text-[9px] text-white/45">
               ACTIONS PER RUN
             </div>
-            <div className="grid grid-cols-3 gap-px bg-white/[0.04] rounded overflow-hidden">
+            <div className="grid grid-cols-3 gap-3">
               {[1, 2, 3].map((n) => (
                 <button
                   key={n}
                   onClick={() => setNActions(n)}
                   className={[
-                    "bg-[#0F1A35] py-3 transition-colors",
+                    "bg-[#0F1A35] py-4 transition-colors rounded border border-white/5",
                     nActions === n ? "text-[#4F8CFE]" : "text-white/55 hover:bg-[#0F1A35]/60",
                   ].join(" ")}
                   style={

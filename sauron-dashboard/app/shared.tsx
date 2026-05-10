@@ -358,16 +358,18 @@ export function PageHeader({
   hex?: string;
 }) {
   return (
-    <header className="space-y-5 animate-fade-in-up pb-2">
-      <MonoLabel label={eyebrow ?? "MANDATE.CONSOLE"} hex={hex ?? "0x000"} />
+    <header className="animate-fade-in-up pb-6">
+      <div className="mb-6">
+        <MonoLabel label={eyebrow ?? "MANDATE.CONSOLE"} hex={hex ?? "0x000"} />
+      </div>
       <h1
-        className="font-display text-[48px] leading-[1.06] text-white max-w-3xl"
+        className="font-display text-[52px] leading-[1.08] text-white max-w-3xl mb-6"
         style={{ letterSpacing: "-0.015em" }}
       >
         {title}
       </h1>
       {description && (
-        <p className="text-[14px] text-white/55 max-w-2xl leading-[1.7] pt-1">
+        <p className="text-[14px] text-white/55 max-w-2xl leading-[1.75]">
           {description}
         </p>
       )}

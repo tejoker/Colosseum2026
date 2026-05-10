@@ -9,7 +9,7 @@ export default function UsersPage() {
   if (loading) return <Spinner />;
 
   return (
-    <div className="space-y-12">
+    <div className="space-y-14">
       <PageHeader
         eyebrow="HUMAN.REGISTRY"
         hex="0x500"

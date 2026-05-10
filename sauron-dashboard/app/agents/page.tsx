@@ -97,7 +97,7 @@ export default function AgentsPage() {
   } as Record<Filter, number>;
 
   return (
-    <div className="space-y-12">
+    <div className="space-y-14">
       <PageHeader
         eyebrow="MANDATE.AGENTS"
         hex="0x100"
@@ -112,7 +112,7 @@ export default function AgentsPage() {
       />
 
       {/* Filter strip — clickable counter cards with brand-colored active accent */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-white/[0.04] rounded overflow-hidden">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {FILTERS.map((f) => {
           const active = filter === f.id;
           return (
@@ -120,7 +120,7 @@ export default function AgentsPage() {
               key={f.id}
               onClick={() => setFilter(f.id)}
               className={[
-                "relative bg-[#0F1A35] text-left p-4 transition-colors group",
+                "relative bg-[#0F1A35] text-left p-5 transition-colors group rounded border border-white/5",
                 active ? "" : "hover:bg-[#0F1A35]/60",
               ].join(" ")}
             >

@@ -449,11 +449,11 @@ export default function OverviewPage() {
 
       {/* Ring memberships — minimal stat strip rather than another chart */}
       <Card title="RING.MEMBERSHIP" hex="0x030">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-px bg-white/[0.04] rounded overflow-hidden">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {(overview.rings?.names ?? []).map((name, i) => (
             <div
               key={name}
-              className="bg-[#0F1A35] p-5 flex flex-col gap-2 group hover:bg-[#0F1A35]/60 transition-colors"
+              className="bg-[#0F1A35] p-6 flex flex-col gap-3 group rounded border border-white/5 hover:bg-[#0F1A35]/60 transition-colors"
             >
               <div className="flex items-center justify-between">
                 <span className="font-mono-label text-[9px] text-white/45">
