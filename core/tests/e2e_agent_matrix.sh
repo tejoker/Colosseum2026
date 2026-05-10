@@ -11,6 +11,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # shellcheck source=tests/lib/zkp_fixture.sh
 source "${ROOT_DIR}/tests/lib/zkp_fixture.sh"
+# shellcheck source=tests/lib/agent_action.sh
+source "${ROOT_DIR}/tests/lib/agent_action.sh"
 ensure_zkp_fixture_bundle
 zkp_require_issuer
 
@@ -173,10 +175,18 @@ fi
 for t in "${agent_types[@]}"; do
   printf '[E2E matrix][%s] delegated register\n' "${t}"
   delegated_checksum="sha256:${t}:delegated:${rand_suffix}"
+  delegated_pop_json=$(mktemp)
+  create_pop_key_file "$delegated_pop_json"
+  delegated_pop_public_key_b64u=$(pop_public_key_b64u_from_file "$delegated_pop_json")
+  delegated_pop_jkt="matrix-delegated-pop-${t}-${rand_suffix}"
+  delegated_keys=$(agent_action_keygen)
+  delegated_public_key_hex=$(printf '%s' "${delegated_keys}" | json_get "public_key_hex")
+  delegated_secret_hex=$(printf '%s' "${delegated_keys}" | json_get "secret_hex")
+  delegated_ring_key_image_hex=$(printf '%s' "${delegated_keys}" | json_get "ring_key_image_hex")
   delegated_res=$(curl -sS -X POST "${API_URL}/agent/register" \
     -H 'content-type: application/json' \
     -H "x-sauron-session: ${session}" \
-    -d "{\"human_key_image\":\"${key_image}\",\"agent_checksum\":\"${delegated_checksum}\",\"intent_json\":\"{\\\"type\\\":\\\"${t}\\\",\\\"scope\\\":[\\\"prove:age\\\"]}\",\"public_key_hex\":\"${user_pub}\",\"ttl_secs\":3600}")
+    -d "{\"human_key_image\":\"${key_image}\",\"agent_checksum\":\"${delegated_checksum}\",\"intent_json\":\"{\\\"type\\\":\\\"${t}\\\",\\\"scope\\\":[\\\"kyc_consent\\\",\\\"prove_age\\\"]}\",\"public_key_hex\":\"${delegated_public_key_hex}\",\"ring_key_image_hex\":\"${delegated_ring_key_image_hex}\",\"pop_jkt\":\"${delegated_pop_jkt}\",\"pop_public_key_b64u\":\"${delegated_pop_public_key_b64u}\",\"ttl_secs\":3600}")
   delegated_ajwt=$(printf '%s' "${delegated_res}" | json_get "ajwt")
   delegated_id=$(printf '%s' "${delegated_res}" | json_get "agent_id")
   delegated_assurance=$(printf '%s' "${delegated_res}" | json_get "assurance_level")
@@ -190,19 +200,42 @@ for t in "${agent_types[@]}"; do
     exit 1
   }
 
+  delegated_consent_token_res=$(issue_agent_token "$session" "$delegated_id" 300)
+  delegated_consent_ajwt=$(printf '%s' "${delegated_consent_token_res}" | json_get "ajwt")
+  delegated_pop=$(fresh_pop_jws "$session" "$delegated_id" "$delegated_pop_json")
+  delegated_pop_challenge_id=$(printf '%s' "$delegated_pop" | json_get "pop_challenge_id")
+  delegated_pop_jws=$(printf '%s' "$delegated_pop" | json_get "pop_jws")
+  delegated_consent_action=$(sign_agent_action "$delegated_secret_hex" "$delegated_id" "$key_image" "kyc_consent" "kyc_consent:${request_id}" "$RETAIL_SITE" 0 "" "$delegated_consent_ajwt")
+  delegated_consent_body=$(python3 - "$delegated_consent_ajwt" "$RETAIL_SITE" "$request_id" "$delegated_pop_challenge_id" "$delegated_pop_jws" "$delegated_consent_action" <<'PY'
+import json, sys
+ajwt, site, request_id, pop_id, pop_jws, action = sys.argv[1:]
+print(json.dumps({
+  "ajwt": ajwt,
+  "site_name": site,
+  "request_id": request_id,
+  "pop_challenge_id": pop_id,
+  "pop_jws": pop_jws,
+  "agent_action": json.loads(action),
+}, separators=(",", ":")))
+PY
+)
   consent_res=$(curl -sS -X POST "${API_URL}/agent/kyc/consent" \
     -H 'content-type: application/json' \
-    -d "{\"ajwt\":\"${delegated_ajwt}\",\"site_name\":\"${RETAIL_SITE}\",\"request_id\":\"${request_id}\"}")
+    -d "${delegated_consent_body}")
   consent_token=$(printf '%s' "${consent_res}" | json_get "consent_token")
   if [[ -z "${consent_token}" ]]; then
     echo "agent/kyc/consent failed for delegated ${t}: ${consent_res}" >&2
     exit 1
   fi
 
+  delegated_retrieve_token_res=$(issue_agent_token "$session" "$delegated_id" 300)
+  delegated_retrieve_ajwt=$(printf '%s' "${delegated_retrieve_token_res}" | json_get "ajwt")
+  delegated_retrieve_action=$(sign_agent_action "$delegated_secret_hex" "$delegated_id" "$key_image" "prove_age" "kyc_retrieve:${RETAIL_SITE}" "$RETAIL_SITE" 0 "" "$delegated_retrieve_ajwt")
   retrieve_body="$(zkp_build_retrieve_payload_json "${consent_token}" "${RETAIL_SITE}" "prove_age")"
+  retrieve_body="$(merge_agent_action_json "${retrieve_body}" "${delegated_retrieve_action}")"
   retrieve_res=$(curl -sS -X POST "${API_URL}/kyc/retrieve" \
     -H 'content-type: application/json' \
-    -H "x-agent-ajwt: ${delegated_ajwt}" \
+    -H "x-agent-ajwt: ${delegated_retrieve_ajwt}" \
     -d "${retrieve_body}")
   trust=$(printf '%s' "${retrieve_res}" | json_get "identity.trust_verified")
   assurance_out=$(printf '%s' "${retrieve_res}" | json_get "identity.agent_assurance_level")
@@ -222,13 +255,22 @@ for t in "${agent_types[@]}"; do
     echo "delegated revoke failed for ${t}: ${revoke_res}" >&2
     exit 1
   fi
+  rm -f "$delegated_pop_json"
 
   printf '[E2E matrix][%s] autonomous issue\n' "${t}"
   autonomous_checksum="sha256:${t}:autonomous:${rand_suffix}"
+  autonomous_pop_json=$(mktemp)
+  create_pop_key_file "$autonomous_pop_json"
+  autonomous_pop_public_key_b64u=$(pop_public_key_b64u_from_file "$autonomous_pop_json")
+  autonomous_pop_jkt="matrix-autonomous-pop-${t}-${rand_suffix}"
+  autonomous_keys=$(agent_action_keygen)
+  autonomous_public_key_hex=$(printf '%s' "${autonomous_keys}" | json_get "public_key_hex")
+  autonomous_secret_hex=$(printf '%s' "${autonomous_keys}" | json_get "secret_hex")
+  autonomous_ring_key_image_hex=$(printf '%s' "${autonomous_keys}" | json_get "ring_key_image_hex")
   vc_res=$(curl -sS -X POST "${API_URL}/agent/vc/issue" \
     -H 'content-type: application/json' \
     -H "x-sauron-session: ${session}" \
-    -d "{\"human_key_image\":\"${key_image}\",\"agent_checksum\":\"${autonomous_checksum}\",\"description\":\"${t} autonomous agent\",\"scope\":[\"prove_age\",\"read_identity\"],\"ttl_hours\":24}")
+    -d "{\"human_key_image\":\"${key_image}\",\"agent_checksum\":\"${autonomous_checksum}\",\"description\":\"${t} autonomous agent\",\"scope\":[\"kyc_consent\",\"prove_age\",\"read_identity\"],\"public_key_hex\":\"${autonomous_public_key_hex}\",\"ring_key_image_hex\":\"${autonomous_ring_key_image_hex}\",\"pop_jkt\":\"${autonomous_pop_jkt}\",\"pop_public_key_b64u\":\"${autonomous_pop_public_key_b64u}\",\"ttl_hours\":24}")
   autonomous_ajwt=$(printf '%s' "${vc_res}" | json_get "ajwt")
   autonomous_id=$(printf '%s' "${vc_res}" | json_get "agent_id")
   autonomous_assurance=$(printf '%s' "${vc_res}" | json_get "assurance_level")
@@ -239,7 +281,7 @@ for t in "${agent_types[@]}"; do
 
   policy_res=$(curl -sS -X POST "${API_URL}/policy/authorize" \
     -H 'content-type: application/json' \
-    -d "{\"agent_id\":\"${autonomous_id}\",\"action\":\"payment_initiation\"}")
+    -d "{\"agent_id\":\"${autonomous_id}\",\"action\":\"payment_initiation\",\"ajwt\":\"${autonomous_ajwt}\"}")
   allowed=$(printf '%s' "${policy_res}" | json_get "allowed")
   if [[ "${allowed}" != "False" && "${allowed}" != "false" ]]; then
     echo "autonomous policy deny failed for ${t}: ${policy_res}" >&2
@@ -251,19 +293,42 @@ for t in "${agent_types[@]}"; do
     exit 1
   }
 
+  autonomous_consent_token_res=$(issue_agent_token "$session" "$autonomous_id" 300)
+  autonomous_consent_ajwt=$(printf '%s' "${autonomous_consent_token_res}" | json_get "ajwt")
+  autonomous_pop=$(fresh_pop_jws "$session" "$autonomous_id" "$autonomous_pop_json")
+  autonomous_pop_challenge_id=$(printf '%s' "$autonomous_pop" | json_get "pop_challenge_id")
+  autonomous_pop_jws=$(printf '%s' "$autonomous_pop" | json_get "pop_jws")
+  autonomous_consent_action=$(sign_agent_action "$autonomous_secret_hex" "$autonomous_id" "$key_image" "kyc_consent" "kyc_consent:${request_id}" "$RETAIL_SITE" 0 "" "$autonomous_consent_ajwt")
+  autonomous_consent_body=$(python3 - "$autonomous_consent_ajwt" "$RETAIL_SITE" "$request_id" "$autonomous_pop_challenge_id" "$autonomous_pop_jws" "$autonomous_consent_action" <<'PY'
+import json, sys
+ajwt, site, request_id, pop_id, pop_jws, action = sys.argv[1:]
+print(json.dumps({
+  "ajwt": ajwt,
+  "site_name": site,
+  "request_id": request_id,
+  "pop_challenge_id": pop_id,
+  "pop_jws": pop_jws,
+  "agent_action": json.loads(action),
+}, separators=(",", ":")))
+PY
+)
   consent_res=$(curl -sS -X POST "${API_URL}/agent/kyc/consent" \
     -H 'content-type: application/json' \
-    -d "{\"ajwt\":\"${autonomous_ajwt}\",\"site_name\":\"${RETAIL_SITE}\",\"request_id\":\"${request_id}\"}")
+    -d "${autonomous_consent_body}")
   consent_token=$(printf '%s' "${consent_res}" | json_get "consent_token")
   if [[ -z "${consent_token}" ]]; then
     echo "agent/kyc/consent failed for autonomous ${t}: ${consent_res}" >&2
     exit 1
   fi
 
+  autonomous_retrieve_token_res=$(issue_agent_token "$session" "$autonomous_id" 300)
+  autonomous_retrieve_ajwt=$(printf '%s' "${autonomous_retrieve_token_res}" | json_get "ajwt")
+  autonomous_retrieve_action=$(sign_agent_action "$autonomous_secret_hex" "$autonomous_id" "$key_image" "prove_age" "kyc_retrieve:${RETAIL_SITE}" "$RETAIL_SITE" 0 "" "$autonomous_retrieve_ajwt")
   retrieve_body="$(zkp_build_retrieve_payload_json "${consent_token}" "${RETAIL_SITE}" "prove_age")"
+  retrieve_body="$(merge_agent_action_json "${retrieve_body}" "${autonomous_retrieve_action}")"
   retrieve_res=$(curl -sS -X POST "${API_URL}/kyc/retrieve" \
     -H 'content-type: application/json' \
-    -H "x-agent-ajwt: ${autonomous_ajwt}" \
+    -H "x-agent-ajwt: ${autonomous_retrieve_ajwt}" \
     -d "${retrieve_body}")
   trust=$(printf '%s' "${retrieve_res}" | json_get "identity.trust_verified")
   assurance_out=$(printf '%s' "${retrieve_res}" | json_get "identity.agent_assurance_level")
@@ -277,6 +342,7 @@ for t in "${agent_types[@]}"; do
   fi
 
   echo "  [PASS] ${t}: delegated + autonomous"
+  rm -f "$autonomous_pop_json"
 done
 
 echo "[PASS] agent matrix e2e (${AGENT_TYPES})"

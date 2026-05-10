@@ -50,7 +50,7 @@ export default function DemoPage() {
   siteName: "YourSiteName",
   apiUrl: "http://localhost:3001",
   claims: ["first_name", "nationality"],
-  silentAuth: true,           // auto-login if device trusted (80% flow)
+  silentAuth: false,          // enable only when /auth/device/* is deployed
   onSuccess: (profile) => {
     // profile.first_name, profile.last_name, etc.
     loginUser(profile);
@@ -182,14 +182,14 @@ sdk.render(document.getElementById("login-btn"));`;
             <div style={page.demoCard}>
               <h2 style={page.cardTitle}>Device trust (80% frictionless re-auth)</h2>
               <p style={page.cardSub}>
-                After first consent, the SDK stores a device token in localStorage. On return visits,
-                authentication is silent — no popup shown. Works out of the box when <code>silentAuth: true</code>.
+                Device-token silent auth is disabled in the current production-safe demo because the active core
+                contract does not expose <code>/auth/device/*</code>. Consent + proof retrieval is the supported path.
               </p>
               <div style={page.flowSteps}>
                 {[
-                  ["First visit", "User clicks button → consent popup → ZKP proof → device token issued"],
-                  ["Return visit", "SDK detects device token → silent check → profile returned instantly"],
-                  ["New device", "No token found → popup shown → new device token issued"],
+                  ["First visit", "User clicks button → consent popup → ZKP proof"],
+                  ["Return visit", "Consent popup runs again unless a future device-auth service is enabled"],
+                  ["New device", "Same active consent proof flow"],
                 ].map(([title, desc]) => (
                   <div key={title} style={page.flowStep}>
                     <div style={page.flowTitle}>{title}</div>

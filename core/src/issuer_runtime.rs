@@ -141,7 +141,11 @@ impl IssuerRuntime {
     }
 
     /// POST `{issuer_url}/verify-proof`. Returns cryptographic verification outcome on HTTP 200.
-    pub async fn verify_proof_json(&self, issuer_url: &str, body: &Value) -> Result<bool, IssuerVerifyError> {
+    pub async fn verify_proof_json(
+        &self,
+        issuer_url: &str,
+        body: &Value,
+    ) -> Result<bool, IssuerVerifyError> {
         let base = normalize_issuer_base(issuer_url);
         if base.is_empty() {
             return Err(IssuerVerifyError::Transport("empty issuer URL".into()));
@@ -167,7 +171,10 @@ impl IssuerRuntime {
 
         let status = resp.status().as_u16();
         if resp.status().is_success() {
-            let val: Value = resp.json().await.map_err(|_| IssuerVerifyError::JsonParse)?;
+            let val: Value = resp
+                .json()
+                .await
+                .map_err(|_| IssuerVerifyError::JsonParse)?;
             let ok = val
                 .get("verified")
                 .or_else(|| val.get("valid"))
@@ -186,7 +193,11 @@ impl IssuerRuntime {
 
     /// Try each issuer base URL in order until a definitive cryptographic outcome (`Ok(true|false)`),
     /// or transport-style errors are exhausted. Used for redundant ZKP verifiers.
-    pub async fn verify_proof_failover(&self, issuer_bases: &[String], body: &Value) -> Result<bool, IssuerVerifyError> {
+    pub async fn verify_proof_failover(
+        &self,
+        issuer_bases: &[String],
+        body: &Value,
+    ) -> Result<bool, IssuerVerifyError> {
         let bases: Vec<String> = issuer_bases
             .iter()
             .map(|s| normalize_issuer_base(s))

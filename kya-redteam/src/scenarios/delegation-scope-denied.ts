@@ -1,5 +1,4 @@
 import { CoreApi, randSuffix } from "../core-api";
-import { twoRistrettoHexes } from "../ristretto";
 
 /** Child scopes must be subset of parent; out-of-scope delegation → 400. */
 export async function scenarioDelegationScopeDenied(
@@ -26,13 +25,17 @@ export async function scenarioDelegationScopeDenied(
     });
     const { session, key_image } = await api.userAuth(email, password);
 
-    const { pk1, pk2 } = twoRistrettoHexes();
+    const parentKeys = api.agentActionKeygen();
+    const childKeys = api.agentActionKeygen();
 
     const parent = await api.agentRegister(session, {
         human_key_image: key_image,
         agent_checksum: `sha256:parent-${sfx}`,
         intent_json: JSON.stringify({ scope: ["prove_age"] }),
-        public_key_hex: pk1,
+        public_key_hex: parentKeys.public_key_hex,
+        ring_key_image_hex: parentKeys.ring_key_image_hex,
+        pop_jkt: `redteam-parent-pop-${sfx}`,
+        pop_public_key_b64u: "redteam-parent-pop-public-key",
         ttl_secs: 3600,
     });
     if (parent.status !== 200) throw new Error(`parent register ${parent.status}: ${parent.raw}`);
@@ -43,7 +46,10 @@ export async function scenarioDelegationScopeDenied(
         human_key_image: key_image,
         agent_checksum: `sha256:child-${sfx}`,
         intent_json: JSON.stringify({ scope: ["payment_initiation"] }),
-        public_key_hex: pk2,
+        public_key_hex: childKeys.public_key_hex,
+        ring_key_image_hex: childKeys.ring_key_image_hex,
+        pop_jkt: `redteam-child-pop-${sfx}`,
+        pop_public_key_b64u: "redteam-child-pop-public-key",
         ttl_secs: 3600,
         parent_agent_id: parentId,
     });

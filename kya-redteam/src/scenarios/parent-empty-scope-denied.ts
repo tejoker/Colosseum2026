@@ -1,5 +1,4 @@
 import { CoreApi, randSuffix } from "../core-api";
-import { twoRistrettoHexes } from "../ristretto";
 
 /** Parent with no delegable scopes cannot delegate. */
 export async function scenarioParentEmptyScopeDenied(
@@ -26,13 +25,17 @@ export async function scenarioParentEmptyScopeDenied(
     });
     const { session, key_image } = await api.userAuth(email, password);
 
-    const { pk1, pk2 } = twoRistrettoHexes();
+    const parentKeys = api.agentActionKeygen();
+    const childKeys = api.agentActionKeygen();
 
     const parent = await api.agentRegister(session, {
         human_key_image: key_image,
         agent_checksum: `sha256:emptyp-${sfx}`,
         intent_json: "{}",
-        public_key_hex: pk1,
+        public_key_hex: parentKeys.public_key_hex,
+        ring_key_image_hex: parentKeys.ring_key_image_hex,
+        pop_jkt: `redteam-empty-parent-pop-${sfx}`,
+        pop_public_key_b64u: "redteam-empty-parent-pop-public-key",
         ttl_secs: 3600,
     });
     if (parent.status !== 200) throw new Error(`parent register ${parent.status}: ${parent.raw}`);
@@ -42,7 +45,10 @@ export async function scenarioParentEmptyScopeDenied(
         human_key_image: key_image,
         agent_checksum: `sha256:emptyc-${sfx}`,
         intent_json: JSON.stringify({ scope: ["prove_age"] }),
-        public_key_hex: pk2,
+        public_key_hex: childKeys.public_key_hex,
+        ring_key_image_hex: childKeys.ring_key_image_hex,
+        pop_jkt: `redteam-empty-child-pop-${sfx}`,
+        pop_public_key_b64u: "redteam-empty-child-pop-public-key",
         ttl_secs: 3600,
         parent_agent_id: parentId,
     });

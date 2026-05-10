@@ -35,13 +35,14 @@ pub fn open_db() -> DbHandle {
     let pool = Pool::builder()
         .max_size(pool_size)
         .build(manager)
-        .unwrap_or_else(|e| {
-            panic!("cannot open SQLite pool at '{}': {}", path, e)
-        });
+        .unwrap_or_else(|e| panic!("cannot open SQLite pool at '{}': {}", path, e));
 
     {
         let conn = pool.get().unwrap_or_else(|e| {
-            panic!("cannot acquire SQLite connection for init at '{}': {}", path, e)
+            panic!(
+                "cannot acquire SQLite connection for init at '{}': {}",
+                path, e
+            )
         });
         init_schema(&conn);
     }
@@ -146,6 +147,7 @@ pub fn init_schema(conn: &Connection) {
             assurance_level  TEXT    NOT NULL DEFAULT 'delegated_nonbank'
                                       CHECK(assurance_level IN ('delegated_bank','delegated_nonbank','autonomous_web3')),
             public_key_hex   TEXT    NOT NULL DEFAULT '',
+            ring_key_image_hex TEXT   NOT NULL DEFAULT '',
             issued_at        INTEGER NOT NULL,
             expires_at       INTEGER NOT NULL,
             revoked          INTEGER NOT NULL DEFAULT 0
@@ -228,6 +230,94 @@ pub fn init_schema(conn: &Connection) {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_pop_challenges_exp ON agent_pop_challenges(exp);
 
+        -- Server-computed agent checksum inputs.
+        -- Operators submit a structured config object at /agent/register; the server
+        -- canonicalises it to JSON, computes SHA-256, and stores BOTH the raw inputs
+        -- and the resulting checksum. Operator-supplied agent_checksum on the agents
+        -- row is no longer trusted — it must equal the server-computed value or
+        -- the registration is rejected.
+        --
+        -- agent_type drives required-fields validation (see agent.rs::validate_checksum_inputs).
+        CREATE TABLE IF NOT EXISTS agent_checksum_inputs (
+            agent_id          TEXT PRIMARY KEY NOT NULL,
+            agent_type        TEXT NOT NULL,         -- llm | mcp_server | rule_bot | browser | openai_assistant | framework | custom
+            inputs_canonical  TEXT NOT NULL,         -- canonical-JSON of the structured config
+            computed_checksum TEXT NOT NULL,         -- sha256:<hex(SHA256(inputs_canonical))>
+            version           INTEGER NOT NULL DEFAULT 1,
+            created_at        INTEGER NOT NULL,
+            updated_at        INTEGER NOT NULL
+        );
+
+        -- Append-only audit trail for every checksum rotation. Every accepted update
+        -- adds a row with the previous and new checksum + caller-supplied reason.
+        CREATE TABLE IF NOT EXISTS agent_checksum_audit (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id          TEXT NOT NULL,
+            from_checksum     TEXT NOT NULL,
+            to_checksum       TEXT NOT NULL,
+            from_inputs_hash  TEXT NOT NULL,
+            to_inputs_hash    TEXT NOT NULL,
+            reason            TEXT NOT NULL DEFAULT '',
+            actor             TEXT NOT NULL DEFAULT '',  -- session key_image_hex or admin
+            ts                INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_checksum_audit_agent ON agent_checksum_audit(agent_id, ts);
+
+        -- Agent egress log (Gap 2): every outbound call the agent makes to a
+        -- third-party API SHOULD be reported here via POST /agent/egress/log.
+        -- This is voluntary reporting today; operators are expected to enforce
+        -- the constraint via container network policy (e.g. only allow the
+        -- agent process to reach SauronID's outbound proxy port). Each row is
+        -- included in the next agent-action anchor batch, making after-the-fact
+        -- log tampering require forging Bitcoin and Solana attestations.
+        CREATE TABLE IF NOT EXISTS agent_egress_log (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id      TEXT NOT NULL,
+            target_host   TEXT NOT NULL,
+            target_path   TEXT NOT NULL DEFAULT '',
+            method        TEXT NOT NULL,
+            body_hash_hex TEXT NOT NULL DEFAULT '',
+            status_code   INTEGER NOT NULL DEFAULT 0,
+            ts            INTEGER NOT NULL,
+            allowed       INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_egress_log_agent_ts ON agent_egress_log(agent_id, ts);
+
+        -- Per-call signature nonces: single-use replay protection for the
+        -- DPoP-style call signature over body+method+path+ts+nonce.
+        CREATE TABLE IF NOT EXISTS agent_call_nonces (
+            agent_id    TEXT    NOT NULL,
+            nonce       TEXT    NOT NULL,
+            exp         INTEGER NOT NULL,
+            PRIMARY KEY (agent_id, nonce)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_call_nonces_exp ON agent_call_nonces(exp);
+
+        -- Cryptographic action leash: each agent action must present a ring
+        -- signature over a canonical envelope with a one-time nonce.
+        CREATE TABLE IF NOT EXISTS agent_action_nonces (
+            nonce       TEXT PRIMARY KEY NOT NULL,
+            agent_id    TEXT NOT NULL,
+            action_hash TEXT NOT NULL,
+            expires_at  INTEGER NOT NULL,
+            used_at     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_action_nonces_exp ON agent_action_nonces(expires_at);
+
+        CREATE TABLE IF NOT EXISTS agent_action_receipts (
+            receipt_id         TEXT PRIMARY KEY NOT NULL,
+            action_hash        TEXT NOT NULL,
+            agent_id           TEXT NOT NULL,
+            ring_key_image_hex TEXT NOT NULL,
+            policy_version     TEXT NOT NULL,
+            ajwt_jti           TEXT NOT NULL,
+            pop_jkt            TEXT NOT NULL DEFAULT '',
+            status             TEXT NOT NULL,
+            signature          TEXT NOT NULL,
+            created_at         INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_action_receipts_agent ON agent_action_receipts(agent_id, created_at);
+
         -- Strict, pre-Stripe payment authorization artifacts (single-use auth envelope).
         CREATE TABLE IF NOT EXISTS agent_payment_authorizations (
             auth_id        TEXT PRIMARY KEY NOT NULL,
@@ -266,6 +356,39 @@ pub fn init_schema(conn: &Connection) {
             created_at         INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_bitcoin_merkle_root ON bitcoin_merkle_anchors(merkle_root_hex);
+
+        -- Agent-action anchor batches: periodic merkle commitment over the
+        -- agent_action_receipts table, with cross-reference to the BTC OTS and
+        -- Solana memo anchors that timestamp the same root. External auditors
+        -- replay the merkle path from any receipt to `batch_root_hex` and verify
+        -- the root via OTS / Solana Explorer.
+        CREATE TABLE IF NOT EXISTS agent_action_anchors (
+            anchor_id        TEXT PRIMARY KEY NOT NULL,
+            batch_root_hex   TEXT NOT NULL,
+            n_actions        INTEGER NOT NULL,
+            from_receipt_id  TEXT NOT NULL,   -- inclusive
+            to_receipt_id    TEXT NOT NULL,   -- inclusive
+            from_created_at  INTEGER NOT NULL,
+            to_created_at    INTEGER NOT NULL,
+            btc_anchor_id    TEXT NOT NULL DEFAULT '',
+            sol_anchor_id    TEXT NOT NULL DEFAULT '',
+            created_at       INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_root ON agent_action_anchors(batch_root_hex);
+        CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_range ON agent_action_anchors(from_created_at, to_created_at);
+
+        -- Solana anchoring receipts for Merkle roots (Memo Program transactions).
+        CREATE TABLE IF NOT EXISTS solana_merkle_anchors (
+            anchor_id        TEXT PRIMARY KEY NOT NULL,
+            merkle_root_hex  TEXT NOT NULL,
+            network          TEXT NOT NULL,
+            signature        TEXT NOT NULL UNIQUE,
+            slot             INTEGER NOT NULL DEFAULT 0,
+            confirmed        INTEGER NOT NULL DEFAULT 0,
+            created_at       INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_solana_merkle_root ON solana_merkle_anchors(merkle_root_hex);
+        CREATE INDEX IF NOT EXISTS idx_solana_pending ON solana_merkle_anchors(confirmed, created_at);
 
         -- Lightning/L402 invoices for agent-paid APIs.
         -- Default provider is local mock: no real sats move during tests.
@@ -341,6 +464,38 @@ pub fn init_schema(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE agents ADD COLUMN pop_public_key_b64u TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+
+    // OpenTimestamps: per-anchor partial proof bytes (calendar attestations).
+    // Promoted to full Bitcoin proofs by the background upgrade task once the
+    // calendar root is included in a block. Nullable; absent for legacy mock anchors.
+    let _ = conn.execute(
+        "ALTER TABLE bitcoin_merkle_anchors ADD COLUMN ots_receipt_blob BLOB",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE bitcoin_merkle_anchors ADD COLUMN ots_calendar_url TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE bitcoin_merkle_anchors ADD COLUMN ots_upgraded INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+
+    // Hardware-attestation slot: TPM2 quote / AWS Nitro attestation document /
+    // Apple Secure Enclave attestation. Stored verbatim; SauronID does not
+    // cryptographically verify the attestation (see threat-model.md).
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN attestation_blob TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN attestation_kind TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN ring_key_image_hex TEXT NOT NULL DEFAULT ''",
         [],
     );
 

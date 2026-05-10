@@ -1,12 +1,3 @@
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::ristretto::CompressedRistretto;
-use hmac::{Hmac, Mac};
-use rusqlite::{Connection, params};
-use sha2::{Sha256, Digest};
-use subtle::ConstantTimeEq;
-use hex;
 use crate::bitcoin_anchor::BitcoinAnchorService;
 use crate::compliance::ComplianceConfig;
 use crate::compliance_screening::ScreeningPolicy;
@@ -15,6 +6,15 @@ use crate::issuer_runtime::IssuerRuntime;
 use crate::merkle::MerkleCommitmentLedger;
 use crate::payment_smt::PaymentSmt;
 use crate::ring;
+use curve25519_dalek::ristretto::CompressedRistretto;
+use curve25519_dalek::scalar::Scalar;
+use hex;
+use hmac::{Hmac, Mac};
+use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 pub use crate::runtime_mode::{is_development_runtime, runtime_environment};
 
@@ -58,7 +58,7 @@ pub fn verify_token(secret: &[u8], domain: &str, token: &str) -> bool {
 }
 
 pub fn token_value(token: &str) -> &str {
-    token.splitn(2, ':').next().unwrap_or(token)
+    token.split(':').next().unwrap_or(token)
 }
 
 // ─────────────────────────────────────────────────────
@@ -92,6 +92,11 @@ pub struct ServerState {
     pub merkle_ledger: MerkleCommitmentLedger,
     pub payment_smt: std::sync::Mutex<PaymentSmt>,
     pub bitcoin_anchor: Option<std::sync::Arc<BitcoinAnchorService>>,
+    pub solana_anchor: Option<std::sync::Arc<crate::solana_anchor::SolanaAnchorService>>,
+    /// Phase 3 dual-backend repository. Modules port to it incrementally.
+    /// `Sqlite` variant proxies to `db` for backwards compat; `Postgres`
+    /// variant requires `SAURON_DB_BACKEND=postgres` + `DATABASE_URL`.
+    pub repo: crate::repository::Repo,
 }
 
 fn derive_dev_secret(name: &str) -> Vec<u8> {
@@ -113,26 +118,35 @@ pub fn development_fallback_admin_key_material() -> Option<Vec<u8>> {
 }
 
 fn load_required_secret(name: &str) -> Vec<u8> {
-    if let Ok(value) = std::env::var(name) {
-        if !value.trim().is_empty() {
-            return value.into_bytes();
+    // Try the resolver chain: Vault Transit → AWS KMS → plain env.
+    match crate::secret_provider::resolve_secret(name) {
+        Ok(bytes) => return bytes,
+        Err(crate::secret_provider::ResolveError::NotFound(_)) => {
+            // fall through to dev-mode derivation below
+        }
+        Err(e) => {
+            // Backend was selected (Vault/KMS) but unavailable / decode failed: hard fail.
+            panic!("[FATAL] secret '{}' resolver error: {}", name, e);
         }
     }
     if crate::runtime_mode::is_development_runtime() {
-        eprintln!("[WARN] {} not set — deriving development-only local secret.", name);
+        tracing::warn!(env_var = %name, "secret env var not set; deriving development-only local secret");
         return derive_dev_secret(name);
     }
     panic!("{} must be set in non-development environments", name);
 }
 
 fn load_required_seed(name: &str) -> String {
-    if let Ok(value) = std::env::var(name) {
-        if !value.trim().is_empty() {
-            return value;
-        }
+    match crate::secret_provider::resolve_secret(name) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) if !s.trim().is_empty() => return s,
+            _ => {} // fall through
+        },
+        Err(crate::secret_provider::ResolveError::NotFound(_)) => {}
+        Err(e) => panic!("[FATAL] seed '{}' resolver error: {}", name, e),
     }
     if crate::runtime_mode::is_development_runtime() {
-        eprintln!("[WARN] {} not set — deriving development-only local seed.", name);
+        tracing::warn!(env_var = %name, "seed env var not set; deriving development-only local seed");
         return hex::encode(derive_dev_secret(name));
     }
     panic!("{} must be set in non-development environments", name);
@@ -154,7 +168,7 @@ fn issuer_urls_from_env() -> Vec<String> {
 }
 
 impl ServerState {
-    pub fn new(db: Arc<DbHandle>) -> Self {
+    pub async fn new(db: Arc<DbHandle>) -> Self {
         let token_secret = load_required_secret("SAURON_TOKEN_SECRET");
         let jwt_secret = load_required_secret("SAURON_JWT_SECRET");
         let issuer_urls = issuer_urls_from_env();
@@ -209,11 +223,12 @@ impl ServerState {
         let client_group = hexes_to_group(client_hexes);
         let agent_group = hexes_to_group(agent_hexes);
 
-        eprintln!(
-            "[STARTUP] Restored {} users, {} clients, {} agents from DB.",
-            user_group.members.len(),
-            client_group.members.len(),
-            agent_group.members.len()
+        tracing::info!(
+            target: "sauron::startup",
+            users = user_group.members.len(),
+            clients = client_group.members.len(),
+            agents = agent_group.members.len(),
+            "restored ring groups from DB"
         );
 
         // ── Restore Merkle ledger from DB ─────────────────────────────────────
@@ -230,10 +245,10 @@ impl ServerState {
                 .unwrap_or_default();
             let n = leaves.len();
             let ledger = MerkleCommitmentLedger::from_db_leaves(leaves).unwrap_or_else(|e| {
-                eprintln!("[WARN] Merkle restore failed: {e}");
+                tracing::warn!(target: "sauron::startup", error = %e, "merkle restore failed");
                 MerkleCommitmentLedger::new()
             });
-            eprintln!("[STARTUP] Restored Merkle ledger with {n} leaves.");
+            tracing::info!(target: "sauron::startup", leaves = n, "restored merkle ledger");
             ledger
         };
 
@@ -251,6 +266,11 @@ impl ServerState {
             std::sync::Mutex::new(smt)
         };
 
+        // Phase 3 dual-backend repository (built before `db` is moved into Self).
+        let repo = crate::repository::Repo::from_env(Arc::clone(&db))
+            .await
+            .unwrap_or_else(|e| panic!("[FATAL] repository init failed: {e}"));
+
         Self {
             db,
             k: oprf_k,
@@ -267,11 +287,16 @@ impl ServerState {
             merkle_ledger,
             payment_smt,
             bitcoin_anchor: BitcoinAnchorService::from_env().map(std::sync::Arc::new),
+            solana_anchor: crate::solana_anchor::SolanaAnchorService::from_env().map(std::sync::Arc::new),
+            repo,
         }
     }
 
     pub fn log(&self, action_type: &str, status: &str, detail: &str) {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         if let Ok(db) = self.db.lock() {
             let _ = db.execute(
                 "INSERT INTO requests_log (timestamp, action_type, status, detail) VALUES (?1, ?2, ?3, ?4)",
@@ -279,4 +304,96 @@ impl ServerState {
             );
         }
     }
+}
+
+/// Spawn a background tokio task that periodically prunes expired rows from
+/// time-bounded tables. Idempotent and bounded — each pass is small.
+///
+/// Tables pruned:
+/// - `ajwt_used_jtis`         (replay table; rows removable once `exp < now`)
+/// - `agent_pop_challenges`   (one-time PoP challenges; same lifetime as JTIs)
+/// - `risk_rate_counters`     (sliding-window counters; older windows are useless)
+/// - `requests_log`           (audit log; trim to `SAURON_GC_REQUESTS_LOG_RETENTION_DAYS` days)
+///
+/// Interval controlled by `SAURON_GC_INTERVAL_SECS` (default 300s = 5 min).
+pub fn spawn_background_gc(db: Arc<DbHandle>) {
+    let interval_secs: u64 = std::env::var("SAURON_GC_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
+        .clamp(30, 86_400);
+
+    let retention_days: i64 = std::env::var("SAURON_GC_REQUESTS_LOG_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90)
+        .clamp(1, 3650);
+
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // Avoid burst at startup
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let retention_cutoff = now - retention_days * 86_400;
+
+            // Risk counters: window IDs older than ~120 windows ago are dead weight
+            // (window_secs default 60s → 120 windows = 2h of history is plenty).
+            let window_secs = std::env::var("SAURON_RISK_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(60)
+                .clamp(10, 3600);
+            let oldest_window = (now / window_secs).saturating_sub(120);
+
+            let conn = match db.lock() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let jti_pruned = conn
+                .execute("DELETE FROM ajwt_used_jtis WHERE exp < ?1", params![now])
+                .unwrap_or(0);
+            let pop_pruned = conn
+                .execute(
+                    "DELETE FROM agent_pop_challenges WHERE exp < ?1",
+                    params![now],
+                )
+                .unwrap_or(0);
+            let call_nonce_pruned = conn
+                .execute(
+                    "DELETE FROM agent_call_nonces WHERE exp < ?1",
+                    params![now],
+                )
+                .unwrap_or(0);
+            let risk_pruned = conn
+                .execute(
+                    "DELETE FROM risk_rate_counters WHERE window_id < ?1",
+                    params![oldest_window],
+                )
+                .unwrap_or(0);
+            let log_pruned = conn
+                .execute(
+                    "DELETE FROM requests_log WHERE timestamp < ?1",
+                    params![retention_cutoff],
+                )
+                .unwrap_or(0);
+
+            if jti_pruned + pop_pruned + call_nonce_pruned + risk_pruned + log_pruned > 0 {
+                tracing::info!(
+                    target: "sauron::gc",
+                    jtis = jti_pruned,
+                    pop = pop_pruned,
+                    call_nonces = call_nonce_pruned,
+                    risk = risk_pruned,
+                    reqlog = log_pruned,
+                    "pruned expired rows"
+                );
+            }
+        }
+    });
 }

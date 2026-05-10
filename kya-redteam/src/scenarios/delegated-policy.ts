@@ -10,7 +10,7 @@ export async function scenarioDelegatedPolicy(api: CoreApi, bankSite: string, la
 
     const email = `del_${sfx}@sauron.local`;
     const password = `Passw0rd!${sfx}`;
-    const { public_key_hex } = await api.devRegisterUser({
+    await api.devRegisterUser({
         site_name: bankSite,
         email,
         password,
@@ -20,12 +20,16 @@ export async function scenarioDelegatedPolicy(api: CoreApi, bankSite: string, la
         nationality: "FRA",
     });
     const { session, key_image } = await api.userAuth(email, password);
+    const keys = api.agentActionKeygen();
 
     const reg = await api.agentRegister(session, {
         human_key_image: key_image,
         agent_checksum: `sha256:del-${sfx}`,
         intent_json: JSON.stringify({ scope: ["prove_age", "payment_initiation"] }),
-        public_key_hex: public_key_hex.toLowerCase(),
+        public_key_hex: keys.public_key_hex,
+        ring_key_image_hex: keys.ring_key_image_hex,
+        pop_jkt: `redteam-pop-${sfx}`,
+        pop_public_key_b64u: "redteam-pop-public-key",
         ttl_secs: 3600,
     });
     if (reg.status !== 200) throw new Error(`agent/register ${reg.status}: ${reg.raw}`);
@@ -33,11 +37,29 @@ export async function scenarioDelegatedPolicy(api: CoreApi, bankSite: string, la
         throw new Error(`expected delegated_bank, got ${reg.data.assurance_level}`);
     }
     const agentId = reg.data.agent_id as string;
-    if (!agentId) throw new Error("missing agent_id");
+    const ajwt = reg.data.ajwt as string;
+    if (!agentId || !ajwt) throw new Error("missing agent_id or ajwt");
 
-    const pay = await api.policyAuthorize(agentId, "payment_initiation");
+    const payAction = await api.buildAgentActionProof({
+        secretHex: keys.secret_hex,
+        agentId,
+        humanKeyImage: key_image,
+        ajwt,
+        action: "payment_initiation",
+        resource: "payment_initiation",
+    });
+    const pay = await api.policyAuthorize(agentId, "payment_initiation", ajwt, payAction);
     if (!pay.allowed) throw new Error(`delegated_bank should allow payment_initiation: ${pay.reason}`);
 
-    const age = await api.policyAuthorize(agentId, "prove_age");
+    const ageAjwt = await api.issueAgentToken(session, agentId);
+    const ageAction = await api.buildAgentActionProof({
+        secretHex: keys.secret_hex,
+        agentId,
+        humanKeyImage: key_image,
+        ajwt: ageAjwt,
+        action: "prove_age",
+        resource: "prove_age",
+    });
+    const age = await api.policyAuthorize(agentId, "prove_age", ageAjwt, ageAction);
     if (!age.allowed) throw new Error(`delegated_bank should allow prove_age: ${age.reason}`);
 }

@@ -139,10 +139,10 @@ export default function RetailPage() {
     setPaying(false);
   };
 
-  const loadProfileFromDbAgeCheck = async (consentToken: string) => {
+  const loadProfileFromDevConsentProfile = async (consentToken: string) => {
     if (!merchant) throw new Error("Merchant not configured");
 
-    const res = await fetch(`${API}/kyc/age_check`, {
+    const res = await fetch(`${API}/dev/consent_profile`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -181,7 +181,7 @@ export default function RetailPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`${API}/dev/clients`);
+      const res = await fetch(`/api/clients`);
         const clients = (await res.json()) as MerchantClient[];
         const chosen = clients.find((c) => c.client_type === "ZKP_ONLY") || clients[0] || null;
         if (!chosen) {
@@ -190,7 +190,7 @@ export default function RetailPage() {
           return;
         }
 
-        const detail = await fetch(`${API}/dev/client/${encodeURIComponent(chosen.name)}`);
+        const detail = await fetch(`/api/client/${encodeURIComponent(chosen.name)}`);
         if (detail.ok) {
           setMerchant(await detail.json());
         } else {
@@ -206,7 +206,7 @@ export default function RetailPage() {
 
   const refreshMerchant = async () => {
     if (!merchant) return;
-    const detail = await fetch(`${API}/dev/client/${encodeURIComponent(merchant.name)}`);
+    const detail = await fetch(`/api/client/${encodeURIComponent(merchant.name)}`);
     if (detail.ok) setMerchant(await detail.json());
   };
 
@@ -214,7 +214,7 @@ export default function RetailPage() {
     if (!merchant) return;
 
     let current = merchant;
-    const detail = await fetch(`${API}/dev/client/${encodeURIComponent(merchant.name)}`);
+    const detail = await fetch(`/api/client/${encodeURIComponent(merchant.name)}`);
     if (detail.ok) {
       current = (await detail.json()) as MerchantClient;
       setMerchant(current);
@@ -368,7 +368,7 @@ export default function RetailPage() {
       await ensureMerchantCredits();
       const reqData = await createConsentRequest();
       const consentData = await openConsentPopup(reqData.request_id, reqData.consent_url);
-      await loadProfileFromDbAgeCheck(consentData.consent_token);
+      await loadProfileFromDevConsentProfile(consentData.consent_token);
       await retrieveWithConsent(consentData.consent_token);
       showToast("success", "User login verified", "Sauron flow complete. You can now shop and pay.");
     } catch (err: unknown) {
@@ -405,7 +405,7 @@ export default function RetailPage() {
         throw new Error((consentData.error as string) || (consentData.detail as string) || "Agent consent failed");
       }
 
-      await loadProfileFromDbAgeCheck(consentData.consent_token);
+      await loadProfileFromDevConsentProfile(consentData.consent_token);
       await retrieveWithConsent(consentData.consent_token, agentAjwt.trim());
       showToast("success", "Agent login verified", "Agent-mediated Sauron flow complete. You can now shop and pay.");
     } catch (err: unknown) {

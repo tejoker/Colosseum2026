@@ -25,11 +25,17 @@ fn hash_bucket(prefix: &[u8], parts: &[&[u8]]) -> String {
 }
 
 pub fn bucket_kyc_retrieve(site: &str, user_key_image: &str) -> String {
-    hash_bucket(b"kyc_retrieve", &[site.as_bytes(), user_key_image.as_bytes()])
+    hash_bucket(
+        b"kyc_retrieve",
+        &[site.as_bytes(), user_key_image.as_bytes()],
+    )
 }
 
 pub fn bucket_agent_kyc_consent(site: &str, user_key_image: &str) -> String {
-    hash_bucket(b"agent_kyc_consent", &[site.as_bytes(), user_key_image.as_bytes()])
+    hash_bucket(
+        b"agent_kyc_consent",
+        &[site.as_bytes(), user_key_image.as_bytes()],
+    )
 }
 
 pub fn bucket_payment_authorize(agent_id: &str) -> String {
@@ -38,6 +44,14 @@ pub fn bucket_payment_authorize(agent_id: &str) -> String {
 
 pub fn bucket_agent_vc_issue(human_key_image: &str) -> String {
     hash_bucket(b"agent_vc_issue", &[human_key_image.as_bytes()])
+}
+
+pub fn bucket_agent_register(human_key_image: &str) -> String {
+    hash_bucket(b"agent_register", &[human_key_image.as_bytes()])
+}
+
+pub fn bucket_agent_verify(agent_id: &str) -> String {
+    hash_bucket(b"agent_verify", &[agent_id.as_bytes()])
 }
 
 fn parse_limit(name: &str, production_default: i64) -> i64 {
@@ -118,4 +132,12 @@ pub fn limit_payment_authorize() -> i64 {
 
 pub fn limit_agent_vc_issue() -> i64 {
     parse_limit("SAURON_RISK_AGENT_VC_ISSUE_PER_WINDOW", 20)
+}
+
+pub fn limit_agent_register() -> i64 {
+    parse_limit("SAURON_RISK_AGENT_REGISTER_PER_WINDOW", 20)
+}
+
+pub fn limit_agent_verify() -> i64 {
+    parse_limit("SAURON_RISK_AGENT_VERIFY_PER_WINDOW", 300)
 }

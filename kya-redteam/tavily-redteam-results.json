@@ -1,0 +1,170 @@
+{
+  "results": [
+    {
+      "category": "JWT alg=none",
+      "description": "Send an A-JWT whose header claims alg=none — historical OAuth bypass",
+      "payload_summary": "ajwt='ewJhbGciOiJub25lIn0.<payload_b64>.'",
+      "status": 200,
+      "body_excerpt": "{\"valid\":false,\"agent_id\":null,\"human_key_image\":null,\"intent_json\":null,\"assurance_level\":null,\"error\":\"Invalid or expired A-JWT\"}",
+      "blocked": true,
+      "latency_ms": 85
+    },
+    {
+      "category": "PoP bypass",
+      "description": "Try to verify against a PoP-bound agent without supplying PoP challenge",
+      "payload_summary": "/agent/verify { ajwt, no pop_challenge_id }",
+      "status": 200,
+      "body_excerpt": "{\"valid\":false,\"agent_id\":null,\"human_key_image\":null,\"intent_json\":null,\"assurance_level\":null,\"error\":\"Invalid or expired A-JWT\"}",
+      "blocked": true,
+      "latency_ms": 8
+    },
+    {
+      "category": "Malformed payload",
+      "description": "Crash-test: invalid JSON",
+      "payload_summary": "POST /agent/verify { not json }",
+      "status": 400,
+      "body_excerpt": "Failed to parse the request body as JSON: key must be a string at line 1 column 2",
+      "blocked": true,
+      "latency_ms": 3
+    },
+    {
+      "category": "Admin auth",
+      "description": "Hit /admin/agents without admin key",
+      "payload_summary": "GET /admin/agents (no x-admin-key)",
+      "status": 401,
+      "body_excerpt": "",
+      "blocked": true,
+      "latency_ms": 2
+    },
+    {
+      "category": "Admin auth",
+      "description": "Hit /admin/stats with empty key",
+      "payload_summary": "GET /admin/stats with x-admin-key='' (empty)",
+      "status": 401,
+      "body_excerpt": "",
+      "blocked": true,
+      "latency_ms": 2
+    },
+    {
+      "category": "Missing per-call sig",
+      "description": "Call /agent/payment/authorize with no x-sauron-call-sig",
+      "payload_summary": "POST /agent/payment/authorize without x-sauron-call-sig",
+      "status": 401,
+      "body_excerpt": "x-sauron-agent-id header required",
+      "blocked": true,
+      "latency_ms": 4
+    },
+    {
+      "category": "Garbage per-call sig",
+      "description": "Call /agent/payment/authorize with random base64 in x-sauron-call-sig",
+      "payload_summary": "POST /agent/payment/authorize with random sig",
+      "status": 401,
+      "body_excerpt": "unknown or revoked agent",
+      "blocked": true,
+      "latency_ms": 4
+    },
+    {
+      "category": "Time-skew",
+      "description": "Per-call sig timestamp 1 hour in the past",
+      "payload_summary": "x-sauron-call-ts = now - 3600000",
+      "status": 401,
+      "body_excerpt": "x-sauron-call-ts outside acceptable skew window",
+      "blocked": true,
+      "latency_ms": 4
+    },
+    {
+      "category": "CORS",
+      "description": "OPTIONS preflight from a disallowed origin",
+      "payload_summary": "OPTIONS /admin/stats Origin: evil.example.com",
+      "status": 200,
+      "body_excerpt": "{\"allowOrigin\":\"\"}",
+      "blocked": true,
+      "latency_ms": 4
+    },
+    {
+      "category": "Header injection",
+      "description": "Folded header injection attempt",
+      "payload_summary": "GET /admin/stats with malformed admin key",
+      "status": 499,
+      "body_excerpt": "fetch refused: Headers.append: \"wrong\r\nx-admin-key: super_secret_hackathon_key\" is an invalid header value.",
+      "blocked": true,
+      "latency_ms": 0
+    },
+    {
+      "category": "Path traversal",
+      "description": "Path traversal in /admin/site/{name}/users",
+      "payload_summary": "GET /admin/site/..%2F..%2Fetc%2Fpasswd/users",
+      "status": 200,
+      "body_excerpt": "[]",
+      "blocked": true,
+      "latency_ms": 3
+    },
+    {
+      "category": "Oversized body",
+      "description": "10 MB JSON body attempting payload bomb",
+      "payload_summary": "POST /agent/verify { ajwt: 10MB string }",
+      "status": 413,
+      "body_excerpt": "Failed to buffer the request body: length limit exceeded",
+      "blocked": true,
+      "latency_ms": 273
+    },
+    {
+      "category": "Header explosion",
+      "description": "Send 100 custom headers",
+      "payload_summary": "GET /admin/stats with 100 x-attack-N headers",
+      "status": 431,
+      "body_excerpt": "",
+      "blocked": true,
+      "latency_ms": 9
+    },
+    {
+      "category": "SQL injection",
+      "description": "Inject SQL meta-chars into agent_id path",
+      "payload_summary": "GET /agent/{agent_id}' OR 1=1--",
+      "status": 404,
+      "body_excerpt": "",
+      "blocked": true,
+      "latency_ms": 3
+    },
+    {
+      "category": "Concurrent nonce",
+      "description": "Fire 10 parallel /agent/verify with the same JTI claim",
+      "payload_summary": "10x parallel POST /agent/verify same ajwt consume_jti=true",
+      "status": 401,
+      "body_excerpt": "{\"escaped\":false,\"all_count\":10}",
+      "blocked": true,
+      "latency_ms": 22
+    },
+    {
+      "category": "Length-extension",
+      "description": "Session token forge via SHA-256 length-extension",
+      "payload_summary": "/user/consents with forged extended session",
+      "status": 401,
+      "body_excerpt": "Invalid or expired session",
+      "blocked": true,
+      "latency_ms": 4
+    },
+    {
+      "category": "JSON dup keys",
+      "description": "checksum_inputs with two system_prompt keys; assert deterministic handling",
+      "payload_summary": "POST /agent/register with duplicate system_prompt keys",
+      "status": 400,
+      "body_excerpt": "ring_key_image_hex is required and must be 32-byte hex",
+      "blocked": true,
+      "latency_ms": 1
+    },
+    {
+      "category": "PoP key reuse",
+      "description": "Try to register two agents with the same pop_public_key_b64u",
+      "payload_summary": "two POSTs /agent/register, same pop_public_key_b64u, different agent_id",
+      "status": 400,
+      "body_excerpt": "ring_key_image_hex is required and must be 32-byte hex",
+      "blocked": true,
+      "latency_ms": 3
+    }
+  ],
+  "blocked": 18,
+  "escaped": 0,
+  "tavily_search_enabled": false,
+  "generated_at": "2026-05-10T09:20:35.113Z"
+}

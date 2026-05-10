@@ -91,7 +91,8 @@
       claims: ['age_over_threshold', 'age_threshold'],
       buttonText: 'Continue with SauronID',
       theme: 'dark',
-      silentAuth: true,
+      silentAuth: false,
+      experimentalDeviceAuth: false,
       autoZkpMode: 'browser',
       proverModuleUrl: null,
       snarkjsCdn: 'https://cdn.jsdelivr.net/npm/snarkjs@0.7.6/build/snarkjs.min.js',
@@ -163,6 +164,12 @@
   // ── Silent auth via device token ──────────────────────────────────────────
   SauronID.prototype._silentAuth = function (deviceToken, el) {
     var self = this;
+    if (!this.config.experimentalDeviceAuth) {
+      this._clearDeviceToken();
+      this._clearUserSession();
+      this._renderButton(el || this._container);
+      return;
+    }
     this._setLoading(true);
     if (el) { el.innerHTML = '<span style="font-size:13px;color:#94a3b8;font-family:system-ui">Signing in...</span>'; }
 
@@ -271,22 +278,25 @@
         userSession: consent_data.user_session || self._loadUserSession(),
       });
 
-      // 6. Issue device token for future silent auth
-      try {
-        var dtRes = await fetch(self.config.apiUrl + '/auth/device/issue', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            consent_token: consent_token,
-            site_name: self.config.siteName,
-            fingerprint: self._fp,
-          }),
-        });
-        if (dtRes.ok) {
-          var dtData = await dtRes.json();
-          self._saveDeviceToken(dtData.device_token);
-        }
-      } catch (_) { /* non-critical */ }
+      // 6. Optional device token for future silent auth. Disabled unless the
+      // backend deploys /auth/device/* and explicitly opts in.
+      if (self.config.experimentalDeviceAuth) {
+        try {
+          var dtRes = await fetch(self.config.apiUrl + '/auth/device/issue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              consent_token: consent_token,
+              site_name: self.config.siteName,
+              fingerprint: self._fp,
+            }),
+          });
+          if (dtRes.ok) {
+            var dtData = await dtRes.json();
+            self._saveDeviceToken(dtData.device_token);
+          }
+        } catch (_) { /* non-critical */ }
+      }
 
       // 7. Update UI + callback
       self._setLoading(false);

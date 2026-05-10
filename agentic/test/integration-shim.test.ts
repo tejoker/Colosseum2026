@@ -85,6 +85,7 @@ async function main(): Promise<void> {
         humanSession: session,
         humanKeyImage: keyImage,
         publicKeyHex: userPub.toLowerCase(),
+        ringKeyImageHex: keyImage.toLowerCase(),
         agentConfig: {
             systemPrompt: "You are a shopping assistant.",
             tools: [{ name: "search_products", description: "Search", parameters: {} }],
@@ -106,7 +107,31 @@ async function main(): Promise<void> {
         throw new Error("expected compact A-JWT from /agent/register");
     }
 
-    const verifyRes = await postJson("/agent/verify", { ajwt: token });
+    const agentId = client.getAgentId();
+    if (!agentId) {
+        throw new Error("expected agent_id after /agent/register");
+    }
+    const popChallengeRes = await postJson(
+        "/agent/pop/challenge",
+        { agent_id: agentId },
+        { "x-sauron-session": session }
+    );
+    if (!popChallengeRes.ok) {
+        throw new Error(`/agent/pop/challenge HTTP ${popChallengeRes.status}: ${await popChallengeRes.text()}`);
+    }
+    const popChallenge = (await popChallengeRes.json()) as {
+        pop_challenge_id?: string;
+        challenge?: string;
+    };
+    if (!popChallenge.pop_challenge_id || !popChallenge.challenge) {
+        throw new Error(`missing PoP challenge fields: ${JSON.stringify(popChallenge)}`);
+    }
+    const popJws = await client.signPopChallenge(popChallenge.challenge);
+    const verifyRes = await postJson("/agent/verify", {
+        ajwt: token,
+        pop_challenge_id: popChallenge.pop_challenge_id,
+        pop_jws: popJws,
+    });
     if (!verifyRes.ok) {
         throw new Error(`/agent/verify HTTP ${verifyRes.status}: ${await verifyRes.text()}`);
     }

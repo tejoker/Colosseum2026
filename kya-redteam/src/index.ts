@@ -16,6 +16,8 @@ import { scenarioInvalidAjwt } from "./scenarios/invalid-ajwt";
 import { scenarioJtiReplay } from "./scenarios/jti-replay";
 import { scenarioParentEmptyScopeDenied } from "./scenarios/parent-empty-scope-denied";
 import { scenarioPopRequiredOnVerify } from "./scenarios/pop-required-on-verify";
+import { scenarioRevokedAgent } from "./scenarios/revoked-agent";
+import { scenarioCallSigBinding } from "./scenarios/call-sig-binding";
 
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
 const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
@@ -25,13 +27,15 @@ const iterations = Math.max(1, parseInt(process.env.REDTEAM_ITERATIONS || "1", 1
 type ScenarioFn = (api: CoreApi, bank: string, label: string) => Promise<void>;
 
 const scenarios: { name: string; run: ScenarioFn }[] = [
-    { name: "invalid_ajwt", run: async (api, _b, _l) => scenarioInvalidAjwt(api) },
-    { name: "jti_replay_blocked", run: scenarioJtiReplay },
-    { name: "autonomous_policy_matrix", run: scenarioAutonomousPolicy },
-    { name: "delegated_policy_matrix", run: scenarioDelegatedPolicy },
-    { name: "delegation_scope_denied", run: scenarioDelegationScopeDenied },
+    { name: "invalid_ajwt",             run: async (api, _b, _l) => scenarioInvalidAjwt(api) },
+    { name: "jti_replay_blocked",        run: scenarioJtiReplay },
+    { name: "autonomous_policy_matrix",  run: scenarioAutonomousPolicy },
+    { name: "delegated_policy_matrix",   run: scenarioDelegatedPolicy },
+    { name: "delegation_scope_denied",   run: scenarioDelegationScopeDenied },
     { name: "parent_empty_scope_denied", run: scenarioParentEmptyScopeDenied },
-    { name: "pop_required_on_verify", run: scenarioPopRequiredOnVerify },
+    { name: "pop_required_on_verify",    run: scenarioPopRequiredOnVerify },
+    { name: "revoked_agent_denied",      run: scenarioRevokedAgent },
+    { name: "call_sig_binding",          run: scenarioCallSigBinding },
 ];
 
 async function main(): Promise<void> {

@@ -1,10 +1,81 @@
 /**
  * Typed HTTP helpers for Sauron core KYA / agent endpoints (red-team harness).
  */
+import { execFileSync } from "node:child_process";
+import { generateKeyPairSync, KeyObject, sign as cryptoSign } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 export interface CoreApiConfig {
     baseUrl: string;
     adminKey: string;
+}
+
+export interface AgentActionKeys {
+    public_key_hex: string;
+    secret_hex: string;
+    ring_key_image_hex: string;
+}
+
+export interface AgentActionBuildInput {
+    secretHex: string;
+    agentId: string;
+    humanKeyImage: string;
+    ajwt: string;
+    action: string;
+    resource?: string;
+    merchantId?: string;
+    amountMinor?: number;
+    currency?: string;
+    ttlSecs?: number;
+}
+
+export interface PopKeyPair {
+    publicKeyB64u: string;
+    privateKey: KeyObject;
+}
+
+export function createPopKeyPair(): PopKeyPair {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const publicJwk = publicKey.export({ format: "jwk" }) as { x?: string };
+    if (!publicJwk.x) throw new Error("failed to export Ed25519 public JWK x");
+    return { publicKeyB64u: publicJwk.x, privateKey };
+}
+
+export function signPopJws(challenge: string, privateKey: KeyObject): string {
+    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+    const payload = Buffer.from(challenge, "utf8").toString("base64url");
+    const signingInput = `${header}.${payload}`;
+    const signature = cryptoSign(null, Buffer.from(signingInput), privateKey).toString("base64url");
+    return `${signingInput}.${signature}`;
+}
+
+function runAgentActionTool(args: string[]): string {
+    const configured = process.env.AGENT_ACTION_TOOL;
+    const direct = configured || resolve(process.cwd(), "../core/target/debug/agent-action-tool");
+    if (existsSync(direct)) {
+        return execFileSync(direct, args, { encoding: "utf8" }).trim();
+    }
+    const manifest = resolve(process.cwd(), "../core/Cargo.toml");
+    return execFileSync(
+        "cargo",
+        ["run", "--quiet", "--manifest-path", manifest, "--bin", "agent-action-tool", "--", ...args],
+        { encoding: "utf8" }
+    ).trim();
+}
+
+function parseJwtClaim(token: string, claim: string): string {
+    const payload = token.split(".")[1];
+    if (!payload) return "";
+    const obj = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+    const value = obj[claim];
+    return typeof value === "string" ? value : "";
+}
+
+function requireAgentAction(path: string, body: Record<string, unknown>): void {
+    if (!body.agent_action) {
+        throw new Error(`${path} requires agent_action; request /agent/action/challenge and sign it first`);
+    }
 }
 
 export class CoreApi {
@@ -31,7 +102,7 @@ export class CoreApi {
     }
 
     async ensureClient(name: string, clientType: string): Promise<void> {
-        await this.post("/admin/clients", { name, client_type: clientType }, { "x-admin-key": this.cfg.adminKey });
+        const res = await this.post("/admin/clients", { name, client_type: clientType }, { "x-admin-key": this.cfg.adminKey }); if (res.status !== 200 && res.status !== 409) throw new Error(`ensureClient failed ${res.status} ${res.raw}`);
     }
 
     async devBuyTokens(siteName: string, amount: number): Promise<void> {
@@ -69,6 +140,68 @@ export class CoreApi {
         return this.post<Record<string, unknown>>("/agent/register", body, { "x-sauron-session": session });
     }
 
+    agentActionKeygen(): AgentActionKeys {
+        return JSON.parse(runAgentActionTool(["keygen"])) as AgentActionKeys;
+    }
+
+    async issueAgentToken(session: string, agentId: string, ttlSecs = 300): Promise<string> {
+        const { status, data, raw } = await this.post<{ ajwt?: string }>(
+            "/agent/token",
+            { agent_id: agentId, ttl_secs: ttlSecs },
+            { "x-sauron-session": session }
+        );
+        if (status !== 200 || !data.ajwt) throw new Error(`agent/token ${status}: ${raw}`);
+        return data.ajwt;
+    }
+
+    async buildAgentActionProof(input: AgentActionBuildInput): Promise<Record<string, unknown>> {
+        const ajwtJti = parseJwtClaim(input.ajwt, "jti");
+        if (!ajwtJti) throw new Error("A-JWT missing jti");
+        const { status, data, raw } = await this.post<Record<string, unknown>>("/agent/action/challenge", {
+            agent_id: input.agentId,
+            human_key_image: input.humanKeyImage,
+            action: input.action,
+            resource: input.resource ?? "",
+            merchant_id: input.merchantId ?? "",
+            amount_minor: input.amountMinor ?? 0,
+            currency: input.currency ?? "",
+            ajwt_jti: ajwtJti,
+            ttl_secs: input.ttlSecs ?? 120,
+        });
+        if (status !== 200) throw new Error(`agent/action/challenge ${status}: ${raw}`);
+        return JSON.parse(runAgentActionTool([
+            "sign-challenge",
+            "--secret-hex",
+            input.secretHex,
+            "--challenge-json",
+            JSON.stringify(data),
+        ])) as Record<string, unknown>;
+    }
+
+    async agentPopChallenge(session: string, agentId: string): Promise<{ pop_challenge_id: string; challenge: string }> {
+        const { status, data, raw } = await this.post<{ pop_challenge_id?: string; challenge?: string }>(
+            "/agent/pop/challenge",
+            { agent_id: agentId },
+            { "x-sauron-session": session }
+        );
+        if (status !== 200 || !data.pop_challenge_id || !data.challenge) {
+            throw new Error(`agent/pop/challenge ${status}: ${raw}`);
+        }
+        return { pop_challenge_id: data.pop_challenge_id, challenge: data.challenge };
+    }
+
+    async agentPaymentAuthorize(body: Record<string, unknown>): Promise<{ status: number; data: Record<string, unknown>; raw: string }> {
+        requireAgentAction("/agent/payment/authorize", body);
+        return this.post<Record<string, unknown>>("/agent/payment/authorize", body);
+    }
+
+    async merchantPaymentConsume(
+        body: Record<string, unknown>
+    ): Promise<{ status: number; data: Record<string, unknown>; raw: string }> {
+        requireAgentAction("/merchant/payment/consume", body);
+        return this.post<Record<string, unknown>>("/merchant/payment/consume", body);
+    }
+
     async agentVcIssue(
         session: string,
         body: Record<string, unknown>
@@ -80,10 +213,29 @@ export class CoreApi {
         return this.post<Record<string, unknown>>("/agent/verify", body);
     }
 
-    async policyAuthorize(agentId: string, action: string): Promise<{ allowed: boolean; reason?: string }> {
+    async revokeAgent(
+        agentId: string,
+        session: string
+    ): Promise<{ status: number; data: Record<string, unknown>; raw: string }> {
+        const r = await fetch(`${this.cfg.baseUrl}/agent/${agentId}`, {
+            method: "DELETE",
+            headers: { "x-sauron-session": session },
+        });
+        const raw = await r.text();
+        let data: Record<string, unknown> = {};
+        try { data = JSON.parse(raw); } catch { /* empty */ }
+        return { status: r.status, data, raw };
+    }
+
+    async policyAuthorize(
+        agentId: string,
+        action: string,
+        ajwt: string,
+        agentAction: Record<string, unknown>
+    ): Promise<{ allowed: boolean; reason?: string }> {
         const { status, data, raw } = await this.post<{ allowed?: boolean; reason?: string }>(
             "/policy/authorize",
-            { agent_id: agentId, action }
+            { agent_id: agentId, action, ajwt, agent_action: agentAction }
         );
         if (status !== 200) throw new Error(`policy/authorize ${status}: ${raw}`);
         return { allowed: !!data.allowed, reason: data.reason };
@@ -104,7 +256,9 @@ export class CoreApi {
         request_id: string;
         pop_challenge_id?: string;
         pop_jws?: string;
+        agent_action: Record<string, unknown>;
     }): Promise<{ status: number; data: Record<string, unknown>; raw: string }> {
+        requireAgentAction("/agent/kyc/consent", body);
         return this.post<Record<string, unknown>>("/agent/kyc/consent", body);
     }
 }

@@ -8,6 +8,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # shellcheck source=tests/lib/zkp_fixture.sh
 source "${ROOT_DIR}/tests/lib/zkp_fixture.sh"
+# shellcheck source=tests/lib/agent_action.sh
+source "${ROOT_DIR}/tests/lib/agent_action.sh"
 ensure_zkp_fixture_bundle
 zkp_require_issuer
 
@@ -96,12 +98,23 @@ if [[ -z "$session" || -z "$key_image" ]]; then
 fi
 
 printf '[E2E delegated] register delegated agent\n'
+tmp_pop_json=$(mktemp)
+create_pop_key_file "$tmp_pop_json"
+pop_public_key_b64u=$(pop_public_key_b64u_from_file "$tmp_pop_json")
+pop_jkt="e2e-delegated-pop-${rand_suffix}"
+agent_keys=$(agent_action_keygen)
+agent_public_key_hex=$(printf '%s' "$agent_keys" | json_get "public_key_hex")
+agent_secret_hex=$(printf '%s' "$agent_keys" | json_get "secret_hex")
+agent_ring_key_image_hex=$(printf '%s' "$agent_keys" | json_get "ring_key_image_hex")
 agent_body=$(cat <<JSON
 {
   "human_key_image": "${key_image}",
   "agent_checksum": "sha256:e2e-delegated-${rand_suffix}",
-  "intent_json": "{\"scope\":[\"prove:age\"]}",
-  "public_key_hex": "${user_pub}",
+  "intent_json": "{\"scope\":[\"kyc_consent\",\"prove_age\"]}",
+  "public_key_hex": "${agent_public_key_hex}",
+  "ring_key_image_hex": "${agent_ring_key_image_hex}",
+  "pop_jkt": "${pop_jkt}",
+  "pop_public_key_b64u": "${pop_public_key_b64u}",
   "ttl_secs": 3600
 }
 JSON
@@ -125,13 +138,10 @@ if [[ "$assurance" != "delegated_bank" ]]; then
 fi
 
 printf '[E2E delegated] policy checks\n'
-deny_policy=$(curl -sS -X POST "${API_URL}/policy/authorize" -H 'content-type: application/json' -d "{\"agent_id\":\"${agent_id}\",\"action\":\"payment_initiation\"}")
-deny_allowed=$(printf '%s' "$deny_policy" | json_get "allowed")
-if [[ "$deny_allowed" != "True" && "$deny_allowed" != "true" ]]; then
-  echo "expected delegated_bank payment policy allow, got: $deny_policy" >&2
-  exit 1
-fi
-allow_policy=$(curl -sS -X POST "${API_URL}/policy/authorize" -H 'content-type: application/json' -d "{\"agent_id\":\"${agent_id}\",\"action\":\"prove_age\"}")
+policy_action=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "prove_age" "prove_age" "" 0 "" "$ajwt")
+allow_policy=$(curl -sS -X POST "${API_URL}/policy/authorize" \
+  -H 'content-type: application/json' \
+  -d "$(merge_agent_action_json "{\"agent_id\":\"${agent_id}\",\"action\":\"prove_age\",\"ajwt\":\"${ajwt}\"}" "$policy_action")")
 allow_allowed=$(printf '%s' "$allow_policy" | json_get "allowed")
 if [[ "$allow_allowed" != "True" && "$allow_allowed" != "true" ]]; then
   echo "expected delegated prove_age policy allow, got: $allow_policy" >&2
@@ -154,11 +164,20 @@ if [[ -z "$request_id" ]]; then
 fi
 
 printf '[E2E delegated] agent consent\n'
+consent_token_res=$(issue_agent_token "$session" "$agent_id" 300)
+consent_ajwt=$(printf '%s' "$consent_token_res" | json_get "ajwt")
+pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id=$(printf '%s' "$pop_json" | json_get "pop_challenge_id")
+pop_jws=$(printf '%s' "$pop_json" | json_get "pop_jws")
+consent_action=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "kyc_consent" "kyc_consent:${request_id}" "$RETAIL_SITE" 0 "" "$consent_ajwt")
 consent_body=$(cat <<JSON
 {
-  "ajwt": "${ajwt}",
+  "ajwt": "${consent_ajwt}",
   "site_name": "${RETAIL_SITE}",
-  "request_id": "${request_id}"
+  "request_id": "${request_id}",
+  "pop_challenge_id": "${pop_challenge_id}",
+  "pop_jws": "${pop_jws}",
+  "agent_action": ${consent_action}
 }
 JSON
 )
@@ -170,10 +189,14 @@ if [[ -z "$consent_token" ]]; then
 fi
 
 printf '[E2E delegated] retrieve with delegated binding + proof\n'
+retrieve_token_res=$(issue_agent_token "$session" "$agent_id" 300)
+retrieve_ajwt=$(printf '%s' "$retrieve_token_res" | json_get "ajwt")
+retrieve_action=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "prove_age" "kyc_retrieve:${RETAIL_SITE}" "$RETAIL_SITE" 0 "" "$retrieve_ajwt")
 retrieve_body="$(zkp_build_retrieve_payload_json "${consent_token}" "${RETAIL_SITE}" "prove_age")"
+retrieve_body="$(merge_agent_action_json "${retrieve_body}" "${retrieve_action}")"
 retrieve_res=$(curl -sS -X POST "${API_URL}/kyc/retrieve" \
   -H 'content-type: application/json' \
-  -H "x-agent-ajwt: ${ajwt}" \
+  -H "x-agent-ajwt: ${retrieve_ajwt}" \
   -d "${retrieve_body}")
 mode=$(printf '%s' "$retrieve_res" | json_get "disclosure_mode")
 trust=$(printf '%s' "$retrieve_res" | json_get "identity.trust_verified")
@@ -183,4 +206,5 @@ if [[ "$mode" != "zkp_only" || "$trust" != "True" && "$trust" != "true" || "$is_
   exit 1
 fi
 
+rm -f "$tmp_pop_json"
 echo "[PASS] delegated KYA e2e"

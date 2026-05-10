@@ -27,7 +27,7 @@ impl AssuranceLevel {
 pub const MAX_DELEGATION_DEPTH: u32 = 5;
 
 /// Bumped when `DELEGATED_BANK_ACTIONS` / `AUTONOMOUS_WEB3_ACTIONS` change (APIs + clients).
-pub const KYA_POLICY_MATRIX_VERSION: &str = "kya_matrix_v1";
+pub const KYA_POLICY_MATRIX_VERSION: &str = "kya_matrix_v2";
 
 /// Actions explicitly allowed for `delegated_bank` KYA (no wildcard).
 const DELEGATED_BANK_ACTIONS: &[&str] = &[
@@ -35,8 +35,10 @@ const DELEGATED_BANK_ACTIONS: &[&str] = &[
     "prove_nationality",
     "read_identity",
     "kyc_lookup",
+    "kyc_consent",
     "zkp_login",
     "payment_initiation",
+    "payment_consume",
     "web3_sign",
 ];
 
@@ -46,6 +48,7 @@ const AUTONOMOUS_WEB3_ACTIONS: &[&str] = &[
     "prove_age",
     "prove_nationality",
     "kyc_lookup",
+    "kyc_consent",
     "zkp_login",
     "web3_sign",
     "web3_trade_small",
@@ -62,7 +65,7 @@ fn action_allowed_in_list(action: &str, list: &[&str]) -> bool {
     if normalized.is_empty() {
         return false;
     }
-    list.iter().any(|a| *a == normalized.as_str())
+    list.contains(&normalized.as_str())
 }
 
 /// Whether this assurance level may call `POST /agent/kyc/consent`.

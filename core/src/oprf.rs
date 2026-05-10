@@ -1,13 +1,13 @@
 use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
-use sha2::{Sha512, Digest};
 use rand::rngs::OsRng;
+use sha2::{Digest, Sha512};
 
 pub fn client_blind(password: &str, login: &str) -> (RistrettoPoint, Scalar) {
     let mut hasher = Sha512::new();
     hasher.update(login.as_bytes());
     hasher.update(b"|SALT|");
     hasher.update(password.as_bytes());
-    
+
     let p = RistrettoPoint::hash_from_bytes::<Sha512>(hasher.finalize().as_ref());
     let r = Scalar::random(&mut OsRng);
     (r * p, r)
@@ -29,7 +29,7 @@ mod tests {
     fn test_oprf_deterministic() {
         let login = "alice@sauron.com";
         let password = "password123";
-        
+
         let server_k = Scalar::from_bytes_mod_order([42u8; 32]);
 
         let (b1, r1) = client_blind(password, login);

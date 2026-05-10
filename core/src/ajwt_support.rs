@@ -43,15 +43,19 @@ pub fn assert_child_scopes_subset_of_parent(
     parent_intent_json: &str,
     child_intent_json: &str,
 ) -> Result<(), String> {
-    let parent: std::collections::HashSet<String> =
-        scopes_from_intent_json(parent_intent_json).into_iter().collect();
+    let parent: std::collections::HashSet<String> = scopes_from_intent_json(parent_intent_json)
+        .into_iter()
+        .collect();
     if parent.is_empty() {
-        return Err("parent agent intent defines no delegable scopes (add scope[] or action)".into());
+        return Err(
+            "parent agent intent defines no delegable scopes (add scope[] or action)".into(),
+        );
     }
     let child = scopes_from_intent_json(child_intent_json);
     if child.is_empty() {
-        return Err("child agent intent must declare scope[] (or action) for delegated registration"
-            .into());
+        return Err(
+            "child agent intent must declare scope[] (or action) for delegated registration".into(),
+        );
     }
     for s in &child {
         if !parent.contains(s) {
@@ -86,8 +90,41 @@ pub fn consume_ajwt_jti(db: &Connection, jti: &str, exp: i64) -> Result<(), Stri
     Ok(())
 }
 
+/// Atomic single-use nonce consume for the DPoP-style per-call signature.
+/// Returns Err if (agent_id, nonce) already inserted (replay), or db error.
+pub fn consume_call_nonce(
+    db: &Connection,
+    agent_id: &str,
+    nonce: &str,
+    exp: i64,
+) -> Result<(), String> {
+    if nonce.is_empty() {
+        return Err("missing call nonce".into());
+    }
+    if nonce.len() > 128 {
+        return Err("call nonce too long (max 128 chars)".into());
+    }
+    db.execute(
+        "INSERT INTO agent_call_nonces (agent_id, nonce, exp) VALUES (?1, ?2, ?3)",
+        params![agent_id, nonce, exp],
+    )
+    .map_err(|e| {
+        let s = e.to_string();
+        if s.contains("UNIQUE") || s.contains("PRIMARY KEY") {
+            "call nonce replay (already used)".to_string()
+        } else {
+            s
+        }
+    })?;
+    Ok(())
+}
+
 /// Verify compact JWS: EdDSA over `header.payload`, payload decodes to UTF-8 `challenge`.
-pub fn verify_ed25519_pop_jws(challenge: &str, jws: &str, public_key_b64url: &str) -> Result<(), String> {
+pub fn verify_ed25519_pop_jws(
+    challenge: &str,
+    jws: &str,
+    public_key_b64url: &str,
+) -> Result<(), String> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
@@ -112,8 +149,8 @@ pub fn verify_ed25519_pop_jws(challenge: &str, jws: &str, public_key_b64url: &st
     let payload_bytes = URL_SAFE_NO_PAD
         .decode(parts[1])
         .map_err(|_| "pop JWS payload b64 invalid".to_string())?;
-    let payload_str = String::from_utf8(payload_bytes)
-        .map_err(|_| "pop JWS payload not UTF-8".to_string())?;
+    let payload_str =
+        String::from_utf8(payload_bytes).map_err(|_| "pop JWS payload not UTF-8".to_string())?;
     if payload_str != challenge {
         return Err("pop JWS payload does not match challenge".into());
     }
@@ -122,7 +159,8 @@ pub fn verify_ed25519_pop_jws(challenge: &str, jws: &str, public_key_b64url: &st
     let sig_bytes = URL_SAFE_NO_PAD
         .decode(parts[2])
         .map_err(|_| "pop JWS sig b64 invalid".to_string())?;
-    let sig = Signature::from_slice(&sig_bytes).map_err(|_| "invalid Ed25519 signature".to_string())?;
+    let sig =
+        Signature::from_slice(&sig_bytes).map_err(|_| "invalid Ed25519 signature".to_string())?;
     vk.verify(signing_input.as_bytes(), &sig)
         .map_err(|_| "PoP signature verification failed".to_string())
 }

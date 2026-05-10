@@ -18,6 +18,7 @@ FAIL_BUNDLE="${CONF_FAIL_BUNDLE:-/tmp/sauron-confidence-failure-$$.tar.gz}"
 ISSUER_URL="${CONF_ISSUER_URL:-http://127.0.0.1:4000}"
 ISSUER_PORT="${CONF_ISSUER_PORT:-4000}"
 ISSUER_SEED="${CONF_ISSUER_SEED:-sauron-confidence-issuer-seed-v1}"
+ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}"
 
 mkdir -p "$LOG_DIR"
 
@@ -63,6 +64,7 @@ fi
 echo "[CONF] start issuer verifier"
 ISSUER_DATA_DIR="${LOG_DIR}/issuer-data" \
 ISSUER_SEED="${ISSUER_SEED}" \
+SAURON_ISSUER_SHARED_SECRET="${ISSUER_SHARED_SECRET}" \
 PORT="${ISSUER_PORT}" \
 node "${ROOT_DIR}/../zkp/issuer/dist/server.js" >"${LOG_DIR}/issuer.log" 2>&1 &
 cleanup_issuer_pid="$!"
@@ -81,7 +83,7 @@ if [[ "$issuer_ready" -ne 1 ]]; then
   exit 1
 fi
 
-cargo build --bin sauron-core >/dev/null
+cargo build --bins >/dev/null
 
 echo "[CONF] phase1 shared-server suites"
 for i in $(seq 1 "$SHARED_ITERS"); do
@@ -94,6 +96,7 @@ for i in $(seq 1 "$SHARED_ITERS"); do
   ENV=development \
   SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
   SAURON_ISSUER_URL="${ISSUER_URL}" \
+  SAURON_ISSUER_SHARED_SECRET="${ISSUER_SHARED_SECRET}" \
   DATABASE_PATH="$db" \
   PORT="$port" \
   ./target/debug/sauron-core >"$log" 2>&1 &
@@ -123,6 +126,12 @@ for i in $(seq 1 "$SHARED_ITERS"); do
   MATRIX_JITTER_MS_MAX="$MATRIX_JITTER_MS_MAX" \
   MATRIX_FAULT_PROBE_PCT="$MATRIX_FAULT_PROBE_PCT" \
   tests/e2e_agent_matrix.sh >"${LOG_DIR}/shared-${i}.matrix.log"
+
+  if [[ -f "${ROOT_DIR}/../kya-redteam/dist/index.js" ]]; then
+    SAURON_CORE_URL="http://127.0.0.1:${port}" \
+    SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
+    node "${ROOT_DIR}/../kya-redteam/dist/index.js" >"${LOG_DIR}/shared-${i}.redteam.log"
+  fi
 
   kill "$pid" >/dev/null 2>&1 || true
   wait "$pid" >/dev/null 2>&1 || true

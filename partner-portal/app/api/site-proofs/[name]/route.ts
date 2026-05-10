@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
+import { adminKeyOrResponse, coreApiUrl, requireAdminProxyAuth } from "../../_adminProxy";
 
-export async function GET(_req: Request, { params }: { params: Promise<{ name: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ name: string }> }) {
+  const authError = requireAdminProxyAuth(req);
+  if (authError) return authError;
+
   const { name } = await params;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-  const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
+  const adminKey = adminKeyOrResponse();
+  if (typeof adminKey !== "string") return adminKey;
 
   try {
     const res = await fetch(
-      `${apiUrl}/admin/site/${encodeURIComponent(name)}/zkp_proofs`,
+      `${coreApiUrl()}/admin/site/${encodeURIComponent(name)}/zkp_proofs`,
       { headers: { "x-admin-key": adminKey } }
     );
     if (!res.ok) return NextResponse.json([], { status: res.status });

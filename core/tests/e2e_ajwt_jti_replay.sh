@@ -9,6 +9,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # shellcheck source=tests/lib/zkp_fixture.sh
 source "${ROOT_DIR}/tests/lib/zkp_fixture.sh"
+# shellcheck source=tests/lib/agent_action.sh
+source "${ROOT_DIR}/tests/lib/agent_action.sh"
 ensure_zkp_fixture_bundle
 zkp_require_issuer
 
@@ -86,12 +88,23 @@ if [[ -z "$session" || -z "$key_image" ]]; then
   exit 1
 fi
 
+tmp_pop_json=$(mktemp)
+create_pop_key_file "$tmp_pop_json"
+pop_public_key_b64u=$(pop_public_key_b64u_from_file "$tmp_pop_json")
+pop_jkt="e2e-jti-pop-${rand_suffix}"
+agent_keys=$(agent_action_keygen)
+agent_public_key_hex=$(printf '%s' "$agent_keys" | json_get "public_key_hex")
+agent_secret_hex=$(printf '%s' "$agent_keys" | json_get "secret_hex")
+agent_ring_key_image_hex=$(printf '%s' "$agent_keys" | json_get "ring_key_image_hex")
 agent_body=$(cat <<JSON
 {
   "human_key_image": "${key_image}",
   "agent_checksum": "sha256:jti-replay-${rand_suffix}",
-  "intent_json": "{\"scope\":[\"prove:age\"]}",
-  "public_key_hex": "${user_pub}",
+  "intent_json": "{\"scope\":[\"kyc_consent\"]}",
+  "public_key_hex": "${agent_public_key_hex}",
+  "ring_key_image_hex": "${agent_ring_key_image_hex}",
+  "pop_jkt": "${pop_jkt}",
+  "pop_public_key_b64u": "${pop_public_key_b64u}",
   "ttl_secs": 3600
 }
 JSON
@@ -116,11 +129,18 @@ if [[ -z "$request_id" ]]; then
   exit 1
 fi
 
+pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id=$(printf '%s' "$pop_json" | json_get "pop_challenge_id")
+pop_jws=$(printf '%s' "$pop_json" | json_get "pop_jws")
+consent_action=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "kyc_consent" "kyc_consent:${request_id}" "$RETAIL_SITE" 0 "" "$ajwt")
 consent_body=$(cat <<JSON
 {
   "ajwt": "${ajwt}",
   "site_name": "${RETAIL_SITE}",
-  "request_id": "${request_id}"
+  "request_id": "${request_id}",
+  "pop_challenge_id": "${pop_challenge_id}",
+  "pop_jws": "${pop_jws}",
+  "agent_action": ${consent_action}
 }
 JSON
 )
@@ -142,11 +162,18 @@ if [[ -z "$request_id2" ]]; then
   exit 1
 fi
 
+pop_json2=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id2=$(printf '%s' "$pop_json2" | json_get "pop_challenge_id")
+pop_jws2=$(printf '%s' "$pop_json2" | json_get "pop_jws")
+consent_action2=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "kyc_consent" "kyc_consent:${request_id2}" "$RETAIL_SITE" 0 "" "$ajwt")
 consent_body2=$(cat <<JSON
 {
   "ajwt": "${ajwt}",
   "site_name": "${RETAIL_SITE}",
-  "request_id": "${request_id2}"
+  "request_id": "${request_id2}",
+  "pop_challenge_id": "${pop_challenge_id2}",
+  "pop_jws": "${pop_jws2}",
+  "agent_action": ${consent_action2}
 }
 JSON
 )
@@ -159,4 +186,5 @@ if [[ "$code2" == "200" ]]; then
   exit 1
 fi
 
+rm -f "$tmp_pop_json"
 echo "[PASS] A-JWT jti replay blocked on second /agent/kyc/consent (http ${code2})"

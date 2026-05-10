@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sauron seed script — delegates to data/seed_sauron.py if CSVs are available,
-# falls back to minimal inline seed (10 users, 10 clients) otherwise.
+# Sauron seed script — minimal dev clients + users via core HTTP APIs only.
+# (No synthetic CSV pipeline — SauronID is the identity stack, not demo datagen.)
 # ──────────────────────────────────────────────────────────────────────────────
 
 SERVER="${SAURON_URL:-http://localhost:3001}"
@@ -18,8 +18,6 @@ elif [[ -d "${SCRIPT_DIR}/data" ]]; then
 else
     DATA_DIR=""
 fi
-SEED_PY="${DATA_DIR:+${DATA_DIR}/seed_sauron.py}"
-
 ok()   { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*" >&2; }
 
@@ -55,21 +53,8 @@ for i in $(seq 1 30); do
     fi
 done
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Try Python seeder — reads companies.csv & personas.csv (harmonized data)
-# ──────────────────────────────────────────────────────────────────────────────
-if [[ -n "$SEED_PY" && -f "$SEED_PY" && -f "$DATA_DIR/companies.csv" && -f "$DATA_DIR/personas.csv" ]]; then
-    echo
-    echo "--- Using unified Python seeder (data/seed_sauron.py) ---"
-    SEED_USERS="${SEED_USERS:-200}"
-    python3 "$SEED_PY" --server "$SERVER" --users "$SEED_USERS" --no-wait
-    echo
-    echo "=== Seed complete (Python seeder). ==="
-    exit 0
-fi
-
 echo
-echo "--- CSVs not found, falling back to inline seed ---"
+echo "--- Inline seed (HTTP only) ---"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. Create 5 FULL_KYC clients (banks / crypto exchanges)
@@ -121,7 +106,7 @@ USERS=(
 
 for entry in "${USERS[@]}"; do
     IFS='|' read -r email password first_name last_name dob nationality <<< "$entry"
-    payload=$(printf '{"email":"%s","password":"%s","first_name":"%s","last_name":"%s","date_of_birth":"%s","nationality":"%s"}' \
+    payload=$(printf '{"site_name":"Monzo","email":"%s","password":"%s","first_name":"%s","last_name":"%s","date_of_birth":"%s","nationality":"%s"}' \
         "$email" "$password" "$first_name" "$last_name" "$dob" "$nationality")
     resp=$(post_json "$SERVER/dev/register_user" "$payload" 2>&1) \
         && ok "$first_name $last_name <$email>" \

@@ -12,7 +12,7 @@
  *   GET  /status                                 → Issuer status & tree roots
  *
  * Integration:
- *   - Connects to the existing KYC service (port 8000) for identity data
+ *   - Claims are supplied by the Rust core / OID4VCI caller (no separate KYC microservice in the default stack).
  *   - Signs credentials with EdDSA-Poseidon (BabyJubJub)
  *   - Stores credential hashes in a Poseidon Merkle tree
  */
@@ -39,7 +39,27 @@ if (!process.env.ISSUER_SEED) {
     process.exit(1);
 }
 const ISSUER_SEED = process.env.ISSUER_SEED;
-const KYC_SERVICE_URL = process.env.KYC_SERVICE_URL || "http://localhost:8000";
+const CORE_SHARED_SECRET = process.env.SAURON_ISSUER_SHARED_SECRET || "";
+
+function coreAuthOk(req: express.Request): boolean {
+    if (!CORE_SHARED_SECRET) {
+        return false;
+    }
+    const provided = req.get("x-sauron-issuer-key") || "";
+    const expected = Buffer.from(CORE_SHARED_SECRET);
+    const actual = Buffer.from(provided);
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+function requireCoreAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!CORE_SHARED_SECRET) {
+        return res.status(503).json({ error: "issuer_core_auth_not_configured" });
+    }
+    if (!coreAuthOk(req)) {
+        return res.status(401).json({ error: "issuer_core_auth_required" });
+    }
+    return next();
+}
 
 // ─── Persistent state (file-backed Maps) ────────────────────────────
 
@@ -223,9 +243,9 @@ app.get("/.well-known/openid-credential-issuer", (req, res) => {
 /**
  * POST /pre-authorize
  * Creates a pre-authorized code for credential issuance.
- * Called by the backend after KYC verification.
+ * Called by the backend after identity / policy checks.
  */
-app.post("/pre-authorize", (req, res) => {
+app.post("/pre-authorize", requireCoreAuth, (req, res) => {
     const { subjectDid, claims } = req.body;
 
     if (!subjectDid || !claims) {
@@ -320,6 +340,11 @@ app.post("/credential", async (req, res) => {
 
     // Check for pre-auth code shortcut (Rust backend flow)
     if (req.body?.grant_type === "urn:ietf:params:oauth:grant-type:pre-authorized_code") {
+        if (!coreAuthOk(req)) {
+            return res.status(CORE_SHARED_SECRET ? 401 : 503).json({
+                error: CORE_SHARED_SECRET ? "issuer_core_auth_required" : "issuer_core_auth_not_configured",
+            });
+        }
         const preAuthCode = req.body["pre-authorized_code"];
         const codeRecord = preAuthCodes.get(preAuthCode);
         if (!codeRecord) {
@@ -460,7 +485,7 @@ app.post("/credential", async (req, res) => {
  * POST /revoke
  * Revoke a credential by its ID.
  */
-app.post("/revoke", (req, res) => {
+app.post("/revoke", requireCoreAuth, (req, res) => {
     const { credentialId } = req.body;
 
     const record = issuedCredentials.get(credentialId);
@@ -517,7 +542,7 @@ app.get("/issuer-pubkey", (_req, res) => {
  * Creates a pre-authorized code so the user's browser can later claim their credential.
  * Body: { subjectDid: string, claims: { date_of_birth, nationality, document_number?, expiry_date? } }
  */
-app.post("/register-credential", (req, res) => {
+app.post("/register-credential", requireCoreAuth, (req, res) => {
     const { subjectDid, claims } = req.body;
 
     if (!subjectDid || !claims) {
@@ -583,7 +608,7 @@ app.post("/verify-proof", async (req, res) => {
  * Returns inclusion proof material for CredentialVerification browser prover.
  * Body: { credentialHash?: string, leafIndex?: number }
  */
-app.post("/proof-material", (req, res) => {
+app.post("/proof-material", requireCoreAuth, (req, res) => {
     const credentialHash = req.body?.credentialHash ? String(req.body.credentialHash) : null;
     const leafIndexInput = Number.isInteger(req.body?.leafIndex) ? Number(req.body.leafIndex) : null;
 

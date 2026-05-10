@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useClient, API, KYC_API, type Client, type ClientUser } from "./context/ClientContext";
+import { useClient, API, type Client, type ClientUser } from "./context/ClientContext";
 import { showToast } from "./components/Toast";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ function UsersTab({ client }: { client: Client }) {
   const fetchData = useCallback(async () => {
     try {
       const [usersRes, proofsRes] = await Promise.all([
-        fetch(`${API}/dev/client/${encodeURIComponent(client.name)}/users`),
+        fetch(`/api/client/${encodeURIComponent(client.name)}/users`),
         fetch(`/api/site-proofs/${encodeURIComponent(client.name)}`),
       ]);
       if (usersRes.ok) setUsers(await usersRes.json());
@@ -244,7 +244,13 @@ function UsersTab({ client }: { client: Client }) {
 function LoginJourney({ client }: { client: Client }) {
   const { refreshActiveClient } = useClient();
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ first_name: string; last_name: string; email: string; nationality: string } | null>(null);
+  const [result, setResult] = useState<{
+    first_name?: string;
+    last_name?: string;
+    email?: string;
+    nationality?: string;
+    claims?: Record<string, unknown>;
+  } | null>(null);
   const [error, setError] = useState("");
 
   const openConsentPopup = async () => {
@@ -390,192 +396,6 @@ function LoginJourney({ client }: { client: Client }) {
   );
 }
 
-// ─── Groth16 client-side proof generation ────────────────────────────────────
-async function generateAgeProof(
-  dateOfBirth: string,
-  minAge: number,
-  issuerPubKeyAx: string,
-  issuerPubKeyAy: string,
-): Promise<{ proof: object; publicSignals: string[] } | null> {
-  try {
-    // Lazy-load snarkjs only in the browser
-    const snarkjs = await import("snarkjs");
-    const dobInt = parseInt(dateOfBirth.replace(/-/g, ""), 10) || 19900101;
-    const currentYear = new Date().getFullYear();
-    const threshold = (currentYear - minAge) * 10000 + 101; // YYYYMMDD threshold
-
-    const input = {
-      dateOfBirth: dobInt.toString(),
-      ageThreshold: threshold.toString(),
-      issuerPubKeyAx,
-      issuerPubKeyAy,
-      // These would normally come from the stored credential; using placeholders here
-      credentialSig_R8x: "0",
-      credentialSig_R8y: "0",
-      credentialSig_S: "0",
-    };
-
-    const wasmPath = "/circuits/AgeVerification.wasm";
-    const zkeyPath = "/circuits/AgeVerification_final.zkey";
-
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
-    return { proof, publicSignals };
-  } catch (e) {
-    console.warn("[ZKP] Client-side proof generation failed (non-fatal, falling back to server):", e);
-    return null;
-  }
-}
-
-// ─── Journey: ZKP Login ───────────────────────────────────────────────────────
-function ZkpJourney({ client }: { client: Client }) {
-  const { refreshActiveClient } = useClient();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [minAge, setMinAge] = useState("");
-  const [nationality, setNationality] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [proofStatus, setProofStatus] = useState("");
-  const [result, setResult] = useState<{ proved_claims: string[]; ring_size: number; client_ring_size: number; groth16_verified?: boolean } | null>(null);
-  const [error, setError] = useState("");
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault(); setError(""); setProofStatus("");
-    if (client.tokens_b === 0) {
-      const msg = `${client.name} has no credits. Buy some in the Dashboard tab.`;
-      setError(msg); showToast("error", "No credits", msg); return;
-    }
-    setBusy(true);
-    try {
-      const body: Record<string, unknown> = { email, password, site_name: client.name, token_b: "db_managed" };
-      const parsedAge = minAge ? parseInt(minAge, 10) : null;
-      if (parsedAge && !isNaN(parsedAge)) body.min_age = parsedAge;
-      if (nationality.trim()) body.required_nationality = nationality.trim().toUpperCase();
-
-      // Attempt client-side Groth16 proof if min_age is set
-      if (parsedAge && !isNaN(parsedAge)) {
-        setProofStatus("Generating Groth16 age proof...");
-        try {
-          // Fetch issuer public key for credential verification
-          const pkRes = await fetch(`${KYC_API}/issuer-pubkey`).catch(() => null);
-          const pkData = pkRes?.ok ? await pkRes.json() : null;
-          const Ax = pkData?.Ax ?? "0";
-          const Ay = pkData?.Ay ?? "0";
-
-          // User's date_of_birth would come from their stored credential.
-          // In dev mode we approximate using the threshold year.
-          const approxDob = `${new Date().getFullYear() - parsedAge - 1}-06-15`;
-          const groth16Result = await generateAgeProof(approxDob, parsedAge, Ax, Ay);
-          if (groth16Result) {
-            body.groth16_proof = groth16Result.proof;
-            body.groth16_public_signals = groth16Result.publicSignals;
-            setProofStatus("Proof generated. Verifying...");
-          }
-        } catch {
-          // Non-fatal: continue without Groth16 proof
-          setProofStatus("");
-        }
-      }
-
-      const res = await fetch(`${API}/dev/zkp_login`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? data ?? "ZKP login failed");
-      setResult({
-        proved_claims: data.proved_claims,
-        ring_size: data.ring_size,
-        client_ring_size: data.client_ring_size,
-        groth16_verified: !!body.groth16_proof,
-      });
-      showToast("success", `ZKP Login — ${client.name}`, `Proved: ${data.proved_claims.join(", ")} • ring size ${data.ring_size}`);
-      await refreshActiveClient();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      setError(msg); showToast("error", "ZKP Login failed", msg);
-    } finally { setBusy(false); setProofStatus(""); }
-  };
-
-  return (
-    <>
-      {result && (
-        <SuccessOverlay title={`ZKP Login Verified — ${client.name}`} onClose={() => setResult(null)}>
-          <div className="space-y-3 text-sm">
-            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-              <p className="text-purple-700 font-bold mb-2">Proof Accepted</p>
-              <div className="flex flex-wrap gap-1.5">
-                {result.proved_claims.map((c) => (
-                  <span key={c} className="inline-block text-xs px-2.5 py-1 rounded-full font-medium bg-purple-50 text-purple-700 border border-purple-200">{c}</span>
-                ))}
-              </div>
-            </div>
-            <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-1">
-              <p className="text-xs text-neutral-400">User ring: <span className="font-mono text-neutral-700">{result.ring_size} members</span></p>
-              <p className="text-xs text-neutral-400">Client ring: <span className="font-mono text-neutral-700">{result.client_ring_size} ZKP_ONLY clients</span></p>
-              {result.groth16_verified && (
-                <p className="text-xs text-purple-600">+ Groth16 age proof generated client-side</p>
-              )}
-            </div>
-            <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3 text-xs text-neutral-500">
-              {client.name} proved it&apos;s a registered ZKP_ONLY client and that a Sauron-registered user meets the criteria. Sauron does not learn who the user is or which site asked.
-            </div>
-          </div>
-        </SuccessOverlay>
-      )}
-
-      <form onSubmit={submit} className="space-y-4 max-w-lg mx-auto">
-        <div className="rounded-xl border-2 border-dashed border-purple-200 p-4 text-center">
-          <p className="text-xs font-bold uppercase tracking-wide text-purple-700 mb-1">Zero-Knowledge Proof Login</p>
-          <p className="text-xs text-neutral-400">Prove you hold a valid Sauron identity — no personal data is revealed to {client.name}.</p>
-        </div>
-
-        <div>
-          <label className="text-xs text-neutral-500 mb-1 block">Sauron Email</label>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required
-            className="w-full bg-white border border-neutral-300 text-neutral-900 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-neutral-500" placeholder="alice@example.com" />
-        </div>
-        <div>
-          <label className="text-xs text-neutral-500 mb-1 block">Sauron Password</label>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required
-            className="w-full bg-white border border-neutral-300 text-neutral-900 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-neutral-500" placeholder="••••••••" />
-        </div>
-
-        <div className="border border-neutral-100 rounded-lg p-4 space-y-3 bg-neutral-50">
-          <p className="text-xs font-medium text-neutral-500 uppercase tracking-wide">Optional ZKP Claims</p>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-neutral-400 mb-1 block">Min Age</label>
-              <input type="number" min={0} max={120} value={minAge} onChange={(e) => setMinAge(e.target.value)}
-                className="w-full bg-white border border-neutral-200 text-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-neutral-400" placeholder="e.g. 18" />
-            </div>
-            <div>
-              <label className="text-xs text-neutral-400 mb-1 block">Nationality (3-letter)</label>
-              <input type="text" maxLength={3} value={nationality} onChange={(e) => setNationality(e.target.value)}
-                className="w-full bg-white border border-neutral-200 text-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-neutral-400 uppercase" placeholder="e.g. FRA" />
-            </div>
-          </div>
-        </div>
-
-        <div className="border border-neutral-200 rounded-lg p-3 text-xs text-neutral-400">
-          Dual ring signature — user ring (filtered) + {client.name} client ring. When min age is set, a Groth16 proof is generated in your browser. No PII leaves the server.
-        </div>
-        {proofStatus && <div className="border border-purple-200 bg-purple-50 rounded-lg p-3 text-xs text-purple-700 animate-pulse">{proofStatus}</div>}
-        {error && <div className="border border-red-200 bg-red-50 rounded-lg p-3 text-xs text-red-600">{error}</div>}
-
-        <button type="submit" disabled={busy || !email || !password || client.tokens_b === 0}
-          className={`w-full py-2.5 rounded-lg font-semibold text-sm transition-all border ${client.tokens_b === 0
-              ? "border-neutral-200 text-neutral-300 cursor-not-allowed"
-              : busy || !email || !password
-                ? "border-neutral-200 text-neutral-400"
-                : "bg-purple-600 text-white border-purple-600 hover:bg-purple-700"
-            }`}>
-          {busy ? "Proving..." : client.tokens_b === 0 ? "No credits" : `Prove Identity to ${client.name} (1 credit)`}
-        </button>
-      </form>
-    </>
-  );
-}
-
 // ─── Journey Tab ──────────────────────────────────────────────────────────────
 function JourneyTab({ client }: { client: Client }) {
   const isZkp = client.client_type === "ZKP_ONLY";
@@ -584,10 +404,10 @@ function JourneyTab({ client }: { client: Client }) {
     return (
       <div className="border border-neutral-200 rounded-xl p-8">
         <div className="mb-6">
-          <h2 className="text-base font-semibold text-neutral-900">ZKP Login — {client.name}</h2>
-          <p className="text-xs text-neutral-400 mt-1">Prove membership anonymously. {client.name} learns only your ZKP claims, not your identity.</p>
+          <h2 className="text-base font-semibold text-neutral-900">Consent Proof — {client.name}</h2>
+          <p className="text-xs text-neutral-400 mt-1">The retired direct ZKP login now runs through consent + proof retrieval, so the demo follows the active backend contract.</p>
         </div>
-        <ZkpJourney client={client} />
+        <LoginJourney client={client} />
       </div>
     );
   }

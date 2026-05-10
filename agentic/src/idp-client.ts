@@ -4,7 +4,7 @@
  */
 
 import { AgentConfig, computeChecksum } from "./checksum";
-import { PopKeyPair, generatePopKeyPair } from "./pop-keys";
+import { PopKeyPair, generatePopKeyPair, signPopChallenge } from "./pop-keys";
 import {
     AgentIntent,
     AJWTPayload,
@@ -59,6 +59,11 @@ export interface IdPClientConfig {
      * This is NOT the Ed25519 PoP thumbprint; use the same format as Sauron core expects.
      */
     publicKeyHex: string;
+    /**
+     * 64 hex chars — compressed Ristretto key image for the agent action signer.
+     * Core binds every accepted action-time ring signature to this key image.
+     */
+    ringKeyImageHex: string;
     /** Optional: explicit parent for delegated child registration (else uses last `agent_id` from `requestToken`). */
     parentAgentId?: string;
     /** Optional: Ed25519 raw public key base64url — enables PoP on consent when core enforces it. */
@@ -68,6 +73,50 @@ export interface IdPClientConfig {
     workflowId?: string;
     /** JSON string for `delegation_chain` claim (core mirrors into A-JWT). */
     delegationChainJson?: string;
+    /** Return the Sauron core RingSignature JSON for a canonical action envelope. */
+    agentActionSigner?: (
+        canonical: string,
+        envelope: AgentActionEnvelope,
+        challenge: AgentActionChallenge
+    ) => Promise<unknown> | unknown;
+}
+
+export interface AgentActionEnvelope {
+    agent_id: string;
+    human_key_image: string;
+    action: string;
+    resource: string;
+    merchant_id: string;
+    amount_minor: number;
+    currency: string;
+    nonce: string;
+    expires_at: number;
+    policy_hash: string;
+    ajwt_jti: string;
+}
+
+export interface AgentActionProof {
+    envelope: AgentActionEnvelope;
+    ring_signature: unknown;
+}
+
+export interface AgentActionChallenge {
+    envelope: AgentActionEnvelope;
+    canonical: string;
+    action_hash: string;
+    agent_ring_public_keys_hex: string[];
+    signer_index: number;
+    signing_public_key_hex: string;
+}
+
+export interface AgentActionChallengeInput {
+    action: string;
+    resource?: string;
+    merchantId?: string;
+    amountMinor?: number;
+    currency?: string;
+    ttlSeconds?: number;
+    ajwtJti?: string;
 }
 
 /**
@@ -85,6 +134,7 @@ export class AgentShimClient {
 
     constructor(config: IdPClientConfig) {
         assertRistrettoPublicKeyHex("publicKeyHex", config.publicKeyHex);
+        assertRistrettoPublicKeyHex("ringKeyImageHex", config.ringKeyImageHex);
         this.config = config;
         this.checksum = computeChecksum(config.agentConfig);
     }
@@ -127,17 +177,15 @@ export class AgentShimClient {
             agent_checksum: this.checksum,
             intent_json: JSON.stringify(intent),
             public_key_hex: this.config.publicKeyHex,
+            ring_key_image_hex: this.config.ringKeyImageHex,
             ttl_secs: ttlSeconds,
         };
         if (this.config.parentAgentId) {
             registerBody.parent_agent_id = this.config.parentAgentId;
         }
-        if (this.config.popJkt) {
-            registerBody.pop_jkt = this.config.popJkt;
-        }
-        if (this.config.popPublicKeyB64u) {
-            registerBody.pop_public_key_b64u = this.config.popPublicKeyB64u;
-        }
+        registerBody.pop_jkt = this.config.popJkt ?? this.popKeyPair?.thumbprint;
+        registerBody.pop_public_key_b64u =
+            this.config.popPublicKeyB64u ?? (this.popKeyPair?.publicJwk.x as string | undefined);
         if (this.config.workflowId) {
             registerBody.workflow_id = this.config.workflowId;
         }
@@ -182,7 +230,7 @@ export class AgentShimClient {
     async delegateToAgent(
         childConfig: AgentConfig,
         scope: string[],
-        opts: { childPublicKeyHex: string }
+        opts: { childPublicKeyHex: string; childRingKeyImageHex: string }
     ): Promise<{
         token: string;
         childChecksum: string;
@@ -194,6 +242,7 @@ export class AgentShimClient {
         }
 
         assertRistrettoPublicKeyHex("childPublicKeyHex", opts.childPublicKeyHex);
+        assertRistrettoPublicKeyHex("childRingKeyImageHex", opts.childRingKeyImageHex);
 
         const parentRaw = parseJwtPayloadJson(this.currentToken);
         const parentIntent = coerceIntent(parentRaw.intent);
@@ -218,6 +267,9 @@ export class AgentShimClient {
             agent_checksum: childChecksum,
             intent_json: JSON.stringify(intent),
             public_key_hex: opts.childPublicKeyHex,
+            ring_key_image_hex: opts.childRingKeyImageHex,
+            pop_jkt: childPopKeyPair.thumbprint,
+            pop_public_key_b64u: childPopKeyPair.publicJwk.x,
             ttl_secs: 3600,
         };
         if (parentId) {
@@ -236,6 +288,47 @@ export class AgentShimClient {
         const data = (await response.json()) as { ajwt: string; agent_id?: string };
 
         return { token: data.ajwt, childChecksum, childPopKeyPair };
+    }
+
+    async buildAgentActionProof(input: AgentActionChallengeInput): Promise<AgentActionProof> {
+        this.ensureInitialized();
+        if (!this.currentToken || !this.tokenPayload || !this.lastAgentId) {
+            throw new Error("No current A-JWT. Call requestToken() first.");
+        }
+        if (!this.config.agentActionSigner) {
+            throw new Error("agentActionSigner is required to build a cryptographic leash proof.");
+        }
+
+        const response = await fetch(`${this.config.idpUrl}/agent/action/challenge`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                agent_id: this.lastAgentId,
+                human_key_image: this.config.humanKeyImage,
+                action: input.action,
+                resource: input.resource ?? "",
+                merchant_id: input.merchantId ?? "",
+                amount_minor: input.amountMinor ?? 0,
+                currency: input.currency ?? "",
+                ajwt_jti: input.ajwtJti ?? this.tokenPayload.jti,
+                ttl_secs: input.ttlSeconds ?? 120,
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Action challenge failed (${response.status}): ${await response.text()}`);
+        }
+        const data = (await response.json()) as AgentActionChallenge;
+        const ringSignature = await this.config.agentActionSigner(data.canonical, data.envelope, data);
+        return {
+            envelope: data.envelope,
+            ring_signature: ringSignature,
+        };
+    }
+
+    async signPopChallenge(challenge: string): Promise<string> {
+        this.ensureInitialized();
+        return signPopChallenge(challenge, this.popKeyPair as PopKeyPair);
     }
 
     verifyIntegrity(): { intact: boolean; currentChecksum: string; expectedChecksum: string } {
@@ -265,6 +358,10 @@ export class AgentShimClient {
 
     getToken(): string | null {
         return this.currentToken;
+    }
+
+    getAgentId(): string | null {
+        return this.lastAgentId;
     }
 
     isTokenValid(): boolean {

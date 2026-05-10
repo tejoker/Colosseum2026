@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 
 const BASE_URL = process.env.ISSUER_TEST_URL || "http://127.0.0.1:4100";
 const PORT = Number(new URL(BASE_URL).port || "4100");
+const CORE_SECRET = process.env.SAURON_ISSUER_SHARED_SECRET || "issuer-test-shared-secret";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,7 +53,7 @@ function startIssuer() {
       PORT: String(PORT),
       ISSUER_SEED: process.env.ISSUER_SEED || "sauronid-issuer-seed-hackathon",
       ISSUER_DID: process.env.ISSUER_DID || "did:sauron:issuer:test",
-      KYC_SERVICE_URL: process.env.KYC_SERVICE_URL || "http://localhost:8000",
+      SAURON_ISSUER_SHARED_SECRET: CORE_SECRET,
     },
     stdio: "inherit",
   });
@@ -75,7 +76,9 @@ async function run() {
       },
     };
 
-    const preAuth = await postJson("/pre-authorize", preAuthPayload);
+    const preAuth = await postJson("/pre-authorize", preAuthPayload, {
+      "x-sauron-issuer-key": CORE_SECRET,
+    });
     assert.equal(preAuth.res.status, 200, "pre-authorize should succeed");
     assert.ok(preAuth.data?.["pre-authorized_code"], "pre-authorized code must exist");
 

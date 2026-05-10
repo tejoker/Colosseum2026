@@ -1,4 +1,4 @@
-import { getPublicKey, utils } from "@noble/ed25519";
+import { generateKeyPairSync } from "crypto";
 import { CoreApi, randSuffix } from "../core-api";
 
 /** Agent registered with PoP material must not pass /agent/verify without challenge + JWS. */
@@ -15,7 +15,7 @@ export async function scenarioPopRequiredOnVerify(
 
     const email = `pop_${sfx}@sauron.local`;
     const password = `Passw0rd!${sfx}`;
-    const { public_key_hex } = await api.devRegisterUser({
+    await api.devRegisterUser({
         site_name: bankSite,
         email,
         password,
@@ -25,16 +25,20 @@ export async function scenarioPopRequiredOnVerify(
         nationality: "FRA",
     });
     const { session, key_image } = await api.userAuth(email, password);
+    const keys = api.agentActionKeygen();
 
-    const priv = utils.randomSecretKey();
-    const pub = getPublicKey(priv);
-    const popB64u = Buffer.from(pub).toString("base64url");
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const jwk = publicKey.export({ format: "jwk" }) as { x?: string };
+    if (!jwk.x) throw new Error("failed to export Ed25519 JWK x");
+    const popB64u = jwk.x;
 
     const reg = await api.agentRegister(session, {
         human_key_image: key_image,
         agent_checksum: `sha256:pop-${sfx}`,
         intent_json: JSON.stringify({ scope: ["prove_age"] }),
-        public_key_hex: public_key_hex.toLowerCase(),
+        public_key_hex: keys.public_key_hex,
+        ring_key_image_hex: keys.ring_key_image_hex,
+        pop_jkt: `redteam-pop-${sfx}`,
         ttl_secs: 3600,
         pop_public_key_b64u: popB64u,
     });

@@ -4,7 +4,9 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-export const KYC_API = process.env.NEXT_PUBLIC_KYC_URL || "/api/kyc/api";
+/** OID4VCI / BabyJubJub issuer (GET /issuer-pubkey, verify-proof, …). */
+export const ZKP_ISSUER_URL =
+  process.env.NEXT_PUBLIC_ZKP_ISSUER_URL || "http://localhost:4000";
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface Client {
   name: string;
@@ -57,7 +59,7 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
   const refreshClients = useCallback(async () => {
     try {
       const [clientsRes, statsRes] = await Promise.all([
-        fetch(`${API}/dev/clients`),
+        fetch(`/api/clients`),
         fetch(`/api/stats`),
       ]);
       if (clientsRes.ok) {
@@ -81,7 +83,7 @@ export function ClientProvider({ children }: { children: React.ReactNode }) {
   const refreshActiveClient = useCallback(async () => {
     if (!activeClientName) return;
     try {
-      const res = await fetch(`${API}/dev/client/${encodeURIComponent(activeClientName)}`);
+      const res = await fetch(`/api/client/${encodeURIComponent(activeClientName)}`);
       if (res.ok) {
         const updated: Client = await res.json();
         setClients((prev) => prev.map((c) => (c.name === updated.name ? updated : c)));

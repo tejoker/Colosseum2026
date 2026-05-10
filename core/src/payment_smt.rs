@@ -1,21 +1,21 @@
-/// Payment Sparse Merkle Tree (Poseidon-compatible, 20 levels)
-///
-/// Key   = SHA256(agent_id + "|" + window_start_str) — 256-bit, stored as 64 hex chars.
-/// Value = 0 (no consumed payment in window) | 1 (consumed).
-///
-/// Proof of Non-Payment = non-membership proof: the leaf at `key` is 0 (or absent,
-/// treated as 0). The circuit verifies that `Poseidon(key, 0)` lies on a valid path
-/// to the public root.
-///
-/// Root computation is intentionally delegated to the issuer service (Node.js /
-/// circomlibjs) because Poseidon is not natively available in Rust without large deps.
-/// This module owns: key derivation, the in-memory map, DB persistence, path generation,
-/// and the JSON shape posted to the issuer.
+//! Payment Sparse Merkle Tree (Poseidon-compatible, 20 levels)
+//!
+//! Key   = SHA256(agent_id + "|" + window_start_str) — 256-bit, stored as 64 hex chars.
+//! Value = 0 (no consumed payment in window) | 1 (consumed).
+//!
+//! Proof of Non-Payment = non-membership proof: the leaf at `key` is 0 (or absent,
+//! treated as 0). The circuit verifies that `Poseidon(key, 0)` lies on a valid path
+//! to the public root.
+//!
+//! Root computation is intentionally delegated to the issuer service (Node.js /
+//! circomlibjs) because Poseidon is not natively available in Rust without large deps.
+//! This module owns: key derivation, the in-memory map, DB persistence, path generation,
+//! and the JSON shape posted to the issuer.
 
-use std::collections::HashMap;
-use sha2::{Sha256, Digest};
-use rusqlite::params;
 use crate::db::DbHandle;
+use rusqlite::params;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 pub const SMT_LEVELS: usize = 20;
 pub const PAYMENT_WINDOW_SECONDS: u64 = 2_592_000; // 30 days
@@ -125,6 +125,12 @@ impl PaymentSmt {
             "levels": SMT_LEVELS,
             "leaves": leaves_vec,
         })
+    }
+}
+
+impl Default for PaymentSmt {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

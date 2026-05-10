@@ -17,15 +17,15 @@ impl ClientType {
         match self {
             ClientType::FullKyc => "FULL_KYC",
             ClientType::ZkpOnly => "ZKP_ONLY",
-            ClientType::Bank    => "BANK",
+            ClientType::Bank => "BANK",
         }
     }
 
     pub fn from_db_str(s: &str) -> Self {
         match s {
             "FULL_KYC" => ClientType::FullKyc,
-            "BANK"     => ClientType::Bank,
-            _          => ClientType::ZkpOnly,
+            "BANK" => ClientType::Bank,
+            _ => ClientType::ZkpOnly,
         }
     }
 }

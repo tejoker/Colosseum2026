@@ -29,7 +29,13 @@ impl ComplianceConfig {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| OVERLAY_VERSION_DEFAULT.to_string());
 
-        let mode = std::env::var("SAURON_COMPLIANCE_JURISDICTION_MODE")
+        // Hard-off override for AI-agent-binding deployments that don't need any compliance gating.
+        let force_off = !crate::feature_flags::compliance_enabled();
+
+        let mode = if force_off {
+            "off".to_string()
+        } else {
+            std::env::var("SAURON_COMPLIANCE_JURISDICTION_MODE")
             .unwrap_or_else(|_| {
                 if is_development_runtime() {
                     "off".to_string()
@@ -38,7 +44,8 @@ impl ComplianceConfig {
                     "audit".to_string()
                 }
             })
-            .to_ascii_lowercase();
+        };
+        let mode = mode.to_ascii_lowercase();
         let mode = match mode.as_str() {
             "enforce" => JurisdictionMode::Enforce,
             "audit" => JurisdictionMode::Audit,
@@ -144,7 +151,10 @@ impl JurisdictionDecision {
 }
 
 /// Returns `Err` when enforcement blocks the request (caller maps to HTTP 403).
-pub fn enforce_jurisdiction(cfg: &ComplianceConfig, nationality_db: &str) -> Result<JurisdictionDecision, String> {
+pub fn enforce_jurisdiction(
+    cfg: &ComplianceConfig,
+    nationality_db: &str,
+) -> Result<JurisdictionDecision, String> {
     let d = evaluate_jurisdiction(cfg, nationality_db);
     if cfg.mode == JurisdictionMode::Enforce && !d.allowed {
         return Err("compliance: user jurisdiction not permitted for this deployment".to_string());

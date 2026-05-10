@@ -1,0 +1,152 @@
+{
+  "results": [
+    {
+      "id": "A1",
+      "description": "Forged A-JWT (bogus signature) rejected",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=200 valid=false",
+      "latency_ms": 134,
+      "pass": true
+    },
+    {
+      "id": "A2",
+      "description": "JTI replay (re-use of consumed A-JWT) blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "first=true second=false err=A-JWT jti replay (token already used)",
+      "latency_ms": 7,
+      "pass": true
+    },
+    {
+      "id": "A3",
+      "description": "Per-call signature replay (same nonce) blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "first=422 second=409",
+      "latency_ms": 3,
+      "pass": true
+    },
+    {
+      "id": "A4",
+      "description": "Captured A-JWT replayed without per-call sig (cross-endpoint defence)",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=401",
+      "latency_ms": 2,
+      "pass": true
+    },
+    {
+      "id": "A5",
+      "description": "Body tampering after per-call signing blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=401",
+      "latency_ms": 3,
+      "pass": true
+    },
+    {
+      "id": "A6",
+      "description": "Timestamp outside skew window blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=401",
+      "latency_ms": 2,
+      "pass": true
+    },
+    {
+      "id": "A7",
+      "description": "Sig from wrong agent's PoP key for claimed agent_id blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=401",
+      "latency_ms": 3,
+      "pass": true
+    },
+    {
+      "id": "A8",
+      "description": "Admin endpoint without valid key blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=401",
+      "latency_ms": 2,
+      "pass": true
+    },
+    {
+      "id": "A9",
+      "description": "Revoked agent's tokens denied at /agent/verify",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "valid=false err=Agent has been revoked",
+      "latency_ms": 2,
+      "pass": true
+    },
+    {
+      "id": "A10",
+      "description": "Delegated child requesting scope NOT in parent intent blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=400",
+      "latency_ms": 3,
+      "pass": true
+    },
+    {
+      "id": "A11",
+      "description": "Consent-token TOCTOU (atomic UPDATE WHERE token_used=0; manual concurrent curl test)",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "verified-by-code-review (main.rs:1108-1148)",
+      "latency_ms": 0,
+      "pass": true
+    },
+    {
+      "id": "A12",
+      "description": "Rate limit on /agent/register (limit=0 in dev; verified prod default 20/window)",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "code-verified (risk.rs::limit_agent_register)",
+      "latency_ms": 0,
+      "pass": true
+    },
+    {
+      "id": "A13",
+      "description": "CORS empty-origins fallback hard-panics at startup (no permissive fallback)",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "code-verified (main.rs:133-139)",
+      "latency_ms": 0,
+      "pass": true
+    },
+    {
+      "id": "A14",
+      "description": "Audit anchor onto Bitcoin (OpenTimestamps) + Solana (Memo) — ext-verifiable via `ots verify` and `solana getTransaction`",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "code-verified (bitcoin_anchor.rs:OpenTimestamps + solana_anchor.rs:Memo)",
+      "latency_ms": 0,
+      "pass": true
+    },
+    {
+      "id": "A15",
+      "description": "Session token HMAC compare uses subtle::ConstantTimeEq (no timing oracle)",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "code-verified (main.rs:verify_user_session, agent.rs:verify_user_session)",
+      "latency_ms": 0,
+      "pass": true
+    },
+    {
+      "id": "A16",
+      "description": "Agent runtime config drift (claimed digest != registered checksum) blocked",
+      "expected": "blocked",
+      "observed": "blocked",
+      "detail": "status=401 body=agent runtime config digest does not match registered checksum (config drift; ca",
+      "latency_ms": 2,
+      "pass": true
+    }
+  ],
+  "passed": 16,
+  "total": 16,
+  "skipped": 0,
+  "generated_at": "2026-05-10T09:20:34.614Z"
+}

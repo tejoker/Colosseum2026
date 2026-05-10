@@ -8,6 +8,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # shellcheck source=tests/lib/zkp_fixture.sh
 source "${ROOT_DIR}/tests/lib/zkp_fixture.sh"
+# shellcheck source=tests/lib/agent_action.sh
+source "${ROOT_DIR}/tests/lib/agent_action.sh"
 ensure_zkp_fixture_bundle
 zkp_require_issuer
 
@@ -95,12 +97,24 @@ if [[ -z "$session" || -z "$key_image" ]]; then
 fi
 
 printf '[E2E autonomous] issue autonomous agent VC\n'
+tmp_pop_json=$(mktemp)
+create_pop_key_file "$tmp_pop_json"
+pop_public_key_b64u=$(pop_public_key_b64u_from_file "$tmp_pop_json")
+pop_jkt="e2e-autonomous-pop-${rand_suffix}"
+agent_keys=$(agent_action_keygen)
+agent_public_key_hex=$(printf '%s' "$agent_keys" | json_get "public_key_hex")
+agent_secret_hex=$(printf '%s' "$agent_keys" | json_get "secret_hex")
+agent_ring_key_image_hex=$(printf '%s' "$agent_keys" | json_get "ring_key_image_hex")
 vc_body=$(cat <<JSON
 {
   "human_key_image": "${key_image}",
   "agent_checksum": "sha256:e2e-autonomous-${rand_suffix}",
   "description": "Autonomous test agent",
-  "scope": ["prove:age"],
+  "scope": ["kyc_consent", "prove_age"],
+  "public_key_hex": "${agent_public_key_hex}",
+  "ring_key_image_hex": "${agent_ring_key_image_hex}",
+  "pop_jkt": "${pop_jkt}",
+  "pop_public_key_b64u": "${pop_public_key_b64u}",
   "ttl_hours": 24
 }
 JSON
@@ -122,9 +136,12 @@ if [[ "$assurance" != "autonomous_web3" ]]; then
 fi
 
 printf '[E2E autonomous] verify token assurance\n'
+verify_pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+verify_pop_challenge_id=$(printf '%s' "$verify_pop_json" | json_get "pop_challenge_id")
+verify_pop_jws=$(printf '%s' "$verify_pop_json" | json_get "pop_jws")
 verify_res=$(curl -sS -X POST "${API_URL}/agent/verify" \
   -H 'content-type: application/json' \
-  -d "{\"ajwt\":\"${ajwt}\"}")
+  -d "{\"ajwt\":\"${ajwt}\",\"pop_challenge_id\":\"${verify_pop_challenge_id}\",\"pop_jws\":\"${verify_pop_jws}\"}")
 verified=$(printf '%s' "$verify_res" | json_get "valid")
 verify_assurance=$(printf '%s' "$verify_res" | json_get "assurance_level")
 if [[ "$verified" != "True" && "$verified" != "true" ]]; then
@@ -137,13 +154,20 @@ if [[ "$verify_assurance" != "autonomous_web3" ]]; then
 fi
 
 printf '[E2E autonomous] policy checks\n'
-deny_policy=$(curl -sS -X POST "${API_URL}/policy/authorize" -H 'content-type: application/json' -d "{\"agent_id\":\"${agent_id}\",\"action\":\"payment_initiation\"}")
+deny_policy=$(curl -sS -X POST "${API_URL}/policy/authorize" \
+  -H 'content-type: application/json' \
+  -d "{\"agent_id\":\"${agent_id}\",\"action\":\"payment_initiation\",\"ajwt\":\"${ajwt}\"}")
 deny_allowed=$(printf '%s' "$deny_policy" | json_get "allowed")
 if [[ "$deny_allowed" != "False" && "$deny_allowed" != "false" ]]; then
   echo "expected autonomous payment policy deny, got: $deny_policy" >&2
   exit 1
 fi
-allow_policy=$(curl -sS -X POST "${API_URL}/policy/authorize" -H 'content-type: application/json' -d "{\"agent_id\":\"${agent_id}\",\"action\":\"prove_age\"}")
+allow_token_res=$(issue_agent_token "$session" "$agent_id" 300)
+allow_ajwt=$(printf '%s' "$allow_token_res" | json_get "ajwt")
+allow_action=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "prove_age" "prove_age" "" 0 "" "$allow_ajwt")
+allow_policy=$(curl -sS -X POST "${API_URL}/policy/authorize" \
+  -H 'content-type: application/json' \
+  -d "$(merge_agent_action_json "{\"agent_id\":\"${agent_id}\",\"action\":\"prove_age\",\"ajwt\":\"${allow_ajwt}\"}" "$allow_action")")
 allow_allowed=$(printf '%s' "$allow_policy" | json_get "allowed")
 if [[ "$allow_allowed" != "True" && "$allow_allowed" != "true" ]]; then
   echo "expected autonomous prove_age policy allow, got: $allow_policy" >&2
@@ -160,9 +184,28 @@ if [[ -z "$request_id" ]]; then
   exit 1
 fi
 
+consent_token_res=$(issue_agent_token "$session" "$agent_id" 300)
+consent_ajwt=$(printf '%s' "$consent_token_res" | json_get "ajwt")
+pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id=$(printf '%s' "$pop_json" | json_get "pop_challenge_id")
+pop_jws=$(printf '%s' "$pop_json" | json_get "pop_jws")
+consent_action=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "kyc_consent" "kyc_consent:${request_id}" "$RETAIL_SITE" 0 "" "$consent_ajwt")
+consent_body=$(python3 - "$consent_ajwt" "$RETAIL_SITE" "$request_id" "$pop_challenge_id" "$pop_jws" "$consent_action" <<'PY'
+import json, sys
+ajwt, site, request_id, pop_id, pop_jws, action = sys.argv[1:]
+print(json.dumps({
+    "ajwt": ajwt,
+    "site_name": site,
+    "request_id": request_id,
+    "pop_challenge_id": pop_id,
+    "pop_jws": pop_jws,
+    "agent_action": json.loads(action),
+}, separators=(",", ":")))
+PY
+)
 consent_res=$(curl -sS -X POST "${API_URL}/agent/kyc/consent" \
   -H 'content-type: application/json' \
-  -d "{\"ajwt\":\"${ajwt}\",\"site_name\":\"${RETAIL_SITE}\",\"request_id\":\"${request_id}\"}")
+  -d "$consent_body")
 consent_token=$(printf '%s' "$consent_res" | json_get "consent_token")
 if [[ -z "$consent_token" ]]; then
   echo "agent/kyc/consent failed: $consent_res" >&2
@@ -170,9 +213,13 @@ if [[ -z "$consent_token" ]]; then
 fi
 
 retrieve_body="$(zkp_build_retrieve_payload_json "${consent_token}" "${RETAIL_SITE}" "prove_age")"
+retrieve_token_res=$(issue_agent_token "$session" "$agent_id" 300)
+retrieve_ajwt=$(printf '%s' "$retrieve_token_res" | json_get "ajwt")
+retrieve_action=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "prove_age" "kyc_retrieve:${RETAIL_SITE}" "$RETAIL_SITE" 0 "" "$retrieve_ajwt")
+retrieve_body="$(merge_agent_action_json "${retrieve_body}" "${retrieve_action}")"
 retrieve_res=$(curl -sS -X POST "${API_URL}/kyc/retrieve" \
   -H 'content-type: application/json' \
-  -H "x-agent-ajwt: ${ajwt}" \
+  -H "x-agent-ajwt: ${retrieve_ajwt}" \
   -d "${retrieve_body}")
 trust=$(printf '%s' "$retrieve_res" | json_get "identity.trust_verified")
 assurance_out=$(printf '%s' "$retrieve_res" | json_get "identity.agent_assurance_level")
@@ -207,7 +254,23 @@ if [[ -z "$nonbank_session" || -z "$nonbank_key_image" ]]; then
   exit 1
 fi
 
+nonbank_pop_json=$(mktemp)
+create_pop_key_file "$nonbank_pop_json"
+nonbank_pop_public_key_b64u=$(pop_public_key_b64u_from_file "$nonbank_pop_json")
+nonbank_keys=$(agent_action_keygen)
+nonbank_public_key_hex=$(printf '%s' "$nonbank_keys" | json_get "public_key_hex")
+nonbank_ring_key_image_hex=$(printf '%s' "$nonbank_keys" | json_get "ring_key_image_hex")
 nonbank_vc_body="$(zkp_build_nonbank_vc_issue_payload_json "${nonbank_key_image}" "sha256:e2e-autonomous-nonbank-${rand_suffix}" "Autonomous non-bank test agent" '["prove_age"]')"
+nonbank_vc_body=$(python3 - "$nonbank_vc_body" "$nonbank_public_key_hex" "$nonbank_ring_key_image_hex" "e2e-nonbank-pop-${rand_suffix}" "$nonbank_pop_public_key_b64u" <<'PY'
+import json, sys
+body = json.loads(sys.argv[1])
+body["public_key_hex"] = sys.argv[2]
+body["ring_key_image_hex"] = sys.argv[3]
+body["pop_jkt"] = sys.argv[4]
+body["pop_public_key_b64u"] = sys.argv[5]
+print(json.dumps(body, separators=(",", ":")))
+PY
+)
 nonbank_vc_res=$(curl -sS -X POST "${API_URL}/agent/vc/issue" \
   -H 'content-type: application/json' \
   -H "x-sauron-session: ${nonbank_session}" \
@@ -219,4 +282,5 @@ if [[ -z "$nonbank_ajwt" || "$nonbank_assurance" != "autonomous_web3" ]]; then
   exit 1
 fi
 
+rm -f "$tmp_pop_json" "$nonbank_pop_json"
 echo "[PASS] autonomous KYA e2e"

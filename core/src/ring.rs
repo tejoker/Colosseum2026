@@ -1,10 +1,12 @@
-use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar, constants::RISTRETTO_BASEPOINT_TABLE};
-use sha2::{Sha512, Digest};
-use rand::rngs::OsRng;
-use serde::{Serialize, Deserialize};
 use crate::identity::Identity;
+use curve25519_dalek::{
+    constants::RISTRETTO_BASEPOINT_TABLE, ristretto::RistrettoPoint, scalar::Scalar,
+};
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha512};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RingSignature {
     pub c0: Scalar,
     pub responses: Vec<Scalar>,
@@ -24,13 +26,18 @@ fn challenge(msg: &[u8], l: &RistrettoPoint, r: &RistrettoPoint) -> Scalar {
     Scalar::from_hash(h)
 }
 
-pub fn sign(msg: &[u8], ring: &[RistrettoPoint], identity: &Identity, signer_idx: usize) -> RingSignature {
+pub fn sign(
+    msg: &[u8],
+    ring: &[RistrettoPoint],
+    identity: &Identity,
+    signer_idx: usize,
+) -> RingSignature {
     let n = ring.len();
     let mut responses: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut OsRng)).collect();
     let key_image = identity.key_image();
     let alpha = Scalar::random(&mut OsRng);
     let l_init = &alpha * RISTRETTO_BASEPOINT_TABLE;
-    let r_init = &alpha * hash_to_point(&ring[signer_idx]);
+    let r_init = alpha * hash_to_point(&ring[signer_idx]);
 
     let mut challenges = vec![Scalar::ZERO; n];
     challenges[(signer_idx + 1) % n] = challenge(msg, &l_init, &r_init);
@@ -39,7 +46,7 @@ pub fn sign(msg: &[u8], ring: &[RistrettoPoint], identity: &Identity, signer_idx
         let i = (signer_idx + offset) % n;
         let next = (i + 1) % n;
         let l = &responses[i] * RISTRETTO_BASEPOINT_TABLE + challenges[i] * ring[i];
-        let r = &responses[i] * hash_to_point(&ring[i]) + challenges[i] * key_image;
+        let r = responses[i] * hash_to_point(&ring[i]) + challenges[i] * key_image;
         if next != signer_idx {
             challenges[next] = challenge(msg, &l, &r);
         } else {
@@ -48,16 +55,22 @@ pub fn sign(msg: &[u8], ring: &[RistrettoPoint], identity: &Identity, signer_idx
     }
     responses[signer_idx] = alpha - challenges[signer_idx] * identity.secret();
 
-    RingSignature { c0: challenges[0], responses, key_image }
+    RingSignature {
+        c0: challenges[0],
+        responses,
+        key_image,
+    }
 }
 
 pub fn verify(msg: &[u8], ring: &[RistrettoPoint], sig: &RingSignature) -> bool {
     let n = ring.len();
-    if sig.responses.len() != n { return false; }
+    if sig.responses.len() != n {
+        return false;
+    }
     let mut c = sig.c0;
-    for i in 0..n {
-        let l = &sig.responses[i] * RISTRETTO_BASEPOINT_TABLE + c * ring[i];
-        let r = &sig.responses[i] * hash_to_point(&ring[i]) + c * sig.key_image;
+    for (i, ring_member) in ring.iter().enumerate().take(n) {
+        let l = &sig.responses[i] * RISTRETTO_BASEPOINT_TABLE + c * ring_member;
+        let r = sig.responses[i] * hash_to_point(ring_member) + c * sig.key_image;
         c = challenge(msg, &l, &r);
     }
     c == sig.c0
@@ -71,9 +84,15 @@ pub struct AdultGroup {
 pub type RingGroup = AdultGroup;
 
 impl AdultGroup {
-    pub fn new() -> Self { Self { members: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            members: Vec::new(),
+        }
+    }
     pub fn add_member(&mut self, public: RistrettoPoint) {
-        if !self.members.contains(&public) { self.members.push(public); }
+        if !self.members.contains(&public) {
+            self.members.push(public);
+        }
     }
     pub fn prove(&self, identity: &Identity, msg: &[u8]) -> Option<RingSignature> {
         let idx = self.members.iter().position(|p| p == &identity.public)?;
@@ -81,6 +100,12 @@ impl AdultGroup {
     }
     pub fn verify_proof(&self, msg: &[u8], sig: &RingSignature) -> bool {
         verify(msg, &self.members, sig)
+    }
+}
+
+impl Default for AdultGroup {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

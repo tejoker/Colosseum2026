@@ -1,14 +1,45 @@
 /**
- * Tavily + Stripe test-mode stress harness for agent payment flows.
+ * SauronID Real-Agent Stress Harness
  *
- * This runner is intentionally cost guarded:
- * - Stripe live keys are rejected. Only sk_test_* is accepted.
- * - Stripe PaymentIntents use manual capture and are canceled, never captured.
- * - Tavily calls are capped; without TAVILY_API_KEY the runner uses a local dry run.
+ * Each iteration exercises the full agentic payment + KYC consent stack:
+ *   - Tavily search (or dry-run) embeds real-world context into agent bounds
+ *   - Payment agent: PoP-enabled, intent-bounded, merchant-allowlisted
+ *       • negative: over-limit amount rejected
+ *       • negative: merchant outside allowlist rejected
+ *       • positive: authorize → Stripe manual-capture (test/dry) → merchant consume
+ *   - KYC agent: delegated, prove_age scope, JTI-protected consent
+ *       • positive: agent KYC consent on behalf of user
+ *
+ * Cost guards:
+ *   - Stripe live keys rejected; manual-capture intents cancelled immediately
+ *   - Tavily calls capped by REAL_AGENT_TAVILY_MAX_CALLS
+ *   - All bounds configurable via environment variables (see below)
+ *
+ * Environment variables:
+ *   API_URL | SAURON_CORE_URL     Backend base URL (default http://127.0.0.1:3001)
+ *   SAURON_ADMIN_KEY              Admin key (default super_secret_hackathon_key)
+ *   E2E_BANK_SITE                 Bank client name (default "BNP Paribas")
+ *   TAVILY_API_KEY                Tavily API key (omit for dry-run)
+ *   TAVILY_API_URL                Override Tavily endpoint
+ *   STRIPE_SECRET_KEY             Stripe test key sk_test_* (omit for dry-run)
+ *   STRIPE_API_URL                Override Stripe endpoint
+ *   REAL_AGENT_STRESS_ITERATIONS  Number of full runs (default 3, max 25 / 250 with HIGH_LIMITS)
+ *   REAL_AGENT_STRESS_CONCURRENCY Parallel workers (default 2, max 4 / 25 with HIGH_LIMITS)
+ *   REAL_AGENT_STRESS_AMOUNT_MINOR Payment amount in minor units, e.g. 1234 = €12.34
+ *   REAL_AGENT_TAVILY_MAX_CALLS   Cap on live Tavily API calls
+ *   REAL_AGENT_TAVILY_MAX_RESULTS Tavily results per query (default 3)
+ *   REAL_AGENT_NEGATIVE_CHECKS    Set to "0" to skip negative assertions
+ *   REAL_AGENT_STRESS_HIGH_LIMITS Set to "1" to raise iteration/concurrency caps
+ *   STRESS_REPORT_DIR             Directory for JSON report (default cwd)
  */
 
 import { createHash, generateKeyPairSync, KeyObject, sign as cryptoSign } from "crypto";
+import { writeFileSync } from "fs";
+import { join } from "path";
 import { CoreApi, randSuffix } from "./core-api";
+import { randomRistrettoHex } from "./ristretto";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 type JsonRecord = Record<string, unknown>;
 
@@ -26,36 +57,77 @@ interface StripeAuthorization {
     status: string;
 }
 
+interface SubResult {
+    name: string;
+    ok: boolean;
+    ms: number;
+    error?: string;
+}
+
 interface RunResult {
     index: number;
     ok: boolean;
     ms: number;
-    mode: {
-        tavily: TavilyContext["mode"];
-        stripe: StripeAuthorization["mode"];
-    };
+    subs: SubResult[];
+    mode: { tavily: TavilyContext["mode"]; stripe: StripeAuthorization["mode"] };
     stripeStatus?: string;
     error?: string;
 }
+
+interface StressReport {
+    timestamp: string;
+    config: {
+        base_url: string;
+        iterations: number;
+        concurrency: number;
+        amount_minor: number;
+        currency: string;
+        tavily_calls_cap: number;
+        negative_checks: boolean;
+        stripe_mode: "test" | "dry_run";
+    };
+    summary: {
+        ok: number;
+        failed: number;
+        pass_rate_pct: number;
+        avg_ms: number;
+        p50_ms: number;
+        p95_ms: number;
+        p99_ms: number;
+        tavily_calls_used: number;
+        negative_checks_passed: number;
+    };
+    runs: RunResult[];
+}
+
+// ─── Config ──────────────────────────────────────────────────────────────────
 
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
 const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
 const bankSite = process.env.E2E_BANK_SITE || "BNP Paribas";
 
 const allowHighLimits = process.env.REAL_AGENT_STRESS_HIGH_LIMITS === "1";
-const iterations = readBoundedInt("REAL_AGENT_STRESS_ITERATIONS", 3, 1, allowHighLimits ? 250 : 25);
-const concurrency = readBoundedInt("REAL_AGENT_STRESS_CONCURRENCY", 2, 1, allowHighLimits ? 25 : 4);
-const amountMinor = readBoundedInt("REAL_AGENT_STRESS_AMOUNT_MINOR", 1234, 50, 5000);
-const tavilyMaxCalls = readBoundedInt("REAL_AGENT_TAVILY_MAX_CALLS", Math.min(iterations, 3), 0, allowHighLimits ? 100 : 10);
+const iterations   = readBoundedInt("REAL_AGENT_STRESS_ITERATIONS",   3,  1, allowHighLimits ? 250 : 25);
+const concurrency  = readBoundedInt("REAL_AGENT_STRESS_CONCURRENCY",   2,  1, allowHighLimits ? 25 :  4);
+const amountMinor  = readBoundedInt("REAL_AGENT_STRESS_AMOUNT_MINOR", 1234, 50, 50000);
+const tavilyMaxCalls   = readBoundedInt("REAL_AGENT_TAVILY_MAX_CALLS", Math.min(iterations, 3), 0, allowHighLimits ? 100 : 10);
 const tavilyMaxResults = readBoundedInt("REAL_AGENT_TAVILY_MAX_RESULTS", 3, 1, 5);
 const runNegativeChecks = process.env.REAL_AGENT_NEGATIVE_CHECKS !== "0";
+const currency = "EUR";
 
-const tavilyApiKey = process.env.TAVILY_API_KEY;
+const tavilyApiKey   = process.env.TAVILY_API_KEY;
 const tavilyEndpoint = process.env.TAVILY_API_URL || "https://api.tavily.com/search";
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
-const stripeEndpoint = process.env.STRIPE_API_URL || "https://api.stripe.com";
+const stripeEndpoint  = process.env.STRIPE_API_URL || "https://api.stripe.com";
+const reportDir = process.env.STRESS_REPORT_DIR || ".";
 
 let tavilyCallsUsed = 0;
+let negativeChecksPassed = 0;
+
+// Retail client shared across all runs (lazily bootstrapped in runPool).
+const retailSite = `sauron-stress-retail-${Date.now()}`;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function readBoundedInt(name: string, fallback: number, min: number, max: number): number {
     const raw = process.env[name];
@@ -76,6 +148,22 @@ function safeSnippet(value: string, max = 220): string {
     return value.replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function elapsedMs(started: bigint): number {
+    return Number((process.hrtime.bigint() - started) / 1_000_000n);
+}
+
+function percentile(sorted: number[], p: number): number {
+    if (sorted.length === 0) return 0;
+    const idx = Math.ceil((p / 100) * sorted.length) - 1;
+    return sorted[Math.max(0, Math.min(idx, sorted.length - 1))];
+}
+
+function pad(s: string | number, n: number): string {
+    return String(s).padStart(n);
+}
+
+// ─── PoP helpers ─────────────────────────────────────────────────────────────
+
 function createPopKeyPair(): { publicKeyB64u: string; privateKey: KeyObject } {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
     const publicJwk = publicKey.export({ format: "jwk" });
@@ -85,22 +173,63 @@ function createPopKeyPair(): { publicKeyB64u: string; privateKey: KeyObject } {
 }
 
 function signPopJws(challenge: string, privateKey: KeyObject): string {
-    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+    const header  = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
     const payload = Buffer.from(challenge, "utf8").toString("base64url");
-    const signingInput = `${header}.${payload}`;
-    const signature = cryptoSign(null, Buffer.from(signingInput), privateKey).toString("base64url");
-    return `${signingInput}.${signature}`;
+    const input   = `${header}.${payload}`;
+    const sig     = cryptoSign(null, Buffer.from(input), privateKey).toString("base64url");
+    return `${input}.${sig}`;
 }
+
+async function freshPopAuthorize(input: {
+    api: CoreApi;
+    session: string;
+    agentId: string;
+    humanKeyImage: string;
+    secretHex: string;
+    ajwt: string;
+    privateKey: KeyObject;
+    amountMinor: number;
+    merchantId: string;
+    paymentRef: string;
+}): Promise<{ status: number; data: JsonRecord; raw: string }> {
+    const ch = await input.api.agentPopChallenge(input.session, input.agentId);
+    const agentAction = await input.api.buildAgentActionProof({
+        secretHex: input.secretHex,
+        agentId: input.agentId,
+        humanKeyImage: input.humanKeyImage,
+        ajwt: input.ajwt,
+        action: "payment_initiation",
+        resource: input.paymentRef,
+        merchantId: input.merchantId,
+        amountMinor: input.amountMinor,
+        currency,
+    });
+    return input.api.agentPaymentAuthorize({
+        ajwt: input.ajwt,
+        amount_minor: input.amountMinor,
+        currency,
+        merchant_id: input.merchantId,
+        payment_ref: input.paymentRef,
+        pop_challenge_id: ch.pop_challenge_id,
+        pop_jws: signPopJws(ch.challenge, input.privateKey),
+        agent_action: agentAction,
+    });
+}
+
+// ─── Tavily ──────────────────────────────────────────────────────────────────
+
+const TAVILY_QUERIES = [
+    "AI agent payment authorization merchant allowlist risk controls fintech",
+    "agentic commerce bounded authorization zero-knowledge proof identity",
+    "autonomous agent payment fraud detection scope constraints JWT",
+    "AI agent identity verification cryptographic proof of possession",
+    "delegated payment agent scope enforcement compliance banking API",
+] as const;
 
 async function tavilySearch(query: string): Promise<TavilyContext> {
     if (!tavilyApiKey || tavilyCallsUsed >= tavilyMaxCalls) {
-        const answer = `dry-run Tavily context for: ${query}`;
-        return {
-            mode: "dry_run",
-            query,
-            answer,
-            contextHash: sha256Hex(answer),
-        };
+        const answer = `dry-run context for: ${query}`;
+        return { mode: "dry_run", query, answer, contextHash: sha256Hex(answer) };
     }
 
     tavilyCallsUsed++;
@@ -119,9 +248,7 @@ async function tavilySearch(query: string): Promise<TavilyContext> {
         }),
     });
     const raw = await response.text();
-    if (!response.ok) {
-        throw new Error(`Tavily ${response.status}: ${safeSnippet(raw)}`);
-    }
+    if (!response.ok) throw new Error(`Tavily ${response.status}: ${safeSnippet(raw)}`);
 
     const body = JSON.parse(raw) as {
         answer?: unknown;
@@ -133,9 +260,7 @@ async function tavilySearch(query: string): Promise<TavilyContext> {
         firstString(top?.title),
         firstString(top?.content),
         firstString(top?.url),
-    ]
-        .filter(Boolean)
-        .join(" | ");
+    ].filter(Boolean).join(" | ");
 
     return {
         mode: "tavily",
@@ -146,19 +271,20 @@ async function tavilySearch(query: string): Promise<TavilyContext> {
     };
 }
 
+// ─── Stripe ──────────────────────────────────────────────────────────────────
+
 function assertStripeKeyIsSafe(): void {
     if (!stripeSecretKey) return;
     if (stripeSecretKey.startsWith("sk_live_")) {
-        throw new Error("Refusing to run with a live Stripe key. Use a sk_test_* key for this harness.");
+        throw new Error("Refusing to run with a live Stripe key. Use sk_test_* only.");
     }
     if (!stripeSecretKey.startsWith("sk_test_")) {
-        throw new Error("STRIPE_SECRET_KEY must be a Stripe test secret key starting with sk_test_");
+        throw new Error("STRIPE_SECRET_KEY must start with sk_test_");
     }
 }
 
-async function stripeAuthorizeManualCapture(input: {
+async function stripeCreateManualCapture(input: {
     amountMinor: number;
-    currency: string;
     paymentRef: string;
     authorizationId: string;
     agentId: string;
@@ -173,19 +299,19 @@ async function stripeAuthorizeManualCapture(input: {
     }
 
     const params = new URLSearchParams();
-    params.set("amount", String(input.amountMinor));
-    params.set("currency", input.currency.toLowerCase());
-    params.set("confirm", "true");
-    params.set("capture_method", "manual");
-    params.set("payment_method", "pm_card_visa");
+    params.set("amount",               String(input.amountMinor));
+    params.set("currency",             currency.toLowerCase());
+    params.set("confirm",              "true");
+    params.set("capture_method",       "manual");
+    params.set("payment_method",       "pm_card_visa");
     params.append("payment_method_types[]", "card");
-    params.set("description", "SauronID real-agent stress test authorization");
+    params.set("description",          "SauronID agent stress authorization");
     params.set("metadata[sauron_authorization_id]", input.authorizationId);
-    params.set("metadata[sauron_payment_ref]", input.paymentRef);
-    params.set("metadata[sauron_agent_id]", input.agentId);
-    params.set("metadata[sauron_merchant_id]", input.merchantId);
+    params.set("metadata[sauron_payment_ref]",      input.paymentRef);
+    params.set("metadata[sauron_agent_id]",         input.agentId);
+    params.set("metadata[sauron_merchant_id]",      input.merchantId);
 
-    const response = await fetch(`${stripeEndpoint}/v1/payment_intents`, {
+    const r = await fetch(`${stripeEndpoint}/v1/payment_intents`, {
         method: "POST",
         headers: {
             Authorization: `Bearer ${stripeSecretKey}`,
@@ -194,230 +320,505 @@ async function stripeAuthorizeManualCapture(input: {
         },
         body: params,
     });
-    const raw = await response.text();
-    if (!response.ok) {
-        throw new Error(`Stripe create PaymentIntent ${response.status}: ${safeSnippet(raw)}`);
-    }
+    const raw = await r.text();
+    if (!r.ok) throw new Error(`Stripe create ${r.status}: ${safeSnippet(raw)}`);
     const body = JSON.parse(raw) as { id?: unknown; status?: unknown };
-    const id = firstString(body.id);
+    const id     = firstString(body.id);
     const status = firstString(body.status);
-    if (!id || !status) throw new Error(`Stripe PaymentIntent response missing id/status: ${safeSnippet(raw)}`);
-    if (status !== "requires_capture") {
-        throw new Error(`Stripe PaymentIntent expected requires_capture, got ${status}`);
-    }
+    if (!id || !status) throw new Error(`Stripe response missing id/status: ${safeSnippet(raw)}`);
+    if (status !== "requires_capture") throw new Error(`Stripe expected requires_capture, got ${status}`);
     return { mode: "stripe_test", id, status };
 }
 
-async function stripeCancelAuthorization(paymentIntentId: string): Promise<void> {
-    if (!stripeSecretKey || paymentIntentId.startsWith("pi_dry_")) return;
-    const response = await fetch(`${stripeEndpoint}/v1/payment_intents/${paymentIntentId}/cancel`, {
+async function stripeCancelIntent(piId: string): Promise<void> {
+    if (!stripeSecretKey || piId.startsWith("pi_dry_")) return;
+    const r = await fetch(`${stripeEndpoint}/v1/payment_intents/${piId}/cancel`, {
         method: "POST",
         headers: {
             Authorization: `Bearer ${stripeSecretKey}`,
             "Content-Type": "application/x-www-form-urlencoded",
         },
     });
-    const raw = await response.text();
-    if (!response.ok) {
-        throw new Error(`Stripe cancel PaymentIntent ${response.status}: ${safeSnippet(raw)}`);
+    if (!r.ok) {
+        const raw = await r.text();
+        throw new Error(`Stripe cancel ${r.status}: ${safeSnippet(raw)}`);
     }
 }
 
-async function authorizeWithFreshPop(input: {
+// ─── Sub-scenario runners ─────────────────────────────────────────────────────
+
+async function runNegativeOverLimit(input: {
     api: CoreApi;
     session: string;
     agentId: string;
+    humanKeyImage: string;
+    secretHex: string;
     ajwt: string;
     privateKey: KeyObject;
-    amountMinor: number;
-    currency: string;
+    merchantId: string;
+    index: number;
+}): Promise<SubResult> {
+    const t = process.hrtime.bigint();
+    try {
+        const denied = await freshPopAuthorize({
+            api: input.api,
+            session: input.session,
+            agentId: input.agentId,
+            humanKeyImage: input.humanKeyImage,
+            secretHex: input.secretHex,
+            ajwt: input.ajwt,
+            privateKey: input.privateKey,
+            amountMinor: amountMinor + 1,
+            merchantId: input.merchantId,
+            paymentRef: `neg_overlimit_${input.index}_${randSuffix()}`,
+        });
+        if (denied.status === 200) {
+            return { name: "neg:over_limit", ok: false, ms: elapsedMs(t),
+                error: `over-limit payment unexpectedly succeeded: ${denied.raw}` };
+        }
+        negativeChecksPassed++;
+        return { name: "neg:over_limit", ok: true, ms: elapsedMs(t) };
+    } catch (e) {
+        return { name: "neg:over_limit", ok: false, ms: elapsedMs(t),
+            error: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+async function runNegativeWrongMerchant(input: {
+    api: CoreApi;
+    session: string;
+    agentId: string;
+    humanKeyImage: string;
+    secretHex: string;
+    ajwt: string;
+    privateKey: KeyObject;
+    index: number;
+}): Promise<SubResult> {
+    const t = process.hrtime.bigint();
+    try {
+        // Merchant not in allowlist → must be rejected.
+        const denied = await freshPopAuthorize({
+            api: input.api,
+            session: input.session,
+            agentId: input.agentId,
+            humanKeyImage: input.humanKeyImage,
+            secretHex: input.secretHex,
+            ajwt: input.ajwt,
+            privateKey: input.privateKey,
+            amountMinor,
+            merchantId: `BLOCKED_MERCHANT_${randSuffix()}`,
+            paymentRef: `neg_merchant_${input.index}_${randSuffix()}`,
+        });
+        if (denied.status === 200) {
+            return { name: "neg:wrong_merchant", ok: false, ms: elapsedMs(t),
+                error: `wrong-merchant payment unexpectedly succeeded: ${denied.raw}` };
+        }
+        negativeChecksPassed++;
+        return { name: "neg:wrong_merchant", ok: true, ms: elapsedMs(t) };
+    } catch (e) {
+        return { name: "neg:wrong_merchant", ok: false, ms: elapsedMs(t),
+            error: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+async function runPaymentFlow(input: {
+    api: CoreApi;
+    session: string;
+    agentId: string;
+    humanKeyImage: string;
+    secretHex: string;
+    ajwt: string;
+    privateKey: KeyObject;
     merchantId: string;
     paymentRef: string;
-}): Promise<{ status: number; data: JsonRecord; raw: string }> {
-    const challenge = await input.api.agentPopChallenge(input.session, input.agentId);
-    return input.api.agentPaymentAuthorize({
-        ajwt: input.ajwt,
-        amount_minor: input.amountMinor,
-        currency: input.currency,
-        merchant_id: input.merchantId,
-        payment_ref: input.paymentRef,
-        pop_challenge_id: challenge.pop_challenge_id,
-        pop_jws: signPopJws(challenge.challenge, input.privateKey),
-    });
+}): Promise<{ sub: SubResult; stripeStatus: string }> {
+    const t = process.hrtime.bigint();
+    try {
+        const authorized = await freshPopAuthorize({
+            api: input.api,
+            session: input.session,
+            agentId: input.agentId,
+            humanKeyImage: input.humanKeyImage,
+            secretHex: input.secretHex,
+            ajwt: input.ajwt,
+            privateKey: input.privateKey,
+            amountMinor,
+            merchantId: input.merchantId,
+            paymentRef: input.paymentRef,
+        });
+        if (authorized.status !== 200) {
+            return { sub: { name: "payment", ok: false, ms: elapsedMs(t),
+                error: `agent/payment/authorize ${authorized.status}: ${authorized.raw}` },
+                stripeStatus: "n/a" };
+        }
+        const authorizationId = firstString(authorized.data.authorization_id);
+        const authorizationReceipt = authorized.data.action_receipt as JsonRecord | undefined;
+        if (!authorizationId) {
+            return { sub: { name: "payment", ok: false, ms: elapsedMs(t),
+                error: `payment response missing authorization_id: ${authorized.raw}` },
+                stripeStatus: "n/a" };
+        }
+        if (!authorizationReceipt) {
+            return { sub: { name: "payment", ok: false, ms: elapsedMs(t),
+                error: `payment response missing action_receipt: ${authorized.raw}` },
+                stripeStatus: "n/a" };
+        }
+
+        const stripe = await stripeCreateManualCapture({
+            amountMinor,
+            paymentRef: input.paymentRef,
+            authorizationId,
+            agentId: input.agentId,
+            merchantId: input.merchantId,
+        });
+
+        try {
+            const consumeAjwt = await input.api.issueAgentToken(input.session, input.agentId);
+            const consumeAction = await input.api.buildAgentActionProof({
+                secretHex: input.secretHex,
+                agentId: input.agentId,
+                humanKeyImage: input.humanKeyImage,
+                ajwt: consumeAjwt,
+                action: "payment_consume",
+                resource: authorizationId,
+                merchantId: input.merchantId,
+                amountMinor,
+                currency,
+            });
+            const consumed = await input.api.merchantPaymentConsume({
+                authorization_id: authorizationId,
+                merchant_id: input.merchantId,
+                ajwt: consumeAjwt,
+                authorization_receipt: authorizationReceipt,
+                agent_action: consumeAction,
+            });
+            if (consumed.status !== 200) {
+                return { sub: { name: "payment", ok: false, ms: elapsedMs(t),
+                    error: `merchant/payment/consume ${consumed.status}: ${consumed.raw}` },
+                    stripeStatus: stripe.status };
+            }
+        } finally {
+            await stripeCancelIntent(stripe.id);
+        }
+
+        return { sub: { name: "payment", ok: true, ms: elapsedMs(t) }, stripeStatus: stripe.status };
+    } catch (e) {
+        return { sub: { name: "payment", ok: false, ms: elapsedMs(t),
+            error: e instanceof Error ? e.message : String(e) }, stripeStatus: "error" };
+    }
 }
+
+async function runKycConsent(input: {
+    api: CoreApi;
+    session: string;
+    agentId: string;
+    humanKeyImage: string;
+    secretHex: string;
+    ajwt: string;
+    privateKey: KeyObject;
+    retailSite: string;
+    index: number;
+}): Promise<SubResult> {
+    const t = process.hrtime.bigint();
+    try {
+        // Ensure the retail site has tokens for this request.
+        await input.api.devBuyTokens(input.retailSite, 2);
+
+        const requestId = await input.api.kycRequest(input.retailSite, ["age_over_threshold", "age_threshold"]);
+        const pop = await input.api.agentPopChallenge(input.session, input.agentId);
+        const agentAction = await input.api.buildAgentActionProof({
+            secretHex: input.secretHex,
+            agentId: input.agentId,
+            humanKeyImage: input.humanKeyImage,
+            ajwt: input.ajwt,
+            action: "kyc_consent",
+            resource: `kyc_consent:${requestId}`,
+            merchantId: input.retailSite,
+        });
+        const consent = await input.api.agentKycConsent({
+            ajwt: input.ajwt,
+            site_name: input.retailSite,
+            request_id: requestId,
+            pop_challenge_id: pop.pop_challenge_id,
+            pop_jws: signPopJws(pop.challenge, input.privateKey),
+            agent_action: agentAction,
+        });
+        if (consent.status !== 200) {
+            return { name: "kyc_consent", ok: false, ms: elapsedMs(t),
+                error: `agent/kyc/consent ${consent.status}: ${consent.raw}` };
+        }
+        return { name: "kyc_consent", ok: true, ms: elapsedMs(t) };
+    } catch (e) {
+        return { name: "kyc_consent", ok: false, ms: elapsedMs(t),
+            error: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+// ─── Main run ────────────────────────────────────────────────────────────────
 
 async function runOne(api: CoreApi, index: number): Promise<RunResult> {
     const started = process.hrtime.bigint();
+    const subs: SubResult[] = [];
+
+    const stripeModeLabel: StripeAuthorization["mode"] = stripeSecretKey ? "stripe_test" : "dry_run";
+    const tavilyModeLabel: TavilyContext["mode"] = tavilyApiKey ? "tavily" : "dry_run";
+
     try {
         const sfx = `${index}-${randSuffix()}`;
-        const query = [
-            "AI agent payment authorization merchant allowlist risk controls",
-            "Stripe test mode PaymentIntent manual capture cancel no real money",
-            "agentic commerce bounded payment authorization web search tool",
-            "autonomous agents payment fraud policy proof of possession",
-        ][index % 4];
+        const query = TAVILY_QUERIES[index % TAVILY_QUERIES.length];
         const tavily = await tavilySearch(query);
-        const merchantId = `mrc_agent_${tavily.contextHash.slice(0, 12)}_${sfx}`;
-        const email = `real_agent_${sfx}@sauron.local`;
-        const password = `Passw0rd!${sfx}`;
-        const paymentRef = `stress_${sfx}`;
-        const currency = "EUR";
-        const { publicKeyB64u, privateKey } = createPopKeyPair();
 
+        const merchantId = `mrc_${tavily.contextHash.slice(0, 12)}_${sfx}`;
+        const email      = `stress_${sfx}@sauron.local`;
+        const password   = `Pw!${sfx}`;
+        const paymentRef = `pay_${sfx}`;
+
+        // ── Bootstrap user ──────────────────────────────────────────────────
         await api.ensureClient(bankSite, "BANK");
-        const { public_key_hex } = await api.devRegisterUser({
+        await api.devRegisterUser({
             site_name: bankSite,
             email,
             password,
-            first_name: "Real",
-            last_name: "Agent",
+            first_name: "Stress",
+            last_name:  "Agent",
             date_of_birth: "1990-01-01",
-            nationality: "FRA",
+            nationality:   "FRA",
         });
         const { session, key_image } = await api.userAuth(email, password);
-        const intent = {
-            action: "payment_initiation",
-            scope: ["payment_initiation"],
+
+        // ── Payment agent (PoP-enabled, payment_initiation) ─────────────────
+        const { publicKeyB64u, privateKey } = createPopKeyPair();
+        const paymentKeys = api.agentActionKeygen();
+        const paymentIntent = {
+            scope:  ["payment_initiation", "payment_consume"],
             maxAmount: amountMinor / 100,
             currency,
             constraints: {
-                merchant_allowlist: [merchantId],
-                tavily_context_hash: tavily.contextHash,
-                tavily_top_url: tavily.topUrl ?? "dry-run",
+                merchant_allowlist:      [merchantId],
+                tavily_context_hash:     tavily.contextHash,
+                tavily_query:            tavily.query,
+                tavily_top_url:          tavily.topUrl ?? "dry-run",
             },
         };
 
-        const reg = await api.agentRegister(session, {
-            human_key_image: key_image,
-            agent_checksum: `sha256:${sha256Hex(`${tavily.contextHash}:${sfx}`)}`,
-            intent_json: JSON.stringify(intent),
-            public_key_hex: public_key_hex.toLowerCase(),
-            ttl_secs: 3600,
+        const paymentAgentReg = await api.agentRegister(session, {
+            human_key_image:    key_image,
+            agent_checksum:     `sha256:${sha256Hex(`pay:${tavily.contextHash}:${sfx}`)}`,
+            intent_json:        JSON.stringify(paymentIntent),
+            public_key_hex:     paymentKeys.public_key_hex,
+            ring_key_image_hex: paymentKeys.ring_key_image_hex,
+            ttl_secs:           3600,
+            pop_jkt:            `stress-pay-pop-${sfx}`,
             pop_public_key_b64u: publicKeyB64u,
         });
-        if (reg.status !== 200) throw new Error(`agent/register ${reg.status}: ${reg.raw}`);
-        const ajwt = firstString(reg.data.ajwt);
-        const agentId = firstString(reg.data.agent_id);
-        if (!ajwt || !agentId) throw new Error(`agent/register missing ajwt/agent_id: ${reg.raw}`);
+        if (paymentAgentReg.status !== 200) {
+            throw new Error(`payment agent/register ${paymentAgentReg.status}: ${paymentAgentReg.raw}`);
+        }
+        const payAjwt    = firstString(paymentAgentReg.data.ajwt);
+        const payAgentId = firstString(paymentAgentReg.data.agent_id);
+        if (!payAjwt || !payAgentId) throw new Error(`payment agent missing ajwt/agent_id: ${paymentAgentReg.raw}`);
 
+        // ── KYC agent (PoP-enabled, kyc_consent, separate JTI) ───────────────
+        const kycPop = createPopKeyPair();
+        const kycKeys = api.agentActionKeygen();
+        const kycIntent = { scope: ["kyc_consent"] };
+        const kycAgentReg = await api.agentRegister(session, {
+            human_key_image: key_image,
+            agent_checksum:  `sha256:${sha256Hex(`kyc:${tavily.contextHash}:${sfx}`)}`,
+            intent_json:     JSON.stringify(kycIntent),
+            public_key_hex:  kycKeys.public_key_hex,
+            ring_key_image_hex: kycKeys.ring_key_image_hex,
+            pop_jkt:         `stress-kyc-pop-${sfx}`,
+            pop_public_key_b64u: kycPop.publicKeyB64u,
+            ttl_secs:        3600,
+        });
+        if (kycAgentReg.status !== 200) {
+            throw new Error(`kyc agent/register ${kycAgentReg.status}: ${kycAgentReg.raw}`);
+        }
+        const kycAjwt    = firstString(kycAgentReg.data.ajwt);
+        const kycAgentId = firstString(kycAgentReg.data.agent_id);
+        if (!kycAjwt || !kycAgentId) throw new Error(`kyc agent missing ajwt/agent_id: ${kycAgentReg.raw}`);
+
+        // ── Negative: over-limit ─────────────────────────────────────────────
         if (runNegativeChecks) {
-            const denied = await authorizeWithFreshPop({
-                api,
-                session,
-                agentId,
-                ajwt,
-                privateKey,
-                amountMinor: amountMinor + 1,
-                currency,
-                merchantId,
-                paymentRef: `${paymentRef}_over_limit`,
-            });
-            if (denied.status === 200) {
-                throw new Error(`over-limit authorization unexpectedly succeeded: ${denied.raw}`);
-            }
+            subs.push(await runNegativeOverLimit({
+                api, session,
+                agentId: payAgentId, humanKeyImage: key_image, secretHex: paymentKeys.secret_hex,
+                ajwt: payAjwt, privateKey,
+                merchantId, index,
+            }));
         }
 
-        const authorized = await authorizeWithFreshPop({
-            api,
-            session,
-            agentId,
-            ajwt,
-            privateKey,
-            amountMinor,
-            currency,
-            merchantId,
-            paymentRef,
+        // ── Negative: wrong merchant ─────────────────────────────────────────
+        if (runNegativeChecks) {
+            subs.push(await runNegativeWrongMerchant({
+                api, session,
+                agentId: payAgentId, humanKeyImage: key_image, secretHex: paymentKeys.secret_hex,
+                ajwt: payAjwt, privateKey,
+                index,
+            }));
+        }
+
+        // ── Positive: payment flow ───────────────────────────────────────────
+        const { sub: paymentSub, stripeStatus } = await runPaymentFlow({
+            api, session,
+            agentId: payAgentId, humanKeyImage: key_image, secretHex: paymentKeys.secret_hex,
+            ajwt: payAjwt, privateKey,
+            merchantId, paymentRef,
         });
-        if (authorized.status !== 200) {
-            throw new Error(`agent/payment/authorize ${authorized.status}: ${authorized.raw}`);
-        }
-        const authorizationId = firstString(authorized.data.authorization_id);
-        if (!authorizationId) throw new Error(`payment authorization missing authorization_id: ${authorized.raw}`);
+        subs.push(paymentSub);
 
-        const stripe = await stripeAuthorizeManualCapture({
-            amountMinor,
-            currency,
-            paymentRef,
-            authorizationId,
-            agentId,
-            merchantId,
-        });
-        try {
-            const consumed = await api.merchantPaymentConsume(authorizationId, merchantId);
-            if (consumed.status !== 200) {
-                throw new Error(`merchant/payment/consume ${consumed.status}: ${consumed.raw}`);
-            }
-        } finally {
-            await stripeCancelAuthorization(stripe.id);
-        }
+        // ── Positive: KYC consent delegation ────────────────────────────────
+        await api.ensureClient(retailSite, "ZKP_ONLY");
+        subs.push(await runKycConsent({
+            api, session,
+            agentId: kycAgentId, humanKeyImage: key_image, secretHex: kycKeys.secret_hex,
+            ajwt: kycAjwt, privateKey: kycPop.privateKey,
+            retailSite, index,
+        }));
 
+        const allOk = subs.every((s) => s.ok);
         return {
             index,
-            ok: true,
+            ok: allOk,
             ms: elapsedMs(started),
-            mode: { tavily: tavily.mode, stripe: stripe.mode },
-            stripeStatus: stripe.status,
+            subs,
+            mode: { tavily: tavily.mode, stripe: stripeModeLabel },
+            stripeStatus,
+            error: allOk ? undefined : subs.find((s) => !s.ok)?.error,
         };
     } catch (error) {
         return {
             index,
             ok: false,
             ms: elapsedMs(started),
-            mode: {
-                tavily: tavilyApiKey ? "tavily" : "dry_run",
-                stripe: stripeSecretKey ? "stripe_test" : "dry_run",
-            },
+            subs,
+            mode: { tavily: tavilyModeLabel, stripe: stripeModeLabel },
             error: error instanceof Error ? error.message : String(error),
         };
     }
 }
 
-function elapsedMs(started: bigint): number {
-    return Number((process.hrtime.bigint() - started) / 1_000_000n);
-}
+// ─── Pool runner ─────────────────────────────────────────────────────────────
 
 async function runPool(api: CoreApi): Promise<RunResult[]> {
+    // Bootstrap shared retail site upfront (idempotent).
+    await api.ensureClient(retailSite, "ZKP_ONLY");
+
     const results: RunResult[] = [];
     let next = 0;
+
     const workers = Array.from({ length: Math.min(concurrency, iterations) }, async () => {
         while (next < iterations) {
             const index = next++;
-            process.stdout.write(`[real-agent-stress] run ${index + 1}/${iterations} ... `);
+            const label = `${pad(index + 1, String(iterations).length)}/${iterations}`;
+            process.stdout.write(`  [${label}] `);
+
             const result = await runOne(api, index);
             results.push(result);
-            console.log(result.ok ? `OK ${result.ms}ms` : `FAIL ${result.ms}ms`);
-            if (result.error) console.error(`  ${result.error}`);
+
+            if (result.ok) {
+                const subLine = result.subs
+                    .map((s) => `${s.name.replace("neg:", "-")}:${s.ok ? s.ms + "ms" : "FAIL"}`)
+                    .join("  ");
+                console.log(`OK   ${pad(result.ms, 5)}ms  [${subLine}]  tavily=${result.mode.tavily}`);
+            } else {
+                console.log(`FAIL ${pad(result.ms, 5)}ms`);
+                const failedSub = result.subs.find((s) => !s.ok);
+                const errSrc = failedSub ? `${failedSub.name}: ${failedSub.error}` : result.error;
+                if (errSrc) console.error(`         ${errSrc}`);
+            }
         }
     });
+
     await Promise.all(workers);
     return results.sort((a, b) => a.index - b.index);
 }
 
+// ─── Report ───────────────────────────────────────────────────────────────────
+
+function buildReport(results: RunResult[]): StressReport {
+    const ok     = results.filter((r) => r.ok).length;
+    const failed = results.length - ok;
+    const times  = results.map((r) => r.ms).sort((a, b) => a - b);
+    const avg    = times.length ? Math.round(times.reduce((s, v) => s + v, 0) / times.length) : 0;
+
+    return {
+        timestamp: new Date().toISOString(),
+        config: {
+            base_url:      baseUrl,
+            iterations,
+            concurrency,
+            amount_minor:  amountMinor,
+            currency,
+            tavily_calls_cap: tavilyMaxCalls,
+            negative_checks:  runNegativeChecks,
+            stripe_mode:      stripeSecretKey ? "test" : "dry_run",
+        },
+        summary: {
+            ok,
+            failed,
+            pass_rate_pct:         Math.round((ok / Math.max(results.length, 1)) * 100),
+            avg_ms:                avg,
+            p50_ms:                percentile(times, 50),
+            p95_ms:                percentile(times, 95),
+            p99_ms:                percentile(times, 99),
+            tavily_calls_used:     tavilyCallsUsed,
+            negative_checks_passed: negativeChecksPassed,
+        },
+        runs: results,
+    };
+}
+
+function printSummary(report: StressReport): void {
+    const { summary, config } = report;
+    const bar = "═".repeat(54);
+    const pass = summary.ok === report.runs.length;
+    const status = pass
+        ? `${summary.ok}/${report.runs.length} PASSED`
+        : `${summary.ok}/${report.runs.length} passed  ${summary.failed} FAILED`;
+
+    console.log(`\n${bar}`);
+    console.log(`  SauronID Real-Agent Stress  ▸  ${status}`);
+    console.log(bar);
+    console.log(`  avg=${summary.avg_ms}ms  p50=${summary.p50_ms}ms  p95=${summary.p95_ms}ms  p99=${summary.p99_ms}ms`);
+    if (runNegativeChecks) {
+        const negRuns = report.runs.length * 2; // over-limit + wrong-merchant
+        console.log(`  negative checks: ${summary.negative_checks_passed}/${negRuns} passed`);
+    }
+    console.log(`  tavily: ${summary.tavily_calls_used}/${config.tavily_calls_cap} calls  (${tavilyApiKey ? "live" : "dry-run"})`);
+    console.log(`  stripe: ${config.stripe_mode}`);
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
 async function main(): Promise<void> {
     assertStripeKeyIsSafe();
-    console.log(`\nReal-agent stress: ${baseUrl}`);
+
+    console.log(`\nSauronID Real-Agent Stress  →  ${baseUrl}`);
     console.log(
-        `iterations=${iterations} concurrency=${concurrency} tavily_calls_cap=${tavilyMaxCalls} stripe=${
-            stripeSecretKey ? "test" : "dry-run"
-        } negative_checks=${runNegativeChecks ? "on" : "off"}`
+        `  iterations=${iterations}  concurrency=${concurrency}  amount=${amountMinor}  ` +
+        `tavily_cap=${tavilyMaxCalls}  stripe=${stripeSecretKey ? "test" : "dry-run"}  ` +
+        `negative_checks=${runNegativeChecks ? "on" : "off"}\n`
     );
 
     const api = new CoreApi({ baseUrl, adminKey });
     const results = await runPool(api);
-    const failed = results.filter((r) => !r.ok);
-    const ok = results.length - failed.length;
-    const avgMs = results.length
-        ? Math.round(results.reduce((sum, r) => sum + r.ms, 0) / results.length)
-        : 0;
+    const report  = buildReport(results);
+    printSummary(report);
 
-    console.log(`\nReal-agent stress summary: ok=${ok} failed=${failed.length} avg_ms=${avgMs}`);
-    console.log(`Tavily calls used: ${tavilyCallsUsed}/${tavilyMaxCalls}`);
-    if (failed.length > 0) {
+    // Write JSON report.
+    const reportFile = join(reportDir, `stress-report-${Date.now()}.json`);
+    writeFileSync(reportFile, JSON.stringify(report, null, 2));
+    console.log(`  report → ${reportFile}`);
+    console.log("═".repeat(54) + "\n");
+
+    if (report.summary.failed > 0) {
         process.exit(1);
     }
 }
 
-main().catch((error) => {
-    console.error(error);
+main().catch((err) => {
+    console.error(err);
     process.exit(1);
 });

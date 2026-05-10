@@ -45,4 +45,10 @@ export {
     TelemetryEvent,
 } from "./workflow-tracker";
 
-export { AgentShimClient, IdPClientConfig } from "./idp-client";
+export {
+    AgentShimClient,
+    IdPClientConfig,
+    AgentActionEnvelope,
+    AgentActionProof,
+    AgentActionChallengeInput,
+} from "./idp-client";

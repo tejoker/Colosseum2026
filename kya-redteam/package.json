@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "redteam": "npm run build && node dist/index.js",
-    "redteam:llm": "npm run build && node dist/llm-runner.js"
+    "redteam:llm": "npm run build && node dist/llm-runner.js",
+    "stress:tavily": "npm run build && node dist/real-agent-stress.js"
   },
   "keywords": [],
   "author": "",

@@ -24,13 +24,22 @@ pub struct ScreeningPolicy {
 
 impl ScreeningPolicy {
     pub fn from_env() -> Self {
-        let default_overlay = if is_development_runtime() {
+        let force_off = !crate::feature_flags::compliance_enabled();
+        let default_overlay = if is_development_runtime() || force_off {
             ScreeningMode::Off
         } else {
             ScreeningMode::Audit
         };
-        let sanctions_mode = parse_mode("SAURON_COMPLIANCE_SANCTIONS_MODE", default_overlay);
-        let pep_mode = parse_mode("SAURON_COMPLIANCE_PEP_MODE", default_overlay);
+        let sanctions_mode = if force_off {
+            ScreeningMode::Off
+        } else {
+            parse_mode("SAURON_COMPLIANCE_SANCTIONS_MODE", default_overlay)
+        };
+        let pep_mode = if force_off {
+            ScreeningMode::Off
+        } else {
+            parse_mode("SAURON_COMPLIANCE_PEP_MODE", default_overlay)
+        };
         let sanctions_list_version = std::env::var("SAURON_COMPLIANCE_SANCTIONS_LIST_VERSION")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -78,7 +87,11 @@ impl ScreeningPolicy {
         })
     }
 
-    pub fn enforce_for_user(&self, db: &Connection, key_image_hex: &str) -> Result<ScreeningRow, String> {
+    pub fn enforce_for_user(
+        &self,
+        db: &Connection,
+        key_image_hex: &str,
+    ) -> Result<ScreeningRow, String> {
         let row = load_or_create_row(db, key_image_hex)?;
         if self.sanctions_mode == ScreeningMode::Enforce {
             if row.sanctions_tier == "blocked" {
@@ -121,7 +134,11 @@ pub struct ScreeningRow {
     pub risk_tier: String,
 }
 
-pub fn upsert_default_row(db: &Connection, key_image_hex: &str, now: i64) -> Result<(), rusqlite::Error> {
+pub fn upsert_default_row(
+    db: &Connection,
+    key_image_hex: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
     db.execute(
         "INSERT OR IGNORE INTO user_compliance_screening
          (key_image_hex, sanctions_tier, pep_flag, risk_tier, list_version, updated_at)
@@ -132,7 +149,11 @@ pub fn upsert_default_row(db: &Connection, key_image_hex: &str, now: i64) -> Res
 }
 
 /// Bank-originated users are treated as **cleared at onboarding** until an external screening provider updates the row.
-pub fn upsert_bank_cleared_row(db: &Connection, key_image_hex: &str, now: i64) -> Result<(), rusqlite::Error> {
+pub fn upsert_bank_cleared_row(
+    db: &Connection,
+    key_image_hex: &str,
+    now: i64,
+) -> Result<(), rusqlite::Error> {
     db.execute(
         "INSERT INTO user_compliance_screening
          (key_image_hex, sanctions_tier, pep_flag, risk_tier, list_version, updated_at)

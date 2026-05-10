@@ -1,7 +1,7 @@
-use curve25519_dalek::{RistrettoPoint, Scalar, constants::RISTRETTO_BASEPOINT_TABLE};
-use sha2::{Sha512, Digest};
-use serde::{Serialize, Deserialize};
+use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_TABLE, RistrettoPoint, Scalar};
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha512};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserData {
@@ -87,7 +87,7 @@ impl Identity {
 
     pub fn key_image(&self) -> RistrettoPoint {
         let hp = RistrettoPoint::hash_from_bytes::<Sha512>(self.public.compress().as_bytes());
-        &self.secret * hp
+        self.secret * hp
     }
 }
 

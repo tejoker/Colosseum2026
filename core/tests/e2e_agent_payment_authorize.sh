@@ -4,6 +4,10 @@ set -euo pipefail
 API_URL="${API_URL:-http://localhost:3001}"
 BANK_SITE="${E2E_BANK_SITE:-BNP Paribas}"
 ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# shellcheck source=tests/lib/agent_action.sh
+source "${ROOT_DIR}/tests/lib/agent_action.sh"
 
 json_get() {
   local key="$1"
@@ -69,28 +73,21 @@ if [[ -z "$session" || -z "$key_image" ]]; then
 fi
 
 tmp_pop_json=$(mktemp)
-node - "$tmp_pop_json" <<'NODE'
-const crypto = require("crypto");
-const fs = require("fs");
-const outPath = process.argv[2];
-const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
-const publicJwk = publicKey.export({ format: "jwk" });
-const privateJwk = privateKey.export({ format: "jwk" });
-fs.writeFileSync(
-  outPath,
-  JSON.stringify({
-    pop_public_key_b64u: publicJwk.x,
-    private_jwk: privateJwk
-  })
-);
-NODE
-pop_public_key_b64u=$(python3 - "$tmp_pop_json" <<'PY'
-import json,sys
-print(json.load(open(sys.argv[1]))["pop_public_key_b64u"])
-PY
-)
+create_pop_key_file "$tmp_pop_json"
+pop_public_key_b64u=$(pop_public_key_b64u_from_file "$tmp_pop_json")
 if [[ -z "$pop_public_key_b64u" ]]; then
   echo "failed to generate pop_public_key_b64u" >&2
+  rm -f "$tmp_pop_json"
+  exit 1
+fi
+pop_jkt="e2e-pay-pop-${rand_suffix}"
+
+agent_keys=$(agent_action_keygen)
+agent_public_key_hex=$(printf '%s' "$agent_keys" | json_get "public_key_hex")
+agent_secret_hex=$(printf '%s' "$agent_keys" | json_get "secret_hex")
+agent_ring_key_image_hex=$(printf '%s' "$agent_keys" | json_get "ring_key_image_hex")
+if [[ -z "$agent_public_key_hex" || -z "$agent_secret_hex" || -z "$agent_ring_key_image_hex" ]]; then
+  echo "agent-action-tool keygen failed: $agent_keys" >&2
   rm -f "$tmp_pop_json"
   exit 1
 fi
@@ -99,8 +96,7 @@ intent_json=$(python3 - "$merchant_ok" <<'PY'
 import json,sys
 merchant=sys.argv[1]
 print(json.dumps({
-  "action":"payment_initiation",
-  "scope":["payment_initiation"],
+  "scope":["payment_initiation","payment_consume"],
   "maxAmount":12.34,
   "currency":"EUR",
   "constraints":{"merchant_allowlist":[merchant]}
@@ -112,7 +108,7 @@ printf '[E2E payment-auth] register pop-enabled agent\n'
 agent_res=$(curl -sS -X POST "${API_URL}/agent/register" \
   -H 'content-type: application/json' \
   -H "x-sauron-session: ${session}" \
-  -d "{\"human_key_image\":\"${key_image}\",\"agent_checksum\":\"sha256:pay-${rand_suffix}\",\"intent_json\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$intent_json"),\"public_key_hex\":\"${user_pub}\",\"pop_public_key_b64u\":\"${pop_public_key_b64u}\",\"ttl_secs\":3600}")
+  -d "{\"human_key_image\":\"${key_image}\",\"agent_checksum\":\"sha256:pay-${rand_suffix}\",\"intent_json\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$intent_json"),\"public_key_hex\":\"${agent_public_key_hex}\",\"ring_key_image_hex\":\"${agent_ring_key_image_hex}\",\"pop_jkt\":\"${pop_jkt}\",\"pop_public_key_b64u\":\"${pop_public_key_b64u}\",\"ttl_secs\":3600}")
 ajwt=$(printf '%s' "$agent_res" | json_get "ajwt")
 agent_id=$(printf '%s' "$agent_res" | json_get "agent_id")
 if [[ -z "$ajwt" || -z "$agent_id" ]]; then
@@ -121,101 +117,88 @@ if [[ -z "$ajwt" || -z "$agent_id" ]]; then
   exit 1
 fi
 
-pop_challenge_res=$(curl -sS -X POST "${API_URL}/agent/pop/challenge" \
-  -H 'content-type: application/json' \
-  -H "x-sauron-session: ${session}" \
-  -d "{\"agent_id\":\"${agent_id}\"}")
-pop_challenge_id=$(printf '%s' "$pop_challenge_res" | json_get "pop_challenge_id")
-challenge=$(printf '%s' "$pop_challenge_res" | json_get "challenge")
-if [[ -z "$pop_challenge_id" || -z "$challenge" ]]; then
-  echo "agent/pop/challenge failed: $pop_challenge_res" >&2
-  rm -f "$tmp_pop_json"
-  exit 1
-fi
-
-sign_pop_jws() {
-  local challenge_payload="$1"
-  node - "$tmp_pop_json" "$challenge_payload" <<'NODE'
-const crypto = require("crypto");
-const fs = require("fs");
-const inputPath = process.argv[2];
-const challenge = process.argv[3];
-const pop = JSON.parse(fs.readFileSync(inputPath, "utf8"));
-const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
-const payload = Buffer.from(challenge, "utf8").toString("base64url");
-const signingInput = `${header}.${payload}`;
-const privateKey = crypto.createPrivateKey({ key: pop.private_jwk, format: "jwk" });
-const signature = crypto.sign(null, Buffer.from(signingInput), privateKey).toString("base64url");
-process.stdout.write(`${signingInput}.${signature}`);
-NODE
-}
-
-pop_jws=$(sign_pop_jws "$challenge")
-
 printf '[E2E payment-auth] deny over maxAmount\n'
+pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id=$(printf '%s' "$pop_json" | json_get "pop_challenge_id")
+pop_jws=$(printf '%s' "$pop_json" | json_get "pop_jws")
+agent_action_over=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "payment_initiation" "${payment_ref}_over" "$merchant_ok" 1235 "EUR" "$ajwt")
 code_over=$(curl -sS -o /tmp/pay_auth_over.json -w '%{http_code}' -X POST "${API_URL}/agent/payment/authorize" \
   -H 'content-type: application/json' \
-  -d "{\"ajwt\":\"${ajwt}\",\"amount_minor\":1235,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_ok}\",\"payment_ref\":\"${payment_ref}_over\",\"pop_challenge_id\":\"${pop_challenge_id}\",\"pop_jws\":\"${pop_jws}\"}")
+  -d "$(merge_agent_action_json "{\"ajwt\":\"${ajwt}\",\"amount_minor\":1235,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_ok}\",\"payment_ref\":\"${payment_ref}_over\",\"pop_challenge_id\":\"${pop_challenge_id}\",\"pop_jws\":\"${pop_jws}\"}" "$agent_action_over")")
 if [[ "$code_over" == "200" ]]; then
   echo "over-limit payment authorization should fail: $(cat /tmp/pay_auth_over.json)" >&2
   rm -f "$tmp_pop_json"
   exit 1
 fi
 
-pop_challenge_res2=$(curl -sS -X POST "${API_URL}/agent/pop/challenge" \
-  -H 'content-type: application/json' \
-  -H "x-sauron-session: ${session}" \
-  -d "{\"agent_id\":\"${agent_id}\"}")
-pop_challenge_id2=$(printf '%s' "$pop_challenge_res2" | json_get "pop_challenge_id")
-challenge2=$(printf '%s' "$pop_challenge_res2" | json_get "challenge")
-pop_jws2=$(sign_pop_jws "$challenge2")
-
 printf '[E2E payment-auth] deny non-allowlisted merchant\n'
+pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id2=$(printf '%s' "$pop_json" | json_get "pop_challenge_id")
+pop_jws2=$(printf '%s' "$pop_json" | json_get "pop_jws")
+agent_action_merchant=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "payment_initiation" "${payment_ref}_merchant" "$merchant_bad" 1000 "EUR" "$ajwt")
 code_merchant=$(curl -sS -o /tmp/pay_auth_merchant.json -w '%{http_code}' -X POST "${API_URL}/agent/payment/authorize" \
   -H 'content-type: application/json' \
-  -d "{\"ajwt\":\"${ajwt}\",\"amount_minor\":1000,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_bad}\",\"payment_ref\":\"${payment_ref}_merchant\",\"pop_challenge_id\":\"${pop_challenge_id2}\",\"pop_jws\":\"${pop_jws2}\"}")
+  -d "$(merge_agent_action_json "{\"ajwt\":\"${ajwt}\",\"amount_minor\":1000,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_bad}\",\"payment_ref\":\"${payment_ref}_merchant\",\"pop_challenge_id\":\"${pop_challenge_id2}\",\"pop_jws\":\"${pop_jws2}\"}" "$agent_action_merchant")")
 if [[ "$code_merchant" == "200" ]]; then
   echo "merchant-allowlist check should fail: $(cat /tmp/pay_auth_merchant.json)" >&2
   rm -f "$tmp_pop_json"
   exit 1
 fi
 
-pop_challenge_res3=$(curl -sS -X POST "${API_URL}/agent/pop/challenge" \
-  -H 'content-type: application/json' \
-  -H "x-sauron-session: ${session}" \
-  -d "{\"agent_id\":\"${agent_id}\"}")
-pop_challenge_id3=$(printf '%s' "$pop_challenge_res3" | json_get "pop_challenge_id")
-challenge3=$(printf '%s' "$pop_challenge_res3" | json_get "challenge")
-pop_jws3=$(sign_pop_jws "$challenge3")
-
 printf '[E2E payment-auth] authorize valid charge\n'
+pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id3=$(printf '%s' "$pop_json" | json_get "pop_challenge_id")
+pop_jws3=$(printf '%s' "$pop_json" | json_get "pop_jws")
+agent_action_ok=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "payment_initiation" "${payment_ref}" "$merchant_ok" 1234 "EUR" "$ajwt")
 code_ok=$(curl -sS -o /tmp/pay_auth_ok.json -w '%{http_code}' -X POST "${API_URL}/agent/payment/authorize" \
   -H 'content-type: application/json' \
-  -d "{\"ajwt\":\"${ajwt}\",\"amount_minor\":1234,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_ok}\",\"payment_ref\":\"${payment_ref}\",\"pop_challenge_id\":\"${pop_challenge_id3}\",\"pop_jws\":\"${pop_jws3}\"}")
+  -d "$(merge_agent_action_json "{\"ajwt\":\"${ajwt}\",\"amount_minor\":1234,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_ok}\",\"payment_ref\":\"${payment_ref}\",\"pop_challenge_id\":\"${pop_challenge_id3}\",\"pop_jws\":\"${pop_jws3}\"}" "$agent_action_ok")")
 if [[ "$code_ok" != "200" ]]; then
   echo "valid payment authorization should succeed: $(cat /tmp/pay_auth_ok.json)" >&2
   rm -f "$tmp_pop_json"
   exit 1
 fi
 authorization_id=$(cat /tmp/pay_auth_ok.json | json_get "authorization_id")
+authorization_receipt=$(cat /tmp/pay_auth_ok.json | json_get "action_receipt")
 if [[ -z "$authorization_id" ]]; then
   echo "missing authorization_id in success payload: $(cat /tmp/pay_auth_ok.json)" >&2
   rm -f "$tmp_pop_json"
   exit 1
 fi
 
-pop_challenge_res4=$(curl -sS -X POST "${API_URL}/agent/pop/challenge" \
+printf '[E2E payment-auth] merchant consume with receipt + leash\n'
+consume_token_res=$(issue_agent_token "$session" "$agent_id" 300)
+consume_ajwt=$(printf '%s' "$consume_token_res" | json_get "ajwt")
+agent_action_consume=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "payment_consume" "$authorization_id" "$merchant_ok" 1234 "EUR" "$consume_ajwt")
+consume_body=$(python3 - "$authorization_id" "$merchant_ok" "$consume_ajwt" "$authorization_receipt" "$agent_action_consume" <<'PY'
+import json, sys
+authorization_id, merchant_id, ajwt, receipt, proof = sys.argv[1:]
+print(json.dumps({
+  "authorization_id": authorization_id,
+  "merchant_id": merchant_id,
+  "ajwt": ajwt,
+  "authorization_receipt": json.loads(receipt),
+  "agent_action": json.loads(proof),
+}, separators=(",", ":")))
+PY
+)
+code_consume=$(curl -sS -o /tmp/pay_consume_ok.json -w '%{http_code}' -X POST "${API_URL}/merchant/payment/consume" \
   -H 'content-type: application/json' \
-  -H "x-sauron-session: ${session}" \
-  -d "{\"agent_id\":\"${agent_id}\"}")
-pop_challenge_id4=$(printf '%s' "$pop_challenge_res4" | json_get "pop_challenge_id")
-challenge4=$(printf '%s' "$pop_challenge_res4" | json_get "challenge")
-pop_jws4=$(sign_pop_jws "$challenge4")
+  -d "$consume_body")
+if [[ "$code_consume" != "200" ]]; then
+  echo "merchant consume should succeed: $(cat /tmp/pay_consume_ok.json)" >&2
+  rm -f "$tmp_pop_json"
+  exit 1
+fi
 
 printf '[E2E payment-auth] deny replayed A-JWT (JTI)\n'
+pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
+pop_challenge_id4=$(printf '%s' "$pop_json" | json_get "pop_challenge_id")
+pop_jws4=$(printf '%s' "$pop_json" | json_get "pop_jws")
+agent_action_replay=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "payment_initiation" "${payment_ref}_replay" "$merchant_ok" 500 "EUR" "$ajwt")
 code_replay=$(curl -sS -o /tmp/pay_auth_replay.json -w '%{http_code}' -X POST "${API_URL}/agent/payment/authorize" \
   -H 'content-type: application/json' \
-  -d "{\"ajwt\":\"${ajwt}\",\"amount_minor\":500,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_ok}\",\"payment_ref\":\"${payment_ref}_replay\",\"pop_challenge_id\":\"${pop_challenge_id4}\",\"pop_jws\":\"${pop_jws4}\"}")
+  -d "$(merge_agent_action_json "{\"ajwt\":\"${ajwt}\",\"amount_minor\":500,\"currency\":\"EUR\",\"merchant_id\":\"${merchant_ok}\",\"payment_ref\":\"${payment_ref}_replay\",\"pop_challenge_id\":\"${pop_challenge_id4}\",\"pop_jws\":\"${pop_jws4}\"}" "$agent_action_replay")")
 if [[ "$code_replay" == "200" ]]; then
   echo "replayed ajwt should fail: $(cat /tmp/pay_auth_replay.json)" >&2
   rm -f "$tmp_pop_json"

@@ -39,7 +39,7 @@ function BankDashboard({ client }: { client: Client }) {
   const [userCount, setUserCount] = useState<number | null>(null);
 
   useEffect(() => {
-    fetch(`${API}/dev/client/${encodeURIComponent(client.name)}/users`)
+    fetch(`/api/client/${encodeURIComponent(client.name)}/users`)
       .then((r) => r.json())
       .then((data: ClientUser[]) => setUserCount(data.filter((u) => u.source === "register").length))
       .catch(() => setUserCount(0));
@@ -73,7 +73,7 @@ function BankUsersTab({ client }: { client: Client }) {
 
   const fetchUsers = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/dev/client/${encodeURIComponent(client.name)}/users`);
+      const res = await fetch(`/api/client/${encodeURIComponent(client.name)}/users`);
       if (res.ok) setUsers(await res.json());
     } catch { /* ignore */ }
     finally { setLoading(false); }

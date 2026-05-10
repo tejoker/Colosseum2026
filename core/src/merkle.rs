@@ -6,7 +6,7 @@
 /// KYC a bien été ingéré par Sauron sans révéler aucune base de données.
 ///
 /// Internal algorithm: standard SHA256, suitable for Bitcoin OP_RETURN commitments.
-use rs_merkle::{MerkleTree, algorithms::Sha256 as MerkleSha256};
+use rs_merkle::{algorithms::Sha256 as MerkleSha256, MerkleTree};
 
 /// Ledger immuable (append-only) des commitments KYC.
 /// Vit en mémoire dans ServerState ; reconstruit depuis la DB au démarrage.
@@ -46,8 +46,8 @@ impl MerkleCommitmentLedger {
     ///
     /// Retourne `Err(String)` si le hex est invalide ou ne fait pas 32 octets.
     pub fn add_commitment(&mut self, commitment_hex: &str) -> Result<CommitmentReceipt, String> {
-        let bytes = hex::decode(commitment_hex)
-            .map_err(|e| format!("commitment hex invalide : {}", e))?;
+        let bytes =
+            hex::decode(commitment_hex).map_err(|e| format!("commitment hex invalide : {}", e))?;
         if bytes.len() != 32 {
             return Err(format!(
                 "commitment doit être 32 octets (SHA256), reçu {} octets",
@@ -65,18 +65,15 @@ impl MerkleCommitmentLedger {
         let total_leaves = self.leaves.len();
 
         // Calculer la racine.
-        let root_bytes = self.tree
+        let root_bytes = self
+            .tree
             .root()
             .ok_or_else(|| "impossible de calculer la racine Merkle".to_string())?;
         let merkle_root = hex::encode(root_bytes);
 
         // Générer la preuve pour cette feuille.
         let proof = self.tree.proof(&[leaf_index]);
-        let merkle_proof: Vec<String> = proof
-            .proof_hashes()
-            .iter()
-            .map(|h| hex::encode(h))
-            .collect();
+        let merkle_proof: Vec<String> = proof.proof_hashes().iter().map(hex::encode).collect();
 
         Ok(CommitmentReceipt {
             leaf_index,
@@ -88,12 +85,16 @@ impl MerkleCommitmentLedger {
 
     /// Retourne la racine actuelle, ou None si l'arbre est vide.
     pub fn root_hex(&self) -> Option<String> {
-        self.tree.root().map(|r| hex::encode(r))
+        self.tree.root().map(hex::encode)
     }
 
     /// Nombre de commitments dans le ledger.
     pub fn len(&self) -> usize {
         self.leaves.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
     }
 
     /// Reconstruit le ledger depuis une liste ordonnée de commitments hex
@@ -111,7 +112,10 @@ impl MerkleCommitmentLedger {
             let bytes = hex::decode(hex_str)
                 .map_err(|e| format!("feuille DB corrompue '{}' : {}", hex_str, e))?;
             if bytes.len() != 32 {
-                return Err(format!("feuille DB invalide : {} octets au lieu de 32", bytes.len()));
+                return Err(format!(
+                    "feuille DB invalide : {} octets au lieu de 32",
+                    bytes.len()
+                ));
             }
             let leaf: [u8; 32] = bytes.try_into().unwrap();
             ledger.tree.insert(leaf);
@@ -121,7 +125,8 @@ impl MerkleCommitmentLedger {
         ledger.tree.commit();
 
         let count = ledger.leaves.len();
-        println!("[MERKLE] Ledger reconstruit depuis DB : {} feuille(s) | root={}",
+        println!(
+            "[MERKLE] Ledger reconstruit depuis DB : {} feuille(s) | root={}",
             count,
             ledger.root_hex().unwrap_or_else(|| "∅".to_string())
         );
