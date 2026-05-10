@@ -1,0 +1,35 @@
+# Local Postgres for SauronID development.
+#
+#   docker compose -f docker-compose-postgres.yml up -d
+#   export DATABASE_URL=postgres://sauronid:dev@localhost:5432/sauronid
+#   psql "$DATABASE_URL" -f migrations/postgres/0001_initial.sql
+#   # or, with sqlx-cli installed:
+#   sqlx migrate run --source migrations/postgres
+#   SAURON_DB_BACKEND=postgres ./target/release/sauron-core
+
+services:
+  sauronid-postgres:
+    image: postgres:16-alpine
+    container_name: sauronid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sauronid
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: sauronid
+      # Tune for low-latency single-writer workloads — adjust for production
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "5432:5432"
+    volumes:
+      - sauronid_pgdata:/var/lib/postgresql/data
+      # Mount migrations read-only so `psql` inside the container can apply them.
+      - ./migrations/postgres:/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sauronid -d sauronid"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  sauronid_pgdata:
+    driver: local

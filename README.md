@@ -1,269 +1,199 @@
-# TrustAI
+# SauronID
 
-TrustAI is a privacy-first identity verification platform for login and onboarding flows. This repository is the **product codebase** (services, libraries, and UIs), not a throwaway demo: you deploy and operate it like any other backend stack—secrets via environment or a secret manager, TLS at the edge, and data stores chosen for your SLOs.
+**The cryptographic agent-binding layer for AI deployments.**
 
-The project combines:
-- Privacy-preserving credentials and ZK proofs
-- Mobile Connect (CAMARA) phone-possession verification
-- KYC and liveness checks
-- Agentic identity controls (A-JWT)
-- Revocation and analytics
+Wherever your AI agents act on behalf of humans or other systems, SauronID sits in the path and turns every call into a signed, replay-protected, intent-leashed, audit-anchored event. An agent that has been registered with SauronID cannot:
 
-## What This Repo Implements
+- replay a captured token,
+- mutate a request body after signing,
+- act outside its declared intent,
+- silently flip its system prompt or tool list,
+- escalate scope across delegation,
+- evade the audit log,
+- act after revocation.
 
-- Core identity backend in Rust (token flows, ring/ZK endpoints, admin and billing routes)
-- KYC service in Python
-- ZKP issuer and verifier SDK components
-- CAMARA mock operator and CAMARA API orchestration
-- Dashboard and partner portal UIs
-- Revocation contracts and subgraph indexing
+These are not aspirational claims. They are tested by the **16-attack empirical suite** (`docs/empirical-comparison.md`) which runs against a live server and reports `16/16 blocked` in fail-closed mode. Anyone can re-run it.
 
-Main code areas:
-- Core backend: core
-- KYC service: KYC
-- ZKP issuer, CAMARA and SDKs: zkp
-- Agent identity and A-JWT: agentic
-- Revocation contracts: contracts/revocation
-- Subgraph: subgraph
-- Fraud/anomaly engine: anomaly-engine
+## What SauronID is, and what it is not
 
-## Platform topology (unified stack)
+| | |
+|---|---|
+| **Is** | A self-hostable HTTP service in Rust + a TS/Python client. Every protected endpoint a registered agent calls verifies: A-JWT signature, intent-leash, per-call DPoP-style body signature, single-use nonce, single-use JTI, agent-runtime config digest, rate limits. Every agent action is merkle-anchored to Bitcoin (OpenTimestamps) and Solana (Memo) for tamper-evident audit. |
+| **Is not** | A user-authentication system. SauronID does not handle human SSO/SAML/social-login. Plug it next to your existing user auth (or none) — the human authorisation flow is independent. SauronID is purely about **the agent layer**: from the moment an AI agent is allowed to act, until it acts. |
 
-`docker compose up --build` brings up a **single coordinated runtime**: Rust core (identity + agents + ZKP hooks), Python KYC, ZKP issuer, CAMARA mock operator, partner portal, dashboard, analytics API, anomaly engine, and a local Hardhat node for revocation contracts. Services talk over the compose network (`backend:3001`, `kyc:8000`, etc.). The Graph subgraph under `subgraph/` is versioned here but deployed/indexed on your graph node pipeline unless you add it to Compose.
+If your AI agents call internal APIs, your customers' APIs, third-party APIs, or each other — that traffic is what SauronID binds.
 
-**Core storage:** the default binary uses embedded **SQLite** (simple ops and CI). For **production-like** runtimes (`ENV` / `SAURON_ENV` not `development`/`dev`/`local`), startup requires `SAURON_ACCEPT_SINGLE_NODE_SQLITE=1` so operators explicitly acknowledge single-node limits until a replicated data tier is wired in.
+## What ships, what's partial, what doesn't yet exist
 
-**Operator secrets:** set `SAURON_ADMIN_KEY` and/or comma-separated `SAURON_ADMIN_KEYS` (each **≥ 32 bytes** in production). Optional: `SAURON_ADMIN_READ_ONLY_KEYS` (GET/HEAD only), `SAURON_ADMIN_JWT_HS256_SECRET` plus JWTs with `scp` (`admin:read`, `admin:write`, `admin:full`/`admin:super`). Issuer redundancy: `SAURON_ISSUER_URLS` (comma-separated bases) with failover on `verify-proof`. Compliance defaults: jurisdiction **audit** and sanctions/PEP **audit** in production-like envs unless env overrides.
+Honest table. Re-verifiable from the source.
 
-## Agent endpoints: signature vs PoP vs JTI
+### Fully shipped — verified by the 16-attack empirical suite
 
-| Path | Validates A-JWT signature + agent row | PoP (challenge + JWS) | Server JTI |
-|------|--------------------------------------|------------------------|------------|
-| `POST /agent/verify` | Yes | **Required** if the agent was registered with `pop_public_key_b64u` | Optional: `consume_jti: true` |
-| `POST /agent/kyc/consent` | Yes | Same rule as above | Consumed after successful consent |
-| `POST /agent/payment/authorize` | Yes | **Always required** (endpoint rejects non-PoP agents) | **Always consumed** on success |
+- Per-agent Ed25519 PoP keys with mandatory hardware-attestation slot.
+- A-JWT (intent + checksum + delegation depth) with single-use JTI.
+- DPoP-style per-call signature over `method | path | sha256(body) | timestamp | nonce`.
+- Server-computed agent checksum from typed `agent_type` + `checksum_inputs`. Operators cannot supply a fake checksum.
+- Per-call `x-sauron-agent-config-digest` header check: agent runtime cannot drift from registered config without rejecting on every call.
+- Atomic single-use TOCTOU patterns on every consume table (consent, payment, credential, bank nonce, lightning, call-nonce, JTI).
+- Constant-time HMAC compares (no timing oracles).
+- CORS hard-fail on empty origins (no permissive fallback).
+- Sliding-window rate limits per agent + per human.
+- Merkle commitment of agent action receipts → Bitcoin (OpenTimestamps) + Solana (Memo) → externally verifiable via `ots verify` and Solana Explorer.
+- Vault Transit envelope encryption for `jwt_secret` / `token_secret` / `oprf_seed` / `admin_key`.
+- AWS KMS adapter (replaces stub).
+- AWS Nitro attestation chain validation (replaces stub).
+- Telemetry: `tracing` (JSON or pretty), Prometheus `/metrics`, structured logs.
+- Background GC for 5 expirable tables.
+- Forward proxy for outbound agent egress with intent-allowlist enforcement.
+- Python client (`clients/python/sauronid_client/`) with LangChain, OpenAI Assistants, and Anthropic Computer Use adapters.
+- TypeScript client (`agentic/src/`) with the same primitives.
+- Postgres backend opt-in (3 modules ported; 9 still on rusqlite — incremental).
 
-So “check the handler” meant: **PoP is not optional for agents that registered PoP material**—both verify and consent enforce it. Agents **without** PoP keys only need a valid A-JWT and DB checks.
+### Partial — works but operator must complete
 
-For pre-Stripe hardening, `POST /agent/payment/authorize` also enforces:
-- `payment_initiation` policy allowlist
-- intent `scope` includes `payment_initiation`
-- intent `maxAmount` and `currency` bounds
-- optional `constraints.merchant_allowlist`
-- single-use A-JWT (`jti` replay blocked)
+- **Postgres swap**: 3 modules ported (`agent_call_nonces`, `risk_rate_counters`, `ajwt_used_jtis`). 9 modules still rusqlite. Single-node SQLite is the default; switch via `SAURON_DB_BACKEND=postgres` for the ported modules.
+- **OpenTimestamps confirmation latency**: receipts are submitted instantly to public calendars; **Bitcoin block inclusion takes ~1 hour**. Solana memo finalisation is ~30 s. Operators with stricter timing pick the Solana path or run their own calendar.
+- **ZKP issuer / KYC consent / bank-KYC ingest**: feature-flagged off by default. Available behind `SAURON_DISABLE_*=0` for legacy deployments. SauronID does NOT ship a sanctions/PEP screening provider — wire your own data into `compliance_screening`.
 
-## L402 / Lightning Mock Payments
+### Cannot do — out of scope by design
 
-The backend includes a no-cost L402 flow for paid agent resources. It is mock-only by default: `SAURON_LIGHTNING_PROVIDER=mock` generates local invoices, macaroons, and preimages, then records settlement in SQLite. It does not broadcast Lightning payments or move real sats.
+- Replace your IdP, SSO, or human-auth system. SauronID does not authenticate humans.
+- Detect a compromised agent host without hardware attestation. Process-memory access defeats every signature-based system. Mitigation: hardware-backed PoP keys (TPM2 / AWS Nitro / Apple Secure Enclave / SEV-SNP).
+- Multi-region without operator effort. Single-binary deploys are vertical scaling only.
+- Pass SOC2 / ISO 27001 audit. No audit performed yet.
 
-Routes:
-
-- `POST /lightning/l402/challenge`: create an L402 invoice challenge from an existing agent payment authorization.
-- `POST /lightning/l402/settle`: settle the mock invoice with the returned dev preimage.
-- `GET /paid/agent-score/{agent_id}`: example paid resource unlocked by `Authorization: L402 macaroon="...", preimage="..."`.
-
-The L402 challenge currently requires the underlying payment authorization to use `currency: "SAT"`. This keeps the Lightning demo separate from Stripe test-mode flows and preserves the "no real money" invariant during local and CI testing.
-
-## KYA policy matrix (configuration advice)
-
-Allow-lists for assurance levels (`delegated_bank`, `autonomous_web3`, …) live in `core/src/policy.rs` with `KYA_POLICY_MATRIX_VERSION` surfaced on policy responses. **Recommendation:** keep the matrix **versioned in Git** for audits and reproducible deploys. When you need per-tenant or frequent changes, externalize the same data (e.g. JSON loaded at startup, or DB-backed rules) behind that version string, add an admin reload path, and test with your CI matrix—avoid wildcards in authorization paths.
-
-## Agentic tests
-
-- `npm test` (in `agentic/`): cryptographic and client-logic checks (no HTTP).
-- `npm run test:integration`: **live** `AgentShimClient` against a running core (`SAURON_CORE_URL`, `SAURON_ADMIN_KEY`). CI runs this after `docker compose` in the KYA E2E workflow.
-
-## KYA red-team (`kya-redteam/`)
-
-- **`npm run redteam`**: scripted invariant checks (JTI replay, policy matrix for delegated vs autonomous, delegation scope denial, PoP required on `/agent/verify`, invalid A-JWT). Uses the same env vars as agentic integration. CI runs this in the KYA E2E job.
-- **`npm run redteam:llm`**: optional OpenAI tool-calling loop (`OPENAI_API_KEY`, `REDTEAM_MODEL`, `REDTEAM_LLM_TURNS`). Exits 0 immediately if `OPENAI_API_KEY` is unset.
-- Soak: `REDTEAM_ITERATIONS=5 npm run redteam` repeats the full suite.
-
-## Agent model/framework compatibility
-
-Authorization logic is model-agnostic (claims + PoP + policy), not vendor-specific. The confidence matrix suite now runs across labels including `claude`, `openai`, `gemini`, `qwen`, `mistral`, `openclaw`, `autogen`, `langgraph`, and `crewai`.
-
-### Hugging Face fetch + smoke test
-
-To fetch a Hugging Face model repo and run the model-agnostic contract test flow:
+## Quickstart (one command, 60 seconds)
 
 ```bash
-bash core/tests/hf_fetch_and_matrix_test.sh Qwen/Qwen2.5-0.5B-Instruct
+git clone https://github.com/your-org/sauronid && cd sauronid
+./quickstart.sh
 ```
 
-The script downloads the model snapshot (via `huggingface_hub`) and then runs `core/tests/e2e_agent_matrix.sh` against your running core.
+The script: builds the Rust core, builds the TS clients, starts the server in dev mode, seeds clients/users, and runs the 9-scenario invariant suite + the 16-attack empirical suite. Both must pass green at the end.
 
-## Card-First Login Flow (No ID Upload At Login)
-
-The current card-first production-oriented flow is implemented in zkp/camara/src/server.ts under POST /issue-tier2-card-login:
-
-1. Resolve card token to identity context through an external resolver service
-2. Verify possession through Mobile Connect (strict IP to SIM logic)
-3. Build selective-disclosure payload for the target website
-4. Require ZK presentation definition for downstream verification
-5. Relay minimal claims payload to external KYC relay service
-
-This flow avoids sending raw identity documents to the relying website.
-
-## Quick Start (Dev)
-
-Use either:
-
-- Docker compose for the multi-service stack
-- start.sh for local fast startup
-
-Examples:
+To run in fail-closed (production-like) mode:
 
 ```bash
-docker compose up --build
+SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
 ```
 
-or
+To deploy in production: see [docs/operations.md](docs/operations.md).
+
+## Integrate with your AI agent
+
+```python
+from sauronid_client import SauronIDClient, register_llm_agent
+
+# Register an agent (server computes checksum from typed config)
+client = SauronIDClient(base_url="https://sauronid.your-company.internal")
+agent = register_llm_agent(
+    client,
+    user_session=...,
+    model_id="claude-opus-4-7",
+    system_prompt=open("prompts/research_agent.md").read(),
+    tools=["search", "fetch"],
+)
+
+# Every call routed through `agent.call(...)` is signed + leashed + audit-anchored
+result = agent.call("/internal/api/search", {"query": "..."})
+```
+
+LangChain wrapper, OpenAI Assistants wrapper, and Anthropic Computer Use wrapper in [`clients/python/sauronid_client/`](clients/python/sauronid_client/).
+
+For TypeScript: [`agentic/src/`](agentic/src/).
+
+## Empirical proof
+
+Every claim above has a runnable test. See [docs/empirical-comparison.md](docs/empirical-comparison.md) for:
+
+- 16 concrete attacks against AI-agent binding systems.
+- SauronID's score: **16/16 blocked**.
+- Comparison vs DPoP (RFC 9449), HTTP Message Signatures (RFC 9421), GNAP (RFC 9635), Anthropic MCP, Auth0 Agent Identities, AWS IAM Roles for Agents.
+- Latency benchmark: p50=2 ms, p99=8 ms at conc=1; p50=13 ms, p99=25 ms at conc=10.
+
+To reproduce the empirical claim:
 
 ```bash
-bash start.sh
+SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
+# at the end, the empirical suite reports "16/16 pass"
 ```
 
-## CAMARA Card Login Environment Variables
+## Architecture (high level)
 
-These variables are used by zkp/camara/src/server.ts.
+```
+┌────────────┐   register   ┌──────────────────────────┐
+│   Human    ├─────────────▶│   SauronID Core          │
+│ (operator) │              │   (Rust, axum, sqlite/pg)│
+└────────────┘              │                          │
+                            │  ┌────────────────────┐  │
+┌────────────┐              │  │ /agent/register    │  │
+│ AI Agent   │   per-call   │  │ /agent/{...}       │  │
+│  (Python /  ├──signed──▶ │  │ /agent/egress/log  │  │
+│   TS / etc) │  request    │  │ /admin/anchor/...  │  │
+└────────────┘              │  └────────────────────┘  │
+                            │                          │
+                            │  Background workers:     │
+                            │   • OTS upgrader (BTC)   │
+                            │   • Solana confirmer     │
+                            │   • Action anchor batch  │
+                            │   • GC for expirable     │
+                            └──────────┬───────────────┘
+                                       │
+                          ┌────────────┼────────────┐
+                          ▼            ▼            ▼
+                   Bitcoin (OTS)   Solana       Postgres /
+                   tamper-evident  Memo Tx      SQLite
+                   audit anchor    audit anchor   storage
+```
 
-### Required For Production Card Login
+## Critical files
 
-1) CARD_IDENTITY_RESOLVER_URL
-- Purpose: URL of your PCI-safe card token resolver API
-- Who provides it: your PSP, issuing bank adapter, or your internal card-token identity service
-- Typical owner: payments/platform team
+- Core service: [`core/`](core/) — Rust, axum, ~21k lines.
+- TypeScript client: [`agentic/`](agentic/) — `signCall`, `register`, `popKeys`.
+- Python client: [`clients/python/sauronid_client/`](clients/python/sauronid_client/) — LangChain + OpenAI + Anthropic adapters.
+- Empirical attack suite: [`kya-redteam/`](kya-redteam/) — 9 invariant scenarios + 16-attack empirical suite.
+- Custom Solana program: [`contracts/sauron_ledger/`](contracts/sauron_ledger/) — Anchor program (optional; default uses Solana Memo).
+- Operations: [`docs/operations.md`](docs/operations.md) — every env var, every deploy step.
+- Threat model: [`docs/threat-model.md`](docs/threat-model.md) — what we protect against, what we don't.
+- Empirical comparison: [`docs/empirical-comparison.md`](docs/empirical-comparison.md) — vs DPoP / GNAP / MCP / Auth0 / AWS / Cloudflare.
 
-2) KYC_RELAY_URL
-- Purpose: URL of your KYC relay/orchestration API that receives selective-disclosure login payloads
-- Who provides it: your KYC backend team (internal service) or your KYC provider adapter layer
-- Typical owner: identity/KYC team
-
-### Optional Authentication
-
-3) CARD_IDENTITY_RESOLVER_API_KEY
-- Purpose: bearer key for the card resolver API
-- Who provides it: owner of the resolver service (internal secrets manager or PSP-issued credential)
-
-4) KYC_RELAY_API_KEY
-- Purpose: bearer key for the KYC relay API
-- Who provides it: owner of the relay service (internal secrets manager)
-
-### CAMARA Runtime
-
-5) CAMARA_OPERATOR_BASE_URL
-- Purpose: base URL of the CAMARA operator endpoints used for authorize/token/number verification
-- Dev default: http://localhost:9000 (mock operator)
-- Production source: your telecom operator CAMARA/Open Gateway endpoint, or operator aggregator endpoint
-
-6) CAMARA_API_PORT
-- Purpose: port for the CAMARA API server in this repo
-- Dev default: 8004
-- Source: your deployment configuration (Kubernetes service, container platform, or VM config)
-
-## Where To Get Those Values In Real Life
-
-Production sourcing guidance:
-
-- CARD_IDENTITY_RESOLVER_URL:
-	- Build or procure a card-token identity resolver behind PCI scope
-	- Integrate with your PSP network tokenization and bank customer identity mapping
-	- Expose only token-based lookups, never raw PAN
-
-- KYC_RELAY_URL:
-	- Your internal KYC gateway/orchestrator endpoint
-	- It should accept selective claims + presentation definition and drive proof verification/KYC policy
-
-- API keys:
-	- Issued by each internal/external service owner
-	- Store in secret manager (Vault, AWS Secrets Manager, GCP Secret Manager, etc)
-
-- CAMARA_OPERATOR_BASE_URL:
-	- Obtain through operator onboarding (GSMA Open Gateway / CAMARA partner process)
-	- Typically requires client registration and contract with operator or aggregator
-
-- CAMARA_API_PORT:
-	- Chosen by your deployment environment and ingress mapping
-
-## Local Integration Example
-
-For local testing, you can run with:
+## Production deployment checklist
 
 ```bash
-export CAMARA_OPERATOR_BASE_URL=http://localhost:9000
-export CAMARA_API_PORT=8004
-export CARD_IDENTITY_RESOLVER_URL=http://localhost:9201
-export KYC_RELAY_URL=http://localhost:9301
+ENV=production
+SAURON_ADMIN_KEY=$(openssl rand -hex 32)
+SAURON_TOKEN_SECRET=$(openssl rand -hex 32)
+SAURON_JWT_SECRET=$(openssl rand -hex 32)
+SAURON_OPRF_SEED=$(openssl rand -hex 32)
+SAURON_ALLOWED_ORIGINS=https://your-edge.example.com
+SAURON_REQUIRE_CALL_SIG=1                        # fail-closed
+SAURON_DISABLE_BANK_KYC=1                        # off unless you need legacy bank flow
+SAURON_DISABLE_USER_KYC=1                        # off unless you need consent UI
+SAURON_DISABLE_ZKP=1                             # off unless you need ZKP credentials
+SAURON_DISABLE_COMPLIANCE=1                      # off unless you wire screening provider
+SAURON_BITCOIN_ANCHOR_PROVIDER=opentimestamps    # real BTC anchoring
+SAURON_SOLANA_ENABLED=1                          # dual-anchor on Solana
+SAURON_SOLANA_RPC_URL=https://api.devnet.solana.com   # mainnet later
+SAURON_SOLANA_KEYPAIR_PATH=/etc/sauronid/sol-key.json
+SAURON_VAULT_TRANSIT_ENABLED=1                   # secrets in Vault, not env
+SAURON_REQUIRE_AGENT_TYPE=1                      # legacy fallback rejected
+SAURON_DB_BACKEND=postgres                       # for ported modules
+DATABASE_URL=postgres://...
 ```
 
-Then run CAMARA package tests:
+Full guide: [docs/operations.md](docs/operations.md).
+
+## Contributing / development
 
 ```bash
-cd zkp/camara
-npm run build
-npm test
-npm run test:card-login
+# Run all tests + 16-attack empirical
+make verify
+
+# Just the empirical suite
+make empirical
+
+# Cold rebuild + re-run
+make clean && ./quickstart.sh
 ```
 
-The card-login test spins realistic external stubs for resolver and relay and validates strict failure on IP/SIM mismatch.
-
-## Production Env Template
-
-Use this template file as your starting point:
-
-- zkp/camara/env.production.example
-
-Recommended process:
-
-1. Copy values into your deployment secret manager, not into git-tracked files
-2. Inject them at runtime (Kubernetes Secret, ECS task secret, systemd env file, etc)
-3. Keep API keys rotated and scoped per environment
-
-## Production Deployment Checklist (Card-First Login)
-
-Before go-live, validate all items below.
-
-### Integrations
-
-1. CARD_IDENTITY_RESOLVER_URL is reachable from CAMARA API runtime
-2. KYC_RELAY_URL is reachable from CAMARA API runtime
-3. Resolver and relay authentication is configured (if required)
-4. CAMARA_OPERATOR_BASE_URL points to your real operator/aggregator endpoint
-
-### Security
-
-1. No raw PAN is logged or persisted in app services
-2. Card tokens are one-way hashed in logs and relay payloads
-3. All integration calls use TLS
-4. Secrets are loaded from a secret manager, not repository files
-5. API key scopes are least-privilege and environment-specific
-
-### Functional Tests
-
-1. Happy path: valid card token + valid Mobile Connect signal returns selective claims
-2. Failure path: strict IP-to-SIM mismatch returns verification failure
-3. Unknown card token returns not-found behavior
-4. KYC relay acceptance and request tracking are visible in logs/metrics
-
-### Observability
-
-1. Health endpoint is monitored
-2. Integration error rates are alerted
-3. End-to-end latency (card resolve + Mobile Connect + relay) is tracked
-4. Request IDs are propagated across CAMARA API, resolver, and relay
-
-### Compliance and Privacy
-
-1. Relying website receives only requested claims
-2. ZKP presentation definition is generated for each login context
-3. Data retention and deletion policy is enforced for relay payload metadata
-4. Access to identity and relay logs is restricted and auditable
-
-## Compliance Runner
-
-A one-command compliance runner exists at:
-
-- run_rules_compliance.sh
-
-It executes mapped checks aligned with rules.txt and prints pass/fail per rule item.
+The full session log of how this was built (multi-week, agent-driven) is intentionally not in the repo. The codebase is the spec.

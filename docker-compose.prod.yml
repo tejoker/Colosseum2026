@@ -1,0 +1,77 @@
+# Production-shaped compose template. This intentionally has no default secrets.
+# Use a secret manager or environment injection in real deployments.
+services:
+  backend:
+    build: ./core
+    image: trustai-backend:${TRUSTAI_IMAGE_TAG:-latest}
+    ports:
+      - "${TRUSTAI_BACKEND_PORT:-3001}:3001"
+    environment:
+      - PORT=3001
+      - ENV=production
+      - DATABASE_PATH=${DATABASE_PATH:?DATABASE_PATH is required}
+      - SAURON_ACCEPT_SINGLE_NODE_SQLITE=${SAURON_ACCEPT_SINGLE_NODE_SQLITE:?acknowledge SQLite or replace the data tier}
+      - SAURON_ALLOWED_ORIGINS=${SAURON_ALLOWED_ORIGINS:?SAURON_ALLOWED_ORIGINS is required}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required}
+      - SAURON_TOKEN_SECRET=${SAURON_TOKEN_SECRET:?SAURON_TOKEN_SECRET is required}
+      - SAURON_JWT_SECRET=${SAURON_JWT_SECRET:?SAURON_JWT_SECRET is required}
+      - SAURON_OPRF_SEED=${SAURON_OPRF_SEED:?SAURON_OPRF_SEED is required}
+      - SAURON_ISSUER_URLS=${SAURON_ISSUER_URLS:-http://zkp-issuer:4000}
+      - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:?SAURON_ISSUER_SHARED_SECRET is required}
+    restart: unless-stopped
+
+  partner-portal:
+    build:
+      context: ./partner-portal
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL is required}
+        NEXT_PUBLIC_ZKP_ISSUER_URL: ${NEXT_PUBLIC_ZKP_ISSUER_URL:?NEXT_PUBLIC_ZKP_ISSUER_URL is required}
+    image: trustai-partner-portal:${TRUSTAI_IMAGE_TAG:-latest}
+    ports:
+      - "${TRUSTAI_PORTAL_PORT:-3000}:3000"
+    environment:
+      - SAURON_CORE_INTERNAL_URL=${SAURON_CORE_INTERNAL_URL:-http://backend:3001}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required}
+      - TRUSTAI_ADMIN_PROXY_TOKEN=${TRUSTAI_ADMIN_PROXY_TOKEN:?TRUSTAI_ADMIN_PROXY_TOKEN is required}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  sauron-dashboard-ui:
+    build:
+      context: ./sauron-dashboard
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL is required}
+        NEXT_PUBLIC_DASH_API_URL: ${NEXT_PUBLIC_DASH_API_URL:?NEXT_PUBLIC_DASH_API_URL is required}
+    image: trustai-dashboard:${TRUSTAI_IMAGE_TAG:-latest}
+    ports:
+      - "${TRUSTAI_DASHBOARD_PORT:-8003}:8003"
+    environment:
+      - SAURON_CORE_INTERNAL_URL=${SAURON_CORE_INTERNAL_URL:-http://backend:3001}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required}
+      - TRUSTAI_ADMIN_PROXY_TOKEN=${TRUSTAI_ADMIN_PROXY_TOKEN:?TRUSTAI_ADMIN_PROXY_TOKEN is required}
+    depends_on:
+      - backend
+      - sauron-analytics-api
+    restart: unless-stopped
+
+  sauron-analytics-api:
+    build: ./data/sauron
+    image: trustai-analytics:${TRUSTAI_IMAGE_TAG:-latest}
+    environment:
+      - SAURON_URL=${SAURON_CORE_INTERNAL_URL:-http://backend:3001}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required}
+      - DATA_DIR=/app/data
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  zkp-issuer:
+    build: ./zkp/issuer
+    image: trustai-zkp-issuer:${TRUSTAI_IMAGE_TAG:-latest}
+    environment:
+      - PORT=4000
+      - ISSUER_DID=${ISSUER_DID:?ISSUER_DID is required}
+      - ISSUER_SEED=${ISSUER_SEED:?ISSUER_SEED is required}
+      - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:?SAURON_ISSUER_SHARED_SECRET is required}
+    restart: unless-stopped

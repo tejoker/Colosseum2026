@@ -1,0 +1,77 @@
+name: Release Gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust tests
+        working-directory: core
+        run: cargo test
+
+      - name: Rust clippy
+        working-directory: core
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Agentic SDK
+        working-directory: agentic
+        run: |
+          npm ci
+          npm test
+
+      - name: ZKP circuit audit
+        working-directory: zkp
+        run: |
+          npm ci
+          npm test
+
+      - name: Acquirer SDK
+        working-directory: zkp/acquirer-sdk
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      - name: Issuer build
+        working-directory: zkp/issuer
+        run: |
+          npm ci
+          npm run build
+
+      - name: Revocation contracts
+        working-directory: contracts/revocation
+        env:
+          HARDHAT_DISABLE_TELEMETRY_PROMPT: "1"
+          HARDHAT_DISABLE_TELEMETRY_PROMPTS: "1"
+        run: |
+          npm ci
+          npm test
+
+      - name: Partner portal
+        working-directory: partner-portal
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Dashboard
+        working-directory: sauron-dashboard
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Core dev leash smoke
+        run: bash core/tests/smoke_dev_leash_demo.sh

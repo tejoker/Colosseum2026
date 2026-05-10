@@ -1,0 +1,351 @@
+# SauronID Operations Runbook
+
+How to deploy, monitor, rotate, and recover SauronID. Read this before going to production.
+
+## Deployment profiles
+
+SauronID exposes optional surfaces beyond the core agent-binding stack. Pick a profile.
+
+### Profile A: Pure agent binding (recommended for new deployments)
+
+Agent identity, per-call signatures, intent leash, replay protection, audit anchoring. No bank KYC, no end-user KYC consent flow, no ZKP issuer integration, no compliance screening. This is what you want for AI-agent identity at a SaaS / DePIN / agentic-marketplace company.
+
+```bash
+export ENV=production
+export SAURON_ADMIN_KEY=$(openssl rand -hex 32)            # ≥ 32 bytes
+export SAURON_TOKEN_SECRET=$(openssl rand -hex 32)
+export SAURON_JWT_SECRET=$(openssl rand -hex 32)
+export SAURON_OPRF_SEED=$(openssl rand -hex 32)
+export SAURON_ALLOWED_ORIGINS=https://app.example.com,https://api.example.com
+export SAURON_REQUIRE_CALL_SIG=1                           # fail-closed on missing call sigs
+export SAURON_DISABLE_BANK_KYC=1
+export SAURON_DISABLE_USER_KYC=1
+export SAURON_DISABLE_ZKP=1
+export SAURON_DISABLE_COMPLIANCE=1
+export SAURON_BITCOIN_ANCHOR_PROVIDER=opentimestamps       # real Bitcoin anchoring, no key custody
+export SAURON_SOLANA_ENABLED=1                             # dual-anchor on Solana
+export SAURON_SOLANA_RPC_URL=https://api.devnet.solana.com
+export SAURON_SOLANA_NETWORK=devnet
+export SAURON_SOLANA_KEYPAIR_PATH=/etc/sauronid/solana-keypair.json
+export SAURON_ACCEPT_SINGLE_NODE_SQLITE=1                  # acknowledge single-node DB until Postgres swap
+```
+
+### Profile B: Full identity stack (legacy / regulated deployments)
+
+Everything in profile A plus optional KYC consent flow, sanctions/PEP screening (operator wires provider), ZKP credentials.
+
+```bash
+# all of profile A, then:
+unset SAURON_DISABLE_BANK_KYC
+unset SAURON_DISABLE_USER_KYC
+unset SAURON_DISABLE_ZKP
+unset SAURON_DISABLE_COMPLIANCE
+export SAURON_COMPLIANCE_JURISDICTION_MODE=enforce
+export SAURON_COMPLIANCE_JURISDICTION_ALLOWLIST=US,GB,FR,DE
+export SAURON_COMPLIANCE_SANCTIONS_MODE=enforce
+export SAURON_COMPLIANCE_PEP_MODE=enforce
+# wire your screening provider into core/src/compliance_screening.rs (Phase 1.1 deliverable)
+```
+
+## Secret backends
+
+### Vault Transit (recommended)
+
+Wraps the four root secrets (`SAURON_TOKEN_SECRET`, `SAURON_JWT_SECRET`, `SAURON_OPRF_SEED`, `SAURON_ADMIN_KEY`) so plaintext never appears in env or on disk.
+
+```bash
+# operator (one time per cluster)
+vault secrets enable transit
+vault write -f transit/keys/sauronid-root
+
+# wrap each plaintext into ciphertext (do this on a trusted host, then store the ciphertext)
+for s in SAURON_TOKEN_SECRET SAURON_JWT_SECRET SAURON_OPRF_SEED SAURON_ADMIN_KEY; do
+  pt=$(printf '%s' "${!s}" | base64)
+  ct=$(vault write -field=ciphertext transit/encrypt/sauronid-root plaintext="$pt")
+  echo "${s}_WRAPPED=$ct"
+done
+```
+
+```bash
+# runtime
+export SAURON_VAULT_TRANSIT_ENABLED=1
+export SAURON_VAULT_ADDR=https://vault.example.com:8200
+export SAURON_VAULT_TOKEN=hvs.…                            # service token with transit/decrypt/sauronid-root capability
+export SAURON_VAULT_TRANSIT_KEY=sauronid-root
+export SAURON_TOKEN_SECRET_WRAPPED=vault:v1:…
+export SAURON_JWT_SECRET_WRAPPED=vault:v1:…
+export SAURON_OPRF_SEED_WRAPPED=vault:v1:…
+export SAURON_ADMIN_KEY_WRAPPED=vault:v1:…
+# do NOT set the plaintext SAURON_*_SECRET env vars
+```
+
+### AWS KMS (planned, Phase 1B)
+
+Set `SAURON_AWS_KMS_ENABLED=1`, `SAURON_AWS_KMS_KEY_ID=arn:aws:kms:…`. Adapter is stubbed; wire `aws-sdk-kms` in the `secret_provider::resolve_via_kms` function before flipping the flag.
+
+### Plain env (dev only)
+
+Set the plaintext `SAURON_*_SECRET` vars directly. Server warns and uses derived secrets if any are unset in dev mode.
+
+## Monitoring
+
+### Metrics
+
+Prometheus endpoint at `GET /metrics`. Scrape every 15 s. Key counters:
+
+- `http_requests_total{method, path, status}` — request rate by route + status
+- `http_request_duration_seconds_bucket{method, path}` — latency histogram
+
+Suggested alerts:
+
+| Alert | Condition |
+|---|---|
+| Spike in 401 on `/agent/payment/authorize` | rate > 10/min sustained 5 min — possible call-sig brute force |
+| Spike in 409 on `/kyc/retrieve` or `/merchant/payment/consume` | rate > 1/min sustained 1 min — possible TOCTOU race attempt |
+| OTS upgrader silent | `bitcoin_merkle_anchors WHERE ots_upgraded=0 AND created_at < NOW() - 24h` count > 0 — calendar may be down |
+| GC silent | No `[sauron::gc] pruned` log line in 30 min — task may have crashed |
+
+### Logs
+
+`tracing` JSON output via `SAURON_LOG_FORMAT=json`. Ship to ELK / Loki / Datadog.
+
+Important targets:
+
+- `sauron::startup` — boot sequence
+- `sauron::security` — auth failures, signature mismatches
+- `sauron::call_sig` — per-call signature verification (advisory + enforce)
+- `sauron::gc` — background pruning
+- `sauron::bitcoin_anchor` — OTS calendar interactions
+- `tower_http::trace::on_request` / `on_response` — every HTTP call
+
+## Key rotation
+
+### Per-agent PoP keys
+
+Agents may rotate at any time:
+
+1. Agent generates a new Ed25519 keypair locally.
+2. Agent calls `/agent/register` with the new `pop_public_key_b64u` (server creates a new agent record).
+3. Agent stops using the old A-JWT; outstanding tokens expire naturally.
+
+Recommended cadence: per process restart, or weekly.
+
+### Admin key
+
+```bash
+# generate new
+NEW_ADMIN_KEY=$(openssl rand -hex 32)
+
+# add to keys list (multi-key rotation supported)
+export SAURON_ADMIN_KEYS="$NEW_ADMIN_KEY,$OLD_ADMIN_KEY"
+# restart server (rolling)
+# update all clients to use NEW_ADMIN_KEY
+# after a full update, drop OLD_ADMIN_KEY:
+export SAURON_ADMIN_KEYS="$NEW_ADMIN_KEY"
+# restart server
+```
+
+### JWT signing secret / Token secret / OPRF seed
+
+These are **not safely rotatable in-flight** — they're embedded in agent A-JWTs and OPRF user identities. Rotation requires invalidating all outstanding tokens and re-onboarding all agents/users. Plan for this in a maintenance window.
+
+If using Vault Transit, rotate the *wrapping* key without rotating the underlying secret: `vault write -f transit/keys/sauronid-root/rotate`. Existing wrapped secrets keep working; new encryptions use the latest version.
+
+### OTS anchor / Bitcoin
+
+OpenTimestamps anchors are append-only and immutable; no rotation. The calendar list (`SAURON_OTS_CALENDARS`) can be changed at runtime; future anchors use the new list, existing anchors continue to upgrade against their original calendar.
+
+## Recovery
+
+### DB corruption / loss
+
+SQLite is single-node. If `sauron.db` is lost:
+
+- Agent registrations: lost. All agents must re-register.
+- Audit log: lost.
+- ZKP credentials: lost; users re-claim from the issuer (issuer's pre-auth codes survive in the issuer's own state).
+
+**Action**: ship Phase 3 (Postgres) before claiming production readiness. Until then, snapshot `sauron.db` to S3 every 5 minutes via `litestream` or `cron + sqlite3 .backup`.
+
+### Lost admin keys
+
+If all admin keys are lost simultaneously, the cluster is unrecoverable from outside. Bring up a new cluster and re-register all clients/agents.
+
+Mitigation: split admin keys across multiple operators; maintain at least 2 active keys at all times in `SAURON_ADMIN_KEYS`.
+
+### Postgres backend (Phase 3, in progress)
+
+SauronID ships dual storage backends: `sqlite` (default; `r2d2 + rusqlite` pool, single-node) and `postgres` (opt-in; `sqlx::PgPool`, real replication). Switch with `SAURON_DB_BACKEND`.
+
+#### Local Postgres dev
+
+```bash
+docker compose -f docker-compose-postgres.yml up -d
+psql "postgres://sauronid:dev@localhost:5432/sauronid" -f migrations/postgres/0001_initial.sql
+
+# or, with sqlx-cli installed:
+cargo install sqlx-cli --no-default-features --features postgres
+sqlx migrate run --source migrations/postgres --database-url postgres://sauronid:dev@localhost:5432/sauronid
+```
+
+Run SauronID against Postgres:
+
+```bash
+export SAURON_DB_BACKEND=postgres
+export DATABASE_URL=postgres://sauronid:dev@localhost:5432/sauronid
+export SAURON_PG_POOL_SIZE=16          # optional, default 16
+./target/release/sauron-core
+# look for `[sauron::repo] repository pool ready backend=postgres` at startup
+```
+
+#### Migration progress
+
+| Module | rusqlite | sqlx::PgPool | TOCTOU-fix preserved? |
+|---|:-:|:-:|:-:|
+| `agent_call_nonces` (call-sig replay) | ✓ | ✓ | ✓ via `is_unique_violation` |
+| `ajwt_used_jtis` | ✓ | — | pending |
+| `risk_rate_counters` | ✓ | — | pending |
+| `agent_pop_challenges` | ✓ | — | pending |
+| `consent_log` | ✓ | — | pending (atomic UPDATE-WHERE-OLD-VALUE) |
+| `agent_payment_authorizations` | ✓ | — | pending (atomic UPDATE-WHERE-OLD-VALUE) |
+| `bank_attestation_nonces` | ✓ | — | pending (atomic INSERT) |
+| `credential_codes` | ✓ | — | pending (atomic UPDATE-WHERE-OLD-VALUE) |
+| `agents` | ✓ | — | pending |
+| `users`, `clients`, `merkle_leaves` | ✓ | — | pending |
+| `bitcoin_merkle_anchors`, `solana_merkle_anchors` | ✓ | — | pending |
+| `agent_action_*`, `agent_vcs`, `device_tokens`, `api_usage`, `requests_log` | ✓ | — | pending |
+| `payment_smt_leaves`, `user_compliance_screening`, `bank_kyc_links` | ✓ | — | pending |
+
+Each port follows the template in `core/src/repository.rs::consume_call_nonce`:
+
+1. Add a typed method on `Repo` taking high-level intent (not raw SQL).
+2. Match `&self` over `Sqlite` / `Postgres`, dispatch to the right driver.
+3. Map driver-specific errors (e.g. `sqlx::Error::Database::is_unique_violation`) onto the same `RepoError::Replay` variant SQLite already produces from `UNIQUE` text matching.
+4. Update callers from raw `db.execute(...)` to `state.repo.method(...).await`.
+5. Run `bash run-all.sh` (default + enforce). Both must stay green.
+
+#### Dialect mapping
+
+| SQLite (legacy) | Postgres (canonical) |
+|---|---|
+| `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGSERIAL PRIMARY KEY` |
+| `INTEGER` (epoch seconds) | `BIGINT` |
+| `BLOB` | `BYTEA` |
+| `IFNULL(x, y)` | `COALESCE(x, y)` |
+| `INSERT OR IGNORE INTO t … VALUES …` | `INSERT INTO t … VALUES … ON CONFLICT DO NOTHING` |
+| `INSERT OR REPLACE INTO t … VALUES …` | `INSERT INTO t … VALUES … ON CONFLICT (key) DO UPDATE SET …` |
+| `?1`, `?2` numbered params | `$1`, `$2` (sqlx handles automatically) |
+| `||` for string concat | `||` (works in both) |
+| `strftime('%s','now')` | `EXTRACT(EPOCH FROM NOW())::BIGINT` |
+
+#### Backups & recovery (Postgres)
+
+Standard `pg_basebackup` + WAL archiving. For multi-region: streaming replication or a managed service (RDS, Cloud SQL, Crunchy Bridge). SauronID ships nothing custom here — the schema in `migrations/postgres/0001_initial.sql` is the only thing operators need to seed a new replica.
+
+### Solana anchoring (Phase 2.3)
+
+The default Solana path uses the **Memo Program** (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`) — no custom program deploy required. Each merkle-root advance is timestamped on-chain as a memo containing `sauronid:v1:<root_hex>`.
+
+#### Devnet setup (free, no funding cost)
+
+```bash
+# 1. Install Solana CLI on the operator host (one-time)
+sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+
+# 2. Generate a fee-payer keypair (one-time, store it securely)
+solana-keygen new --no-bip39-passphrase \
+    -o /etc/sauronid/solana-keypair.json
+chmod 600 /etc/sauronid/solana-keypair.json
+
+# 3. Airdrop devnet SOL (rate-limited to 2 SOL per request, repeat as needed)
+PUBKEY=$(solana-keygen pubkey /etc/sauronid/solana-keypair.json)
+solana airdrop 2 "$PUBKEY" --url https://api.devnet.solana.com
+
+# 4. Configure SauronID core
+export SAURON_SOLANA_ENABLED=1
+export SAURON_SOLANA_RPC_URL=https://api.devnet.solana.com
+export SAURON_SOLANA_NETWORK=devnet
+export SAURON_SOLANA_KEYPAIR_PATH=/etc/sauronid/solana-keypair.json
+# optional: export SAURON_SOLANA_MEMO_PREFIX="sauronid:v1:"
+```
+
+Each anchor costs ~0.000005 SOL (~$0.00001 mainnet, free on devnet). 2 SOL covers ~400 000 anchors.
+
+#### Verify an anchor externally
+
+```bash
+# Take a signature from solana_merkle_anchors.signature
+SIG=…
+curl -s -X POST -H "content-type: application/json" \
+     https://api.devnet.solana.com \
+     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTransaction\",\"params\":[\"$SIG\",{\"encoding\":\"json\"}]}"
+# inspect the message log_messages — the memo will appear as
+#   "Program log: Memo (len 76): \"sauronid:v1:<root_hex>\""
+```
+
+Or paste the signature into https://explorer.solana.com/?cluster=devnet — the memo body shows directly under "Instruction Data".
+
+#### Mainnet flip
+
+```bash
+# Fund a new keypair with real SOL (~0.1 SOL covers ~20 000 anchors)
+solana-keygen new --no-bip39-passphrase \
+    -o /etc/sauronid/solana-mainnet-keypair.json
+chmod 600 /etc/sauronid/solana-mainnet-keypair.json
+# (transfer 0.1+ SOL from your treasury wallet to the printed pubkey)
+
+export SAURON_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+export SAURON_SOLANA_NETWORK=mainnet
+export SAURON_SOLANA_KEYPAIR_PATH=/etc/sauronid/solana-mainnet-keypair.json
+# restart the core; same code path, real chain
+```
+
+For wrapping the keypair under Vault Transit, base64-encode the JSON file, encrypt to ciphertext, and reference via `SAURON_SOLANA_KEYPAIR_INLINE_WRAPPED` (resolved through `secret_provider.rs` → decoded + parsed as JSON byte array). _(Phase 2.3 ships path-on-disk + inline-JSON; the wrapped variant follows the same pattern as the other root secrets — landed in the same `resolve_secret` chain when the operator opts in.)_
+
+#### Optional: custom Anchor program for richer semantics
+
+For deployments that want on-chain authority + counter + per-update events, the `contracts/sauron_ledger/` Anchor program ships a `SauronState` PDA with `update_root([u8; 32])`. Deploy with:
+
+```bash
+cd contracts/sauron_ledger
+anchor build
+anchor deploy --provider.cluster devnet
+# capture the program id printed
+```
+
+Then write a separate Rust client that constructs the Anchor instruction discriminator + arguments. _(Not implemented in this Phase; the Memo path covers the audit-anchoring use case.)_
+
+### OTS calendar outage
+
+Anchoring fails when all configured calendars are unreachable. The application continues running; merkle commitments accumulate in DB without anchors. Once a calendar comes back, you can manually re-submit pending roots:
+
+```sql
+SELECT merkle_root_hex FROM bitcoin_merkle_anchors WHERE provider = 'opentimestamps' AND ots_calendar_url = '';
+```
+
+(Re-submit logic not built; manual `curl` against the calendar's `/digest` works, then UPDATE the row.)
+
+## Health checks
+
+```bash
+# liveness
+curl -fsS http://localhost:3001/admin/stats -H "x-admin-key: $SAURON_ADMIN_KEY" >/dev/null && echo OK
+
+# metrics endpoint
+curl -fsS http://localhost:3001/metrics | head -5
+
+# OTS upgrader sanity (should be 0 or small)
+sqlite3 sauron.db "SELECT COUNT(*) FROM bitcoin_merkle_anchors WHERE provider='opentimestamps' AND ots_upgraded=0 AND created_at < strftime('%s','now','-1 day');"
+```
+
+## CI gate (recommended)
+
+Before merging:
+
+```bash
+cargo clippy -- -D warnings
+cargo test --workspace
+bash run-all.sh                                  # 9-scenario default
+SAURON_REQUIRE_CALL_SIG=1 bash run-all.sh        # 9-scenario enforce
+cargo audit                                      # dependency CVEs
+```

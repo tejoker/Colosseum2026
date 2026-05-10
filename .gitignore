@@ -49,6 +49,13 @@ yarn-error.log*
 data/sauron/data/*.parquet
 **/*.parquet
 transactions.parquet
+*.db
+*.db-wal
+*.db-shm
+stress-report-*.json
+*.orig
+*.patch
+.tmp/
 
 # ── Environnement ─────────────────────────────────────────────────────────────
 .env
@@ -93,3 +100,7 @@ next-env.d.ts
 
 */*/node_modules
 */node_modules
+
+# WSL Windows zone metadata
+*.Zone.Identifier
+*:Zone.Identifier

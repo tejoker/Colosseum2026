@@ -5,12 +5,11 @@ Anonymizes PII for EU/EEA residents whose last Sauron authentication
 exceeds RETENTION_DAYS (365 days).  Non-EU/EEA users (China, USA, UK…)
 are exempt — GDPR applies only to EU/EEA residents.
 
-IMPORTANT
----------
-  • personas.csv  — NEVER touched.  Read-only synthetic source of truth.
-  • users.csv     — The writable user registry.  PII fields are nulled here.
-  • sauron/data/sauron_users.parquet — is_anonymized flag + gdpr_purge_date
-  • sauron/data/gdpr_log.parquet     — Audit trail, one row per run
+Data files (optional analytics tier)
+------------------------------------
+  • sauron/data/sauron_users.parquet — user rows used for retention rules
+  • sauron/data/gdpr_log.parquet     — audit trail, one row per run
+  • users.csv (optional) — if present next to sauron/, PII columns are nulled in sync
 
 Run manually:
     python sauron/gdpr_purge.py
@@ -64,17 +63,13 @@ def run_purge() -> dict:
     today_s = str(today)
 
     if not USERS_FILE.exists():
-        logger.error("sauron_users.parquet not found — run build_data.py first")
+        logger.error("sauron_users.parquet not found — populate sauron/data/ or run analytics export")
         return {"error": "sauron_users.parquet missing"}
-
-    if not USERS_CSV.exists():
-        logger.error("users.csv not found")
-        return {"error": "users.csv missing"}
 
     users = pl.read_parquet(USERS_FILE)
 
     if "country" not in users.schema:
-        logger.error("sauron_users.parquet has no 'country' column — run build_data.py")
+        logger.error("sauron_users.parquet has no 'country' column")
         return {"error": "sauron_users missing country column"}
 
     eu_mask      = pl.col("country").is_in(list(EU_EEA_COUNTRIES))
@@ -96,21 +91,23 @@ def run_purge() -> dict:
     )
 
     if newly_purged > 0:
-        # Anonymize in users.csv ONLY (personas.csv is never touched)
-        uf = pl.read_csv(USERS_CSV)
-        exprs = []
-        for field in PII_FIELDS:
-            if field in uf.schema:
-                exprs.append(
-                    pl.when(pl.col("id").is_in(purge_ids))
-                    .then(pl.lit("ANONYMIZED"))
-                    .otherwise(pl.col(field))
-                    .alias(field)
-                )
-        if exprs:
-            uf = uf.with_columns(exprs)
-            uf.write_csv(USERS_CSV)
-            logger.info("  anonymized %d rows in users.csv", newly_purged)
+        if USERS_CSV.exists():
+            uf = pl.read_csv(USERS_CSV)
+            exprs = []
+            for field in PII_FIELDS:
+                if field in uf.schema:
+                    exprs.append(
+                        pl.when(pl.col("id").is_in(purge_ids))
+                        .then(pl.lit("ANONYMIZED"))
+                        .otherwise(pl.col(field))
+                        .alias(field)
+                    )
+            if exprs:
+                uf = uf.with_columns(exprs)
+                uf.write_csv(USERS_CSV)
+                logger.info("  anonymized %d rows in users.csv", newly_purged)
+        else:
+            logger.info("  users.csv not present — parquet-only purge")
 
         # Update sauron_users.parquet flags
         users = users.with_columns([

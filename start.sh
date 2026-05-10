@@ -38,11 +38,13 @@ if [ ! -f "$BINARY" ]; then
   ENV="${ENV:-development}" \
   SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
   SAURON_ISSUER_URL="${SAURON_ISSUER_URL:-http://localhost:4000}" \
+  SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}" \
   cargo run --bin sauron-core &
 else
   ENV="${ENV:-development}" \
   SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
   SAURON_ISSUER_URL="${SAURON_ISSUER_URL:-http://localhost:4000}" \
+  SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}" \
   "$BINARY" &
 fi
 CORE_PID=$!
@@ -68,24 +70,10 @@ log "[2/6] Seed (clients + users)..."
 cd "$ROOT/core"
 SAURON_URL=http://localhost:3001 bash seed.sh
 
-# ── 3. KYC (Python) ──────────────────────────────────────────────────────────
-log "[3/6] KYC Python → :8000"
-cd "$ROOT/KYC"
-if [ ! -d ".venv" ]; then
-  warn "Création du venv KYC..."
-  python3 -m venv .venv
-  .venv/bin/pip install -q -r requirements.txt
-elif [ ! -f ".venv/lib/python3*/site-packages/fastapi/__init__.py" ] 2>/dev/null; then
-  .venv/bin/pip install -q -r requirements.txt 2>/dev/null || true
-fi
-if [ -f ".env" ]; then source .env; fi
-GEMINI_API_KEY="${GEMINI_API_KEY:-dummy_dev_key}" \
-  .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --reload &
-KYC_PID=$!
-PIDS+=("$KYC_PID")
+# (Optional archived Python KYC: legacy/KYC — not started here.)
 
-# ── 4. Analytics API (Python) ────────────────────────────────────────────────
-log "[4/6] Analytics API → :8002"
+# ── 3. Analytics API (Python) ────────────────────────────────────────────────
+log "[3/6] Analytics API → :8002"
 cd "$ROOT/data/sauron"
 if [ ! -d ".venv" ]; then
   warn "Création du venv sauron..."
@@ -98,24 +86,24 @@ DATA_DIR="$ROOT/data" \
 SAURON_PID=$!
 PIDS+=("$SAURON_PID")
 
-# ── 5. Partner Portal (Next.js) ──────────────────────────────────────────────
-log "[5/6] Partner Portal → :3000"
+# ── 4. Partner Portal (Next.js) ──────────────────────────────────────────────
+log "[4/6] Partner Portal → :3000"
 cd "$ROOT/partner-portal"
 if [ ! -d "node_modules" ]; then
   warn "Installation des dépendances npm (partner-portal)..."
   npm install --silent
 fi
 NEXT_PUBLIC_API_URL=http://localhost:3001 \
-NEXT_PUBLIC_KYC_URL=/api/kyc/api \
-KYC_INTERNAL_URL=http://localhost:8000 \
-CAMARA_INTERNAL_URL=http://localhost:8004 \
+SAURON_CORE_INTERNAL_URL=http://localhost:3001 \
+NEXT_PUBLIC_ZKP_ISSUER_URL=http://localhost:4000 \
+TRUSTAI_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1 \
 DASHBOARD_INTERNAL_URL=http://localhost:8003 \
   npm run dev -- -p 3000 &
 PORTAL_PID=$!
 PIDS+=("$PORTAL_PID")
 
-# ── 6. Sauron Dashboard UI (Next.js) ─────────────────────────────────────────
-log "[6/7] Sauron Dashboard → :8003"
+# ── 5. Sauron Dashboard UI (Next.js) ─────────────────────────────────────────
+log "[5/6] Sauron Dashboard → :8003"
 cd "$ROOT/sauron-dashboard"
 if [ ! -d "node_modules" ]; then
   warn "Installation des dépendances npm (sauron-dashboard)..."
@@ -123,30 +111,14 @@ if [ ! -d "node_modules" ]; then
 fi
 NEXT_PUBLIC_API_URL=http://localhost:3001 \
 NEXT_PUBLIC_DASH_API_URL=http://localhost:8002 \
+SAURON_CORE_INTERNAL_URL=http://localhost:3001 \
+TRUSTAI_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1 \
   npm run dev -- -p 8003 &
 DASH_PID=$!
 PIDS+=("$DASH_PID")
 
-# ── 7. CAMARA Mobile Connect API & Mock ──────────────────────────────────────
-log "[7/7] CAMARA API → :8004 / CAMARA Mock → :9000"
-cd "$ROOT/zkp/camara"
-if [ ! -d "node_modules" ]; then
-  warn "Installation des dépendances npm (camara)..."
-  npm install --silent
-fi
-if [ ! -d "dist" ]; then
-  warn "Build du wrapper CAMARA..."
-  npm run build
-fi
-npm run mock &
-MOCK_PID=$!
-PIDS+=("$MOCK_PID")
-npm run start &
-CAMARA_PID=$!
-PIDS+=("$CAMARA_PID")
-
-# ── 8. ZKP Issuer (OID4VCI + proof verification) ───────────────────────────
-log "[8/8] ZKP Issuer → :4000"
+# ── 6. ZKP Issuer (OID4VCI + proof verification) ───────────────────────────
+log "[6/6] ZKP Issuer → :4000"
 cd "$ROOT/zkp/issuer"
 if [ ! -d "node_modules" ]; then
   warn "Installation des dépendances npm (issuer)..."
@@ -157,6 +129,7 @@ if [ ! -d "dist" ]; then
   npm run build
 fi
 ISSUER_SEED="${ISSUER_SEED:-sauronid-issuer-seed-hackathon}" \
+SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}" \
   npm run start &
 ISSUER_PID=$!
 PIDS+=("$ISSUER_PID")
@@ -165,7 +138,7 @@ PIDS+=("$ISSUER_PID")
 echo ""
 echo -e "  ${GRN}Partner + Bank + Dashboard (proxy) →${RST} http://localhost:3000"
 echo -e "  ${GRN}Rust Backend API                    →${RST} http://localhost:3001"
-echo -e "  ${YLW}Internal services (proxied)         →${RST} 8000 / 8002 / 8003 / 8004"
+echo -e "  ${YLW}Internal services (proxied)         →${RST} 8002 / 8003"
 echo ""
 echo -e "  ${YLW}Ctrl+C pour tout arrêter${RST}"
 echo ""

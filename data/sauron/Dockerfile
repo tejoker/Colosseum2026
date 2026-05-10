@@ -3,6 +3,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
+RUN mkdir -p /app/data
 RUN chmod +x entrypoint.sh
 EXPOSE 8002
 CMD ["bash", "entrypoint.sh"]

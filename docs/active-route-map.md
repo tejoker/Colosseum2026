@@ -36,7 +36,7 @@ The active SauronID product is agent binding and bounded authorization. Routes n
 
 ## Bitcoin Anchoring
 
-Merkle roots are anchored through `SAURON_BITCOIN_ANCHOR_PROVIDER=mock` by default. The mock creates a Bitcoin OP_RETURN-style payload and records it in `bitcoin_merkle_anchors`; it does not broadcast and does not spend BTC. Solana anchoring is no longer part of the active backend.
+Merkle roots are anchored through `SAURON_BITCOIN_ANCHOR_PROVIDER=mock` by default. The mock creates a Bitcoin OP_RETURN-style payload and records it in `bitcoin_merkle_anchors`; it does not broadcast and does not spend BTC.
 
 ## Supporting Proof and Owner Routes
 
@@ -47,6 +47,18 @@ Merkle roots are anchored through `SAURON_BITCOIN_ANCHOR_PROVIDER=mock` by defau
 - `GET /user/consents`
 - `DELETE /user/consent/{request_id}`
 
-## Archived Product Paths
+## Development-only Demo Routes
 
-KYC, CAMARA, card login, phone verification, and consent-popup flows are archived under `legacy/` and are not part of the default runtime.
+These routes are rejected outside development-like runtimes:
+
+- `POST /dev/register_user`
+- `POST /dev/buy_tokens`
+- `POST /dev/leash/demo`
+- `POST /dev/consent_profile`
+
+## Archived product paths
+
+- **Python KYC adapter** → `legacy/KYC/` (not started by default compose / `start.sh`).
+- **CAMARA, card login, phone verification, consent-popup UIs** → see `legacy/` (e.g. `legacy/camara/`, archived portal flows per `legacy/README.md`).
+
+Rust core still exposes `/kyc/*` and `/agent/kyc/*` routes for **consent + retrieval** against the in-process DB; those are **not** the archived Python service. If you want those removed too, that is a separate core refactor.
