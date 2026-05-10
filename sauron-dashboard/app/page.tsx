@@ -13,6 +13,8 @@ import {
   fmtNum,
 } from "./shared";
 
+const DELTA_WINDOW = 7;
+
 /* ── Live data shapes (match /api/live/* in data/sauron/app.py) ──────── */
 
 interface LiveOverview {
@@ -208,12 +210,11 @@ export default function OverviewPage() {
   const revokedAgents = agents.length - activeAgents;
   const popBoundAgents = agents.filter((a) => a.has_pop && !a.revoked).length;
 
-  const DELTA_WINDOW = 7;
   const dailyActions = overview.daily?.actions ?? overview.daily?.credit_a ?? [];
   const sparkData = dailyActions.length >= 2 ? dailyActions : undefined;
   const actionDelta =
     dailyActions.length > DELTA_WINDOW
-      ? dailyActions[dailyActions.length - 1] - dailyActions[dailyActions.length - 1 - DELTA_WINDOW]
+      ? Math.round(dailyActions[dailyActions.length - 1] - dailyActions[dailyActions.length - 1 - DELTA_WINDOW])
       : undefined;
 
   return (

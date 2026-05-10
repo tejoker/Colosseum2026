@@ -39,8 +39,8 @@ export default function RequestsPage() {
       setLoading(true);
       const res = await fetch(`/api/admin/requests`);
       if (res.ok) setEvents(await res.json());
-    } catch {
-      /* swallow — empty is fine */
+    } catch (err) {
+      console.error("[requests] fetch failed:", err);
     } finally {
       setLoading(false);
     }

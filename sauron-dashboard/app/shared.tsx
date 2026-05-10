@@ -133,6 +133,14 @@ const ACCENT_HEX: Record<string, string> = {
   white:   "#FFFFFF",
 };
 
+function hasDelta(v: number | undefined): v is number {
+  return v !== undefined;
+}
+
+function hasSpark(arr: number[] | undefined): arr is number[] {
+  return arr !== undefined && arr.length >= 2;
+}
+
 /* ── KPI tile — glass surface, mono label, optional delta + sparkline */
 export function Kpi({
   label,
@@ -157,10 +165,6 @@ export function Kpi({
         ? accent
         : "#4F8CFE";
 
-  const hasDelta = delta !== undefined;
-  const hasSpark = (arr: number[] | undefined): arr is number[] =>
-    arr !== undefined && arr.length >= 2;
-
   return (
     <div className="relative glass rounded-md px-5 py-5 flex flex-col gap-3 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
       {/* Top hairline accent — sweeps in on hover */}
@@ -180,9 +184,9 @@ export function Kpi({
       </span>
 
       {/* Bottom row: delta badge (left) + sparkline (right) */}
-      {(hasDelta || hasSpark(sparkData)) && (
+      {(hasDelta(delta) || hasSpark(sparkData)) && (
         <div className="flex items-end justify-between gap-2">
-          {hasDelta ? (
+          {hasDelta(delta) ? (
             <span
               className={[
                 "font-mono-label text-[7.5px] tracking-[0.08em]",
