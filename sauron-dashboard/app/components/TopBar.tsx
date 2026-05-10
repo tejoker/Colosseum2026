@@ -16,7 +16,7 @@ const PAGE_MAP: Record<string, { label: string; hex: string }> = {
 
 export default function TopBar() {
   const pathname = usePathname();
-  const { offline } = useDash();
+  const { offline, stats } = useDash();
   const page = PAGE_MAP[pathname] ?? { label: pathname.slice(1) || "Overview", hex: "0x000" };
 
   return (
@@ -42,14 +42,18 @@ export default function TopBar() {
 
       {/* Live status */}
       {offline ? (
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#F87171]/20 bg-[#F87171]/06">
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#F87171]/20 bg-[#F87171]/[0.06]">
           <span className="w-1 h-1 rounded-full bg-[#F87171]" />
           <span className="font-mono-label text-[7.5px] text-[#F87171]/80">CORE OFFLINE</span>
         </div>
-      ) : (
+      ) : stats !== null ? (
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-[#34D399]/20 bg-[#34D399]/[0.06]">
           <span className="w-1 h-1 rounded-full bg-[#34D399] animate-status-pulse" />
-          <span className="font-mono-label text-[7.5px] text-[#34D399]/80">LIVE · 10S</span>
+          <span className="font-mono-label text-[7.5px] text-[#34D399]/80">LIVE</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-white/10">
+          <span className="font-mono-label text-[7.5px] text-white/30">CONNECTING</span>
         </div>
       )}
     </div>
