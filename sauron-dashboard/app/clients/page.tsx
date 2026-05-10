@@ -50,7 +50,7 @@ export default function ClientsPage() {
   const activeCount = data.active_count ?? clientList.length;
 
   return (
-    <div className="space-y-20">
+    <div className="space-y-28">
       <PageHeader
         eyebrow="CLIENT.DIRECTORY"
         hex="0x400"

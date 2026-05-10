@@ -358,18 +358,18 @@ export function PageHeader({
   hex?: string;
 }) {
   return (
-    <header className="animate-fade-in-up pb-10">
-      <div className="mb-10">
+    <header className="animate-fade-in-up pb-16">
+      <div className="mb-12">
         <MonoLabel label={eyebrow ?? "MANDATE.CONSOLE"} hex={hex ?? "0x000"} />
       </div>
       <h1
-        className="font-display text-[52px] leading-[1.08] text-white max-w-3xl mb-8"
+        className="font-display text-[44px] leading-[1.1] text-white max-w-3xl mb-10"
         style={{ letterSpacing: "-0.015em" }}
       >
         {title}
       </h1>
       {description && (
-        <p className="text-[14px] text-white/55 max-w-2xl leading-[1.75]">
+        <p className="text-[14px] text-white/55 max-w-xl leading-[1.85]">
           {description}
         </p>
       )}
@@ -395,12 +395,12 @@ export function Card({
     <div
       className={[
         bare ? "" : "glass",
-        "relative rounded-md p-10",
+        "relative rounded-md px-10 pt-10 pb-12",
         className ?? "",
       ].join(" ")}
     >
       {title && (
-        <div className="mb-10">
+        <div className="mb-12">
           <MonoLabel label={title} hex={hex} />
         </div>
       )}

@@ -71,7 +71,7 @@ export default function AnchorsPage() {
   if (!anchor) return <Spinner />;
 
   return (
-    <div className="space-y-20">
+    <div className="space-y-28">
       <PageHeader
         eyebrow="ANCHOR.PIPELINE"
         hex="0x200"

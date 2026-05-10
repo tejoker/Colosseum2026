@@ -97,7 +97,7 @@ export default function AgentsPage() {
   } as Record<Filter, number>;
 
   return (
-    <div className="space-y-20">
+    <div className="space-y-28">
       <PageHeader
         eyebrow="MANDATE.AGENTS"
         hex="0x100"

@@ -71,7 +71,7 @@ export default function DemoPage() {
   }
 
   return (
-    <div className="space-y-20">
+    <div className="space-y-28">
       <PageHeader
         eyebrow="LIVE.DEMO"
         hex="0x900"

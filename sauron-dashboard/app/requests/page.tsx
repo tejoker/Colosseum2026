@@ -53,7 +53,7 @@ export default function RequestsPage() {
   }, [load]);
 
   return (
-    <div className="space-y-20">
+    <div className="space-y-28">
       <PageHeader
         eyebrow="ACTIVITY.LOG"
         hex="0x300"
