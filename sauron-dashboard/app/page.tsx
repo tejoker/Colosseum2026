@@ -9,7 +9,6 @@ import {
   Kpi,
   Card,
   Spinner,
-  PageHeader,
   StatusPill,
   fmtNum,
 } from "./shared";
@@ -209,23 +208,16 @@ export default function OverviewPage() {
   const revokedAgents = agents.length - activeAgents;
   const popBoundAgents = agents.filter((a) => a.has_pop && !a.revoked).length;
 
-  return (
-    <div className="space-y-8">
-      <PageHeader
-        eyebrow="MANDATE.OVERVIEW"
-        hex="0x001"
-        title={
-          <>
-            Every agent action,
-            <br />
-            <em className="not-italic gradient-text font-display">witnessed</em>{" "}
-            and anchored.
-          </>
-        }
-        description="Pre-execution governance for autonomous AI. Agents register, sign every call, and have their actions cryptographically committed to Bitcoin and Solana."
-      />
+  const dailyActions = overview.daily?.actions ?? overview.daily?.credit_a ?? [];
+  const sparkData = dailyActions.length >= 2 ? dailyActions : undefined;
+  const actionDelta =
+    dailyActions.length >= 8
+      ? dailyActions[dailyActions.length - 1] - dailyActions[dailyActions.length - 8]
+      : undefined;
 
-      {/* Health bar — replaces the green/amber slab with branded glass strip */}
+  return (
+    <div className="space-y-5">
+      {/* Health bar */}
       {health && (
         <div className="glass rounded-md px-4 py-3 flex items-center justify-between flex-wrap gap-3 animate-fade-in-up">
           <div className="flex items-center gap-3 flex-wrap">
@@ -246,7 +238,7 @@ export default function OverviewPage() {
       )}
 
       {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         <Kpi
           label="ACTIVE AGENTS"
           value={fmtNum(activeAgents)}
@@ -274,6 +266,8 @@ export default function OverviewPage() {
           value={fmtNum(anchor?.agent_action_batches ?? 0)}
           sub={anchor?.last_batch_at ? `LAST ${fmtAgo(anchor.last_batch_at).toUpperCase()}` : "NO ANCHORS YET"}
           accent="violet"
+          delta={actionDelta}
+          sparkData={sparkData}
         />
         <Kpi
           label="BTC / SOL"
@@ -284,7 +278,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Activity + anchor pipeline */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2">
           <Card title="AGENT.ACTIVITY · 90D" hex="0x010">
             <div className="h-80">
@@ -359,7 +353,6 @@ export default function OverviewPage() {
               }}
               options={DOUGHNUT_OPTS}
             />
-            {/* Center label */}
             <div className="absolute inset-0 flex flex-col items-center justify-center pb-12 pointer-events-none">
               <div className="font-mono-label text-[9px] text-white/45">TOTAL</div>
               <div
@@ -374,7 +367,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Agent registry + recent receipts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <Card title="ACTION.RECEIPTS · RECENT" hex="0x020">
           <div className="overflow-y-auto max-h-96 -mx-3">
             {actions.length === 0 ? (
@@ -452,13 +445,13 @@ export default function OverviewPage() {
         </Card>
       </div>
 
-      {/* Ring memberships — minimal stat strip rather than another chart */}
+      {/* Ring memberships */}
       <Card title="RING.MEMBERSHIP" hex="0x030">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {(overview.rings?.names ?? []).map((name, i) => (
             <div
               key={name}
-              className="bg-[#0F1A35] p-6 flex flex-col gap-3 group rounded border border-white/5 hover:bg-[#0F1A35]/60 transition-colors"
+              className="bg-[#0F1A35] p-5 flex flex-col gap-3 group rounded border border-white/5 hover:bg-[#0F1A35]/60 transition-colors"
             >
               <div className="flex items-center justify-between">
                 <span className="font-mono-label text-[9px] text-white/45">
@@ -473,14 +466,12 @@ export default function OverviewPage() {
                 />
               </div>
               <div
-                className="text-[32px] tabular-nums text-white"
+                className="text-[28px] tabular-nums text-white"
                 style={{ fontFamily: "Satoshi, system-ui, sans-serif", fontWeight: 500, letterSpacing: "-0.025em" }}
               >
                 {fmtNum(overview.rings?.counts[i] ?? 0)}
               </div>
-              <div className="font-mono-label text-[8.5px] text-white/30">
-                MEMBERS
-              </div>
+              <div className="font-mono-label text-[8.5px] text-white/30">MEMBERS</div>
             </div>
           ))}
         </div>
