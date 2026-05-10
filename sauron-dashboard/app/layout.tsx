@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { DashProvider } from "./context/DashContext";
 import Sidebar from "./components/Sidebar";
+import TopBar from "./components/TopBar";
 
 export const metadata: Metadata = {
   title: "SauronID — Mandate console",
@@ -12,10 +13,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <head>
-        {/*
-          BRANDING.md type system: Instrument Serif (display), Space Mono (labels).
-          Satoshi (UI) is loaded via Fontshare since it is not on Google Fonts.
-        */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
         <link
@@ -26,7 +23,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <DashProvider>
-          {/* Ambient blue glow behind everything — atmosphere, not chrome */}
           <div
             aria-hidden
             className="pointer-events-none fixed inset-0 -z-10"
@@ -38,8 +34,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           />
           <div className="relative flex min-h-screen">
             <Sidebar />
-            <main className="flex-1 min-w-0 overflow-x-hidden">
-              <div className="px-24 pt-24 pb-40 max-w-[1280px]">
+            <main className="flex-1 min-w-0 overflow-x-hidden flex flex-col">
+              <TopBar />
+              <div className="px-6 lg:px-10 pt-8 pb-16 max-w-[1280px]">
                 {children}
               </div>
             </main>
