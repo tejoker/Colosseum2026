@@ -203,7 +203,7 @@ export function Kpi({
         </div>
       )}
 
-      {sub && !hasDelta && (
+      {sub && (
         <span className="font-mono-label text-[10px] text-white/35 tracking-[0.12em]">
           {sub}
         </span>
