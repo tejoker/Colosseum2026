@@ -97,7 +97,7 @@ export default function AgentsPage() {
   } as Record<Filter, number>;
 
   return (
-    <div className="space-y-14">
+    <div className="space-y-20">
       <PageHeader
         eyebrow="MANDATE.AGENTS"
         hex="0x100"
@@ -160,7 +160,7 @@ export default function AgentsPage() {
       </div>
 
       <Card title={`AGENT.LIST · ${filtered.length}`} hex="0x110">
-        <div className="mb-4 flex items-center gap-5">
+        <div className="mb-4 flex items-center gap-6">
           <div className="relative flex-1 max-w-md">
             <input
               type="text"
@@ -246,7 +246,7 @@ function Th({ children, right }: { children: React.ReactNode; right?: boolean })
   return (
     <th
       className={[
-        "font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal",
+        "font-mono-label text-[8.5px] text-white/40 px-3 py-5 font-normal",
         right ? "text-right" : "",
       ].join(" ")}
     >
@@ -275,7 +275,7 @@ function Td({
   return (
     <td
       className={[
-        "px-3 py-4 align-middle whitespace-nowrap",
+        "px-3 py-5 align-middle whitespace-nowrap",
         right ? "text-right tabular-nums" : "",
         cls,
       ].join(" ")}

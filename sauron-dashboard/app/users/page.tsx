@@ -9,7 +9,7 @@ export default function UsersPage() {
   if (loading) return <Spinner />;
 
   return (
-    <div className="space-y-14">
+    <div className="space-y-20">
       <PageHeader
         eyebrow="HUMAN.REGISTRY"
         hex="0x500"
@@ -23,7 +23,7 @@ export default function UsersPage() {
         description="Each human is a stable OPRF key-image. Agents are bound to one. Revoke the human, every agent it owns dies."
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-5">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
         <Kpi label="HUMANS" value={fmtNum(users.length)} accent="cyan" />
         <Kpi
           label="JURISDICTIONS"
@@ -74,7 +74,7 @@ export default function UsersPage() {
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-5 font-normal">
       {children}
     </th>
   );
@@ -96,7 +96,7 @@ function Td({
   if (mono && dim) cls = "font-mono text-[11px] text-white/40";
   if (muted) cls = "text-white/55";
   return (
-    <td className={`px-3 py-4 align-middle whitespace-nowrap ${cls}`}>
+    <td className={`px-3 py-5 align-middle whitespace-nowrap ${cls}`}>
       {children}
     </td>
   );

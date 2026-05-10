@@ -293,7 +293,7 @@ export function Kpi({
   accent?: string;
 }) {
   return (
-    <div className="relative glass rounded-md px-6 py-7 flex flex-col gap-4 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
+    <div className="relative glass rounded-md px-7 py-8 flex flex-col gap-5 overflow-hidden group transition-colors hover:border-[rgba(79,140,254,0.25)]">
       {/* Top hairline accent — sweeps in on hover */}
       <span
         aria-hidden
@@ -301,7 +301,7 @@ export function Kpi({
       />
       <span className="font-mono-label text-[9px] text-white/45">{label}</span>
       <span
-        className={`text-[30px] tabular-nums leading-none ${resolveAccent(accent)}`}
+        className={`text-[32px] tabular-nums leading-none ${resolveAccent(accent)}`}
         style={{ fontFamily: "Satoshi, system-ui, sans-serif", fontWeight: 500, letterSpacing: "-0.025em" }}
       >
         {value}
@@ -358,12 +358,12 @@ export function PageHeader({
   hex?: string;
 }) {
   return (
-    <header className="animate-fade-in-up pb-6">
-      <div className="mb-6">
+    <header className="animate-fade-in-up pb-10">
+      <div className="mb-10">
         <MonoLabel label={eyebrow ?? "MANDATE.CONSOLE"} hex={hex ?? "0x000"} />
       </div>
       <h1
-        className="font-display text-[52px] leading-[1.08] text-white max-w-3xl mb-6"
+        className="font-display text-[52px] leading-[1.08] text-white max-w-3xl mb-8"
         style={{ letterSpacing: "-0.015em" }}
       >
         {title}
@@ -395,12 +395,12 @@ export function Card({
     <div
       className={[
         bare ? "" : "glass",
-        "relative rounded-md p-8",
+        "relative rounded-md p-10",
         className ?? "",
       ].join(" ")}
     >
       {title && (
-        <div className="mb-8">
+        <div className="mb-10">
           <MonoLabel label={title} hex={hex} />
         </div>
       )}

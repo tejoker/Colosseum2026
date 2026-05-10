@@ -53,7 +53,7 @@ export default function RequestsPage() {
   }, [load]);
 
   return (
-    <div className="space-y-14">
+    <div className="space-y-20">
       <PageHeader
         eyebrow="ACTIVITY.LOG"
         hex="0x300"
@@ -68,7 +68,7 @@ export default function RequestsPage() {
 
       <Card title={`STREAM · ${events.length} EVENTS`} hex="0x310">
         <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-5">
+          <div className="flex items-center gap-6">
             <StatusPill
               status={loading ? "warn" : "ok"}
               label={loading ? "REFRESHING" : "LIVE · 5S"}
@@ -145,7 +145,7 @@ function Th({ children, right }: { children: React.ReactNode; right?: boolean })
   return (
     <th
       className={[
-        "font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal",
+        "font-mono-label text-[8.5px] text-white/40 px-3 py-5 font-normal",
         right ? "text-right" : "",
       ].join(" ")}
     >
@@ -172,7 +172,7 @@ function Td({
   return (
     <td
       className={[
-        "px-3 py-4 align-middle whitespace-nowrap",
+        "px-3 py-5 align-middle whitespace-nowrap",
         right ? "text-right tabular-nums" : "",
         cls,
       ].join(" ")}

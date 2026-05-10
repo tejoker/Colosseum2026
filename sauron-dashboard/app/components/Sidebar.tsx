@@ -86,7 +86,7 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <div className="flex-1 px-3 space-y-1">
+      <div className="flex-1 px-3 space-y-2">
         {LINKS.map(({ href, label, hex, icon }) => {
           const active = pathname === href;
           return (
@@ -95,7 +95,7 @@ export default function Sidebar() {
               href={href}
               className={[
                 "group relative flex items-center justify-between gap-3",
-                "px-3.5 py-3 rounded-md text-[13.5px] transition-colors",
+                "px-4 py-3.5 rounded-md text-[13.5px] transition-colors",
                 active
                   ? "text-white"
                   : "text-white/55 hover:text-white hover:bg-white/[0.03]",

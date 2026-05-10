@@ -71,7 +71,7 @@ export default function DemoPage() {
   }
 
   return (
-    <div className="space-y-14">
+    <div className="space-y-20">
       <PageHeader
         eyebrow="LIVE.DEMO"
         hex="0x900"
@@ -244,7 +244,7 @@ export default function DemoPage() {
       {/* Result */}
       {result && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <ResultTile
               label="AGENT.REGISTERED"
               value={result.agent_id ? result.agent_id.slice(0, 14) + "…" : "—"}
@@ -360,7 +360,7 @@ function ResultTile({
 
 function Step({ n, label }: { n: string; label: string }) {
   return (
-    <li className="flex gap-5">
+    <li className="flex gap-6">
       <span className="font-mono-label text-[10px] text-[#4F8CFE] flex-shrink-0">
         {n}
       </span>
@@ -371,7 +371,7 @@ function Step({ n, label }: { n: string; label: string }) {
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal text-left">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-5 font-normal text-left">
       {children}
     </th>
   );
@@ -393,6 +393,6 @@ function Td({
   if (mono && dim) cls = "font-mono text-[11px] text-white/40";
   if (muted) cls = "text-white/55";
   return (
-    <td className={`px-3 py-4 align-middle whitespace-nowrap ${cls}`}>{children}</td>
+    <td className={`px-3 py-5 align-middle whitespace-nowrap ${cls}`}>{children}</td>
   );
 }

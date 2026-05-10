@@ -241,7 +241,7 @@ export default function OverviewPage() {
       )}
 
       {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-5">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6">
         <Kpi
           label="ACTIVE AGENTS"
           value={fmtNum(activeAgents)}
@@ -279,7 +279,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Activity + anchor pipeline */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
           <Card title="AGENT.ACTIVITY · 90D" hex="0x010">
             <div className="h-80">
@@ -369,7 +369,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Agent registry + recent receipts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card title="ACTION.RECEIPTS · RECENT" hex="0x020">
           <div className="overflow-y-auto max-h-96 -mx-3">
             {actions.length === 0 ? (
@@ -497,7 +497,7 @@ function Meta({ label, value }: { label: string; value: string }) {
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-4 font-normal">
+    <th className="font-mono-label text-[8.5px] text-white/40 px-3 py-5 font-normal">
       {children}
     </th>
   );
@@ -514,7 +514,7 @@ function Td({
   dim?: boolean;
   muted?: boolean;
 }) {
-  const base = "px-3 py-4 align-middle whitespace-nowrap";
+  const base = "px-3 py-5 align-middle whitespace-nowrap";
   let cls = "text-white/85";
   if (mono) cls = "font-mono text-[11.5px] text-white/85";
   if (mono && dim) cls = "font-mono text-[11.5px] text-white/45";
