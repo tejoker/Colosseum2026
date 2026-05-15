@@ -1,0 +1,176 @@
+{
+  "notFound": {
+    "message": "Page not found.",
+    "link": "Go home"
+  },
+  "nav": {
+    "home": "Home",
+    "protected": "Protected",
+    "activity": "Activity",
+    "proofs": "Proofs",
+    "try": "Try",
+    "settings": "Settings"
+  },
+  "systemStatus": {
+    "nominal": "All systems operational",
+    "agentsProtected": "{count} agents protected",
+    "verificationRunning": "Verification running",
+    "degraded": "Core unreachable — last seen {ago}",
+    "connecting": "Connecting…"
+  },
+  "home": {
+    "title": "Your agents",
+    "statLine": "{agents, plural, one {# agent} other {# agents}} · {calls} calls today · {protected} protected",
+    "empty": "No agents registered yet.",
+    "emptyLink": "Read the docs",
+    "viewActivity": "View activity"
+  },
+  "agentCard": {
+    "lastCall": "Last call",
+    "totalCalls": "Total calls",
+    "active": "Active",
+    "idle": "Idle"
+  },
+  "agentDetail": {
+    "title": "Agent",
+    "back": "Back to Home",
+    "identity": "Identity",
+    "mandate": "Mandate",
+    "configDigest": "Config digest",
+    "recentCalls": "Recent calls",
+    "labelType": "Type",
+    "labelRegistered": "Registered",
+    "noIntents": "No intents declared.",
+    "audit": "View full audit",
+    "revoke": "Revoke agent",
+    "revokeConfirmTitle": "Revoke this agent?",
+    "revokeConfirmBody": "This agent will immediately stop being able to act. This cannot be undone. Type the agent name to confirm.",
+    "revokeConfirmButton": "Revoke permanently",
+    "revokeCancel": "Cancel"
+  },
+  "protected": {
+    "title": "Protected",
+    "subtitle": "Your governance layer stopped these actions.",
+    "empty": "Nothing stopped yet.",
+    "summaryToday": "{count} today",
+    "summaryWeek": "{count} this week",
+    "summaryTotal": "{count} total",
+    "colTime": "Time",
+    "colAgent": "Agent",
+    "colReason": "Reason",
+    "showDetail": "Show detail",
+    "reasons": {
+      "replay": "Replayed token",
+      "scope": "Out-of-scope action",
+      "signature": "Invalid signature",
+      "nonce": "Nonce already used",
+      "revoked": "Agent revoked",
+      "expired": "Token expired"
+    }
+  },
+  "activity": {
+    "title": "Activity",
+    "subtitle": "Every action is recorded and verifiable.",
+    "colTime": "Time",
+    "colAgent": "Agent",
+    "colAction": "Action",
+    "colResult": "Result",
+    "colLatency": "Latency",
+    "empty": "No activity yet.",
+    "filterAll": "All",
+    "filterAllowed": "Allowed",
+    "filterStopped": "Stopped",
+    "exportAudit": "Export audit",
+    "resultAllowed": "Allowed",
+    "resultStopped": "Stopped"
+  },
+  "proofs": {
+    "title": "Proofs",
+    "subtitle": "Every agent action is cryptographically anchored.",
+    "bitcoin": "Bitcoin",
+    "bitcoinNote": "Confirmation takes ~1 hour.",
+    "solana": "Solana",
+    "solanaNote": "Finalises in ~30 seconds.",
+    "anchored": "Anchored",
+    "pending": "Pending",
+    "confirmed": "Confirmed",
+    "lastBatch": "Last batch",
+    "verifyOn": "Verify on {chain}"
+  },
+  "try": {
+    "title": "Try",
+    "subtitle": "See your governance layer in action.",
+    "scenarios": {
+      "normal": {
+        "label": "A normal call",
+        "description": "An agent makes a valid, properly signed request."
+      },
+      "replay": {
+        "label": "A blocked replay",
+        "description": "The same token is used twice — the second is stopped."
+      },
+      "scope": {
+        "label": "An out-of-scope action",
+        "description": "An agent tries to act outside its declared intent."
+      },
+      "custom": {
+        "label": "Your own scenario",
+        "description": "Configure the agent type, intent, and scenario freely."
+      }
+    },
+    "running": "Running…",
+    "resultAllowed": "Allowed",
+    "resultStopped": "Stopped",
+    "whyLabel": "What was checked",
+    "detailLabel": "Technical detail"
+  },
+  "settings": {
+    "title": "Settings",
+    "tabCompanies": "Companies",
+    "tabPeople": "People",
+    "tabConfig": "Configuration",
+    "companiesEmpty": "No companies registered.",
+    "peopleEmpty": "No people registered.",
+    "colName": "Name",
+    "colAgents": "Agents",
+    "colRegistered": "Registered",
+    "configCoreUrl": "Core URL",
+    "configDashUrl": "Analytics URL",
+    "configPollInterval": "Poll interval (ms)"
+  },
+  "audit": {
+    "title": "Audit — {name}",
+    "subtitle": "Complete, tamper-evident history for {name}.",
+    "back": "Back to agent",
+    "colTime": "Time",
+    "colEvent": "Event",
+    "colResult": "Result",
+    "colRef": "Reference",
+    "exportAudit": "Export audit",
+    "verifyLink": "Verify"
+  },
+  "auditExport": {
+    "title": "Export audit",
+    "subtitle": "Choose a format. All exports are generated server-side.",
+    "formatJson": "JSON",
+    "formatJsonDesc": "Machine-readable, all cryptographic fields included.",
+    "formatPdf": "PDF report",
+    "formatPdfDesc": "Human-readable report with timeline and governance summary.",
+    "formatSigned": "Signed report",
+    "formatSignedDesc": "PDF + Ed25519 signature. Requires signing endpoint on core.",
+    "scopeAgent": "This agent",
+    "scopeAll": "All agents",
+    "dateRange": "Date range",
+    "download": "Download",
+    "exporting": "Exporting…",
+    "signedUnavailable": "Signing endpoint not yet available on this core version."
+  },
+  "common": {
+    "loading": "Loading…",
+    "error": "Something went wrong.",
+    "retry": "Retry",
+    "noData": "No data yet.",
+    "ms": "{value}ms",
+    "never": "Never"
+  }
+}
