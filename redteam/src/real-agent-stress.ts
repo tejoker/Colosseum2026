@@ -17,7 +17,7 @@
  *
  * Environment variables:
  *   API_URL | SAURON_CORE_URL     Backend base URL (default http://127.0.0.1:3001)
- *   SAURON_ADMIN_KEY              Admin key (default super_secret_hackathon_key)
+ *   SAURON_ADMIN_KEY              Admin key (required — source .dev-secrets or export)
  *   E2E_BANK_SITE                 Bank client name (default "BNP Paribas")
  *   TAVILY_API_KEY                Tavily API key (omit for dry-run)
  *   TAVILY_API_URL                Override Tavily endpoint
@@ -103,7 +103,13 @@ interface StressReport {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
-const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
+if (!process.env.SAURON_ADMIN_KEY) {
+    throw new Error(
+        "SAURON_ADMIN_KEY is required for the real-agent stress harness. " +
+        "Export it (or source .dev-secrets at the repo root) before running."
+    );
+}
+const adminKey: string = process.env.SAURON_ADMIN_KEY;
 const bankSite = process.env.E2E_BANK_SITE || "BNP Paribas";
 
 const allowHighLimits = process.env.REAL_AGENT_STRESS_HIGH_LIMITS === "1";

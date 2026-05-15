@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-export SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
+# shellcheck source=scripts/lib/dev_secrets.sh
+source "$ROOT/scripts/lib/dev_secrets.sh"
+load_dev_admin_key
 export SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}"
 
 step() { printf '\n[run-all] %s\n' "$*"; }

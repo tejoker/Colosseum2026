@@ -37,7 +37,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 CORE_URL = os.getenv("SAURON_CORE_URL", "http://127.0.0.1:3001")
-ADMIN_KEY = os.getenv("SAURON_ADMIN_KEY", "super_secret_hackathon_key")
+ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY") or sys.exit(
+    "SAURON_ADMIN_KEY is required — export it or source .dev-secrets first."
+)
 AGENT_ACTION_TOOL = os.getenv(
     "SAURONID_AGENT_ACTION_TOOL",
     "/home/nicolasbigeard/hackeurope-24/core/target/release/agent-action-tool",

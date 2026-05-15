@@ -2,6 +2,16 @@
 
 How to deploy, monitor, rotate, and recover SauronID. Read this before going to production.
 
+## TLS termination
+
+SauronID core binds plain HTTP on `0.0.0.0:${PORT:-3001}`. **Never expose this port directly to the internet.** TLS termination is the operator's responsibility — deploy behind a reverse proxy (nginx, Caddy, AWS ALB, Cloudflare, etc.) that handles certificate management and forwards verified HTTPS traffic to the core.
+
+Minimum requirements for the reverse proxy:
+- TLS 1.2+, prefer 1.3
+- Strict `Host` header validation matching `SAURON_ALLOWED_ORIGINS`
+- Forward `X-Forwarded-For` so the rate limiter sees real client IPs (read by `risk.rs`)
+- Connection timeout ≤30s (per-call signature window is 60s; longer connections add no value)
+
 ## Deployment profiles
 
 SauronID exposes optional surfaces beyond the core agent-binding stack. Pick a profile.
@@ -177,6 +187,8 @@ Mitigation: split admin keys across multiple operators; maintain at least 2 acti
 
 SauronID ships dual storage backends: `sqlite` (default; `r2d2 + rusqlite` pool, single-node) and `postgres` (opt-in; `sqlx::PgPool`, real replication). Switch with `SAURON_DB_BACKEND`.
 
+Postgres backend recommended for production; SQLite default acceptable for dev/staging. See `docs/roadmap.md` Plan 2 for migration progress — M1 (serializable transaction helper + `agent_call_nonces` / `ajwt_used_jtis` / `risk_rate_counters` ported, race-tested in CI) shipped 2026-05-15. Remaining tables (M2-M4) are still SQLite-only; production deployments that touch those tables must keep `SAURON_ACCEPT_SINGLE_NODE_SQLITE=1`.
+
 #### Local Postgres dev
 
 ```bash
@@ -348,4 +360,30 @@ cargo test --workspace
 bash run-all.sh                                  # 9-scenario default
 SAURON_REQUIRE_CALL_SIG=1 bash run-all.sh        # 9-scenario enforce
 cargo audit                                      # dependency CVEs
+```
+
+## TPM2 attestation (M2)
+
+Place vendor root DER certs (Infineon, STMicro, Microsoft, Intel, AMD, IBM —
+download from each vendor's CA distribution point) at
+`/etc/sauronid/tpm2-roots/` before accepting `tpm2_quote` registrations.
+Override the path via `SAURON_TPM2_VENDOR_ROOTS_DIR`.
+
+Without configured roots, the server returns a structured
+`AttestationError::PartialImplementation` directing the operator to this
+step. The verifier never silently accepts an unrooted chain.
+
+```bash
+# 1. Place at least one vendor root DER into the configured directory.
+sudo mkdir -p /etc/sauronid/tpm2-roots
+sudo cp infineon-tpm-root-ca.der /etc/sauronid/tpm2-roots/
+
+# 2. Register an agent with attestation_kind=tpm2_quote. The five tpm2_*
+#    fields (quote, attest, signature, aik_cert_pem, ek_cert_chain_pem) plus
+#    tpm2_attestation_pubkey_b64u (format: "ed25519:<b64u>" |
+#    "p256:<b64u SEC1>" | "rsa:<b64u SPKI DER>") are required.
+
+# 3. On every verify, the flow is:
+#    parse TPMS_ATTEST -> verify pcrDigest -> walk AIK->EK->root via webpki
+#    -> verify AIK signature via ring.
 ```

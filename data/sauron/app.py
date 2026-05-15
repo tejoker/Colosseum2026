@@ -29,7 +29,12 @@ logger = logging.getLogger(__name__)
 
 INGEST_URL  = os.getenv("INGEST_URL",  "http://localhost:8010")
 SAURON_URL  = os.getenv("SAURON_URL",  "http://localhost:3001")
-ADMIN_KEY   = os.getenv("SAURON_ADMIN_KEY", "super_secret_hackathon_key")
+ADMIN_KEY   = os.environ.get("SAURON_ADMIN_KEY") or (_ for _ in ()).throw(
+    RuntimeError(
+        "SAURON_ADMIN_KEY is not set. Export it (or source .dev-secrets at the "
+        "repo root) before starting the analytics service."
+    )
+)
 DATA_DIR    = os.getenv("DATA_DIR",    str(Path(__file__).parent.parent))  # optional CSV exports (may be empty)
 
 BASE    = Path(__file__).parent

@@ -6,9 +6,13 @@ set -euo pipefail
 # (No synthetic CSV pipeline — SauronID is the identity stack, not demo datagen.)
 # ──────────────────────────────────────────────────────────────────────────────
 
-SERVER="${SAURON_URL:-http://localhost:3001}"
-ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../scripts/lib/dev_secrets.sh
+source "${SCRIPT_DIR}/../scripts/lib/dev_secrets.sh"
+require_admin_key
+
+SERVER="${SAURON_URL:-http://localhost:3001}"
+ADMIN_KEY="$SAURON_ADMIN_KEY"
 
 # Look for data dir: first sibling (local dev), then /app/data (Docker)
 if [[ -d "${SCRIPT_DIR}/../data" ]]; then

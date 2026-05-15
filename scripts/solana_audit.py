@@ -40,7 +40,9 @@ except ImportError:
 import base58 as b58
 
 CORE_URL = os.getenv("SAURON_CORE_URL", "http://127.0.0.1:3001")
-ADMIN_KEY = os.getenv("SAURON_ADMIN_KEY", "super_secret_hackathon_key")
+ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY") or sys.exit(
+    "SAURON_ADMIN_KEY is required — export it or source .dev-secrets first."
+)
 DEVNET_RPC = os.getenv("SAURON_DEVNET_RPC", "https://api.devnet.solana.com")
 MEMO_PROGRAM_ID_B58 = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
 MEMO_PREFIX = "sauronid:v1:"

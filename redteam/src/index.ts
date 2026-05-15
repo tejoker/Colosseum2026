@@ -20,7 +20,13 @@ import { scenarioRevokedAgent } from "./scenarios/revoked-agent";
 import { scenarioCallSigBinding } from "./scenarios/call-sig-binding";
 
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
-const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
+if (!process.env.SAURON_ADMIN_KEY) {
+    throw new Error(
+        "SAURON_ADMIN_KEY is required for the red-team suite. " +
+        "Export it (or source .dev-secrets at the repo root) before running."
+    );
+}
+const adminKey: string = process.env.SAURON_ADMIN_KEY;
 const bankSite = process.env.E2E_BANK_SITE || "BNP Paribas";
 const iterations = Math.max(1, parseInt(process.env.REDTEAM_ITERATIONS || "1", 10) || 1);
 

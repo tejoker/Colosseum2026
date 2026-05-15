@@ -75,6 +75,12 @@ pub fn window_secs() -> i64 {
 }
 
 /// Increment counter for this bucket/window. Returns `Err` if over limit after increment.
+///
+/// Wrapped in `BEGIN IMMEDIATE TRANSACTION` so the INSERT-ON-CONFLICT +
+/// post-increment SELECT pair runs under the SQLite writer lock — counter
+/// read cannot be torn by a concurrent increment. On Postgres callers SHOULD
+/// route through `Repo::risk_increment` which runs the same pair under
+/// `ISOLATION LEVEL SERIALIZABLE` with retry.
 pub fn check_and_increment(
     db: &Connection,
     bucket: &str,
@@ -90,26 +96,41 @@ pub fn check_and_increment(
     let w = window_secs();
     let window_id = now / w;
 
-    db.execute(
-        "INSERT INTO risk_rate_counters (bucket, window_id, cnt) VALUES (?1, ?2, 1)
-         ON CONFLICT(bucket, window_id) DO UPDATE SET cnt = cnt + 1",
-        params![bucket, window_id],
-    )
-    .map_err(|e| format!("risk: db error: {e}"))?;
-
-    let cnt: i64 = db
-        .query_row(
-            "SELECT cnt FROM risk_rate_counters WHERE bucket = ?1 AND window_id = ?2",
+    db.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+        .map_err(|e| format!("risk: begin immediate: {e}"))?;
+    let inner = (|| -> Result<i64, String> {
+        db.execute(
+            "INSERT INTO risk_rate_counters (bucket, window_id, cnt) VALUES (?1, ?2, 1)
+             ON CONFLICT(bucket, window_id) DO UPDATE SET cnt = cnt + 1",
             params![bucket, window_id],
-            |r| r.get(0),
         )
-        .map_err(|e| format!("risk: read cnt: {e}"))?;
+        .map_err(|e| format!("risk: db error: {e}"))?;
+        let cnt: i64 = db
+            .query_row(
+                "SELECT cnt FROM risk_rate_counters WHERE bucket = ?1 AND window_id = ?2",
+                params![bucket, window_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("risk: read cnt: {e}"))?;
+        Ok(cnt)
+    })();
+    let cnt = match inner {
+        Ok(c) => {
+            db.execute_batch("COMMIT;")
+                .map_err(|e| format!("risk: commit: {e}"))?;
+            c
+        }
+        Err(e) => {
+            let _ = db.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    };
 
     if cnt > max_per_window {
         return Err("risk: rate limit exceeded".into());
     }
 
-    // Best-effort GC of stale windows (bounded work per request).
+    // Best-effort GC of stale windows (bounded work per request, outside txn).
     let _ = db.execute(
         "DELETE FROM risk_rate_counters WHERE window_id < ?1",
         params![window_id - 120],
@@ -135,7 +156,24 @@ pub fn limit_agent_vc_issue() -> i64 {
 }
 
 pub fn limit_agent_register() -> i64 {
-    parse_limit("SAURON_RISK_AGENT_REGISTER_PER_WINDOW", 20)
+    // L3: in production we still default to 20/window. In dev the global
+    // `parse_limit` floor is 0 (= unlimited) which leaves /agent/register
+    // wide open during local runs — anyone scripting a registration flood
+    // can saturate TPM-attestation parsing. Apply a 60/window floor (which
+    // matches the 60s default window → ~1 register/sec/human) in dev too.
+    // Env var still overrides, including to a higher value, or to 0 if
+    // operator explicitly wants no cap.
+    let parsed = parse_limit("SAURON_RISK_AGENT_REGISTER_PER_WINDOW", 20);
+    if std::env::var("SAURON_RISK_AGENT_REGISTER_PER_WINDOW").is_ok() {
+        // Operator explicitly set it — honour it as-is (parse_limit clamps to >= 0).
+        parsed
+    } else if parsed == 0 {
+        // No env override and parse_limit returned the dev fallback (0).
+        // Apply the new safe default.
+        60
+    } else {
+        parsed
+    }
 }
 
 pub fn limit_agent_verify() -> i64 {

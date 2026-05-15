@@ -11,7 +11,13 @@
 import { AgentShimClient } from "../src/index";
 
 const API = process.env.SAURON_CORE_URL || process.env.API_URL || "http://127.0.0.1:3001";
-const ADMIN = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
+if (!process.env.SAURON_ADMIN_KEY) {
+    throw new Error(
+        "SAURON_ADMIN_KEY is required for the agentic integration shim test. " +
+        "Export it (or source .dev-secrets at the repo root) before running."
+    );
+}
+const ADMIN: string = process.env.SAURON_ADMIN_KEY;
 const BANK_SITE = process.env.E2E_BANK_SITE || "BNP Paribas";
 
 async function postJson(

@@ -24,6 +24,8 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -197,7 +199,9 @@ pub fn verify_ajwt(jwt_secret: &[u8], token: &str) -> Option<serde_json::Value> 
 }
 
 fn uuid_v4() -> String {
-    hex::encode(rand::random::<[u8; 16]>())
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 // ─── Request / Response types ────────────────────────────────────────────────
@@ -252,6 +256,31 @@ pub struct RegisterAgentRequest {
     /// JSON array/object string stored as `delegation_chain` claim in the A-JWT.
     #[serde(default)]
     pub delegation_chain_json: String,
+    // ── M1 of TPM2-bound PoP key roadmap (docs/roadmap.md Plan 1) ────────
+    // When `attestation_kind == "tpm2_quote"` all five tpm2_* fields are
+    // required. The server stores them verbatim; verification is split:
+    // M1 ships parsing (returns PartialImplementation), M2 ships the
+    // cert-chain walker against TPM-vendor roots.
+    #[serde(default)]
+    pub tpm2_quote_b64: Option<String>,
+    #[serde(default)]
+    pub tpm2_attest_b64: Option<String>,
+    #[serde(default)]
+    pub tpm2_signature_b64: Option<String>,
+    #[serde(default)]
+    pub tpm2_aik_cert_pem: Option<String>,
+    #[serde(default)]
+    pub tpm2_ek_cert_chain_pem: Option<String>,
+    /// JSON-encoded PCR selection + canonical hash the TPM2 quote is expected
+    /// to bind. Stored verbatim in `agents.attestation_pcr_set`.
+    #[serde(default)]
+    pub tpm2_pcr_set: Option<String>,
+    /// Base64url-encoded AIK public key. Stored verbatim in
+    /// `agents.attestation_pubkey_b64u`. Once M2 lands, the verifier extracts
+    /// this from the AIK cert directly — operators submitting it now make the
+    /// transition seamless.
+    #[serde(default)]
+    pub tpm2_attestation_pubkey_b64u: Option<String>,
 }
 
 fn default_intent() -> String {
@@ -426,6 +455,112 @@ pub async fn register_agent(
             "ring_key_image_hex is required and must be 32-byte hex".into(),
         ));
     }
+    // ── M1 of TPM2-bound PoP key roadmap (docs/roadmap.md Plan 1) ────────
+    //
+    // 1. ServerDerived PoP: refuse in production unless explicitly opted in.
+    //    The default-on behaviour is now opt-out — operators must set
+    //    SAURON_ALLOW_SERVER_DERIVED_POP=1 OR run with ENV=development.
+    //    Previously the server silently derived a PoP key from `jwt_secret`,
+    //    making operator compromise = full agent impersonation. M1 makes the
+    //    trust assumption explicit; M2 ships a TPM2-rooted alternative.
+    //
+    // 2. Tpm2Quote: all five tpm2_* payload fields are required when the
+    //    operator advertises this kind. The server stores them verbatim;
+    //    verification is M2.
+    let kind_parsed = crate::attestation::AttestationKind::parse(&payload.attestation_kind);
+    if matches!(kind_parsed, crate::attestation::AttestationKind::ServerDerived) {
+        crate::attestation::check_server_derived_allowed().map_err(|e| {
+            (StatusCode::FORBIDDEN, e.to_string())
+        })?;
+    }
+    if matches!(kind_parsed, crate::attestation::AttestationKind::Tpm2Quote) {
+        let missing: Vec<&'static str> = [
+            ("tpm2_quote_b64", payload.tpm2_quote_b64.as_deref()),
+            ("tpm2_attest_b64", payload.tpm2_attest_b64.as_deref()),
+            ("tpm2_signature_b64", payload.tpm2_signature_b64.as_deref()),
+            ("tpm2_aik_cert_pem", payload.tpm2_aik_cert_pem.as_deref()),
+            (
+                "tpm2_ek_cert_chain_pem",
+                payload.tpm2_ek_cert_chain_pem.as_deref(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, v)| match v {
+            None => Some(name),
+            Some(s) if s.trim().is_empty() => Some(name),
+            _ => None,
+        })
+        .collect();
+        if !missing.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "attestation_kind=tpm2_quote requires all five tpm2_* fields; missing: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+
+        // ── H2: bound size of TPM2 payload fields ────────────────────────────
+        //
+        // Without these guards a single registration request can ship 100s of
+        // megabytes of PEM/base64 text, forcing the server to copy + persist
+        // the whole blob before any verification runs. Cert-chain PEMs are
+        // generous at 64 KiB (room for ~5 intermediate certs); raw TPM2
+        // quote/attest/signature blobs are well under 4 KiB in practice but we
+        // allow 32 KiB to leave slack for future algorithms.
+        const MAX_PEM_LEN: usize = 65_536; // 64 KiB per cert chain
+        const MAX_B64_FIELD_LEN: usize = 32_768; // 32 KiB for quote/attest/signature/pubkey
+        const MAX_PCR_SET_LEN: usize = 8_192; // 8 KiB JSON for PCR selection
+        let bounded: [(&'static str, Option<&str>, usize); 7] = [
+            (
+                "tpm2_quote_b64",
+                payload.tpm2_quote_b64.as_deref(),
+                MAX_B64_FIELD_LEN,
+            ),
+            (
+                "tpm2_attest_b64",
+                payload.tpm2_attest_b64.as_deref(),
+                MAX_B64_FIELD_LEN,
+            ),
+            (
+                "tpm2_signature_b64",
+                payload.tpm2_signature_b64.as_deref(),
+                MAX_B64_FIELD_LEN,
+            ),
+            (
+                "tpm2_aik_cert_pem",
+                payload.tpm2_aik_cert_pem.as_deref(),
+                MAX_PEM_LEN,
+            ),
+            (
+                "tpm2_ek_cert_chain_pem",
+                payload.tpm2_ek_cert_chain_pem.as_deref(),
+                MAX_PEM_LEN,
+            ),
+            (
+                "tpm2_attestation_pubkey_b64u",
+                payload.tpm2_attestation_pubkey_b64u.as_deref(),
+                MAX_B64_FIELD_LEN,
+            ),
+            (
+                "tpm2_pcr_set",
+                payload.tpm2_pcr_set.as_deref(),
+                MAX_PCR_SET_LEN,
+            ),
+        ];
+        for (name, val, max) in bounded {
+            if let Some(s) = val {
+                if s.len() > max {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("{name} exceeds {max} bytes (got {})", s.len()),
+                    ));
+                }
+            }
+        }
+    }
+
     if payload.pop_jkt.trim().is_empty() || payload.pop_public_key_b64u.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -647,10 +782,24 @@ pub async fn register_agent(
     {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
+        // M1 of TPM2 PoP roadmap: persist the new hardware-attestation columns
+        // alongside the legacy blob+kind. They are NULL for non-TPM2 kinds.
+        let attestation_pubkey_b64u = payload
+            .tpm2_attestation_pubkey_b64u
+            .as_deref()
+            .filter(|s| !s.is_empty());
+        let attestation_pcr_set = payload
+            .tpm2_pcr_set
+            .as_deref()
+            .filter(|s| !s.is_empty());
+        let attestation_ek_cert_chain_pem = payload
+            .tpm2_ek_cert_chain_pem
+            .as_deref()
+            .filter(|s| !s.is_empty());
         db.execute(
             "INSERT OR REPLACE INTO agents
-             (agent_id, human_key_image, agent_checksum, intent_json, assurance_level, public_key_hex, ring_key_image_hex, issued_at, expires_at, revoked, parent_agent_id, delegation_depth, pop_jkt, pop_public_key_b64u, attestation_blob, attestation_kind)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11,?12,?13,?14,?15)",
+             (agent_id, human_key_image, agent_checksum, intent_json, assurance_level, public_key_hex, ring_key_image_hex, issued_at, expires_at, revoked, parent_agent_id, delegation_depth, pop_jkt, pop_public_key_b64u, attestation_blob, attestation_kind, attestation_pubkey_b64u, attestation_pcr_set, attestation_ek_cert_chain_pem)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 agent_id,
                 human_key_image,
@@ -667,6 +816,9 @@ pub async fn register_agent(
                 payload.pop_public_key_b64u,
                 if payload.attestation_blob.is_empty() { None } else { Some(&payload.attestation_blob) },
                 payload.attestation_kind,
+                attestation_pubkey_b64u,
+                attestation_pcr_set,
+                attestation_ek_cert_chain_pem,
             ],
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1046,6 +1198,12 @@ pub async fn verify_agent_token(
                     ),
                 });
             }
+            // TODO M2-callsite-sweep: sync take_pop_challenge is called from
+            // inside a held MutexGuard<Connection>; converting to await would
+            // require unwinding the surrounding sync match. The legacy path
+            // wraps the SELECT+DELETE in BEGIN IMMEDIATE so SQLite races are
+            // safe today. Repo::take_pop_challenge is the dual-backend entry
+            // point once this handler is converted to fully async.
             let challenge_plain =
                 match ajwt_support::take_pop_challenge(&db, &payload.pop_challenge_id, aid) {
                     Ok(c) => c,
@@ -1151,7 +1309,7 @@ pub async fn list_agents(
     let mut stmt = db.prepare(
         "SELECT agent_id, human_key_image, agent_checksum, intent_json, assurance_level, IFNULL(ring_key_image_hex, ''), issued_at, expires_at, revoked
          FROM agents WHERE human_key_image = ?1 ORDER BY issued_at DESC"
-    ).unwrap();
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db prepare: {e}")))?;
     let records: Vec<AgentRecord> = stmt
         .query_map(params![human_ki], |row| {
             Ok(AgentRecord {
@@ -1166,7 +1324,7 @@ pub async fn list_agents(
                 revoked: row.get::<_, i64>(8)? != 0,
             })
         })
-        .unwrap()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db query: {e}")))?
         .flatten()
         .collect();
     Ok(Json(records))
@@ -1224,6 +1382,10 @@ pub async fn agent_pop_challenge(
 
     let challenge = ajwt_support::random_hex_32();
     let id = ajwt_support::random_challenge_id();
+    // TODO M2-callsite-sweep: handler holds MutexGuard<Connection> for the
+    // surrounding agent lookup; switching to Repo::insert_pop_challenge would
+    // require dropping the guard early. Legacy path wraps DELETE+INSERT in
+    // BEGIN IMMEDIATE so concurrent inserts under SQLite are atomic.
     let exp = ajwt_support::insert_pop_challenge(&db, &id, &payload.agent_id, &challenge, 300)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 

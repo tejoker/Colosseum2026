@@ -23,6 +23,62 @@ interface AnchorStatus {
   last_batch_n_actions: number;
 }
 
+// ADR-001: per-batch three-state surface. Each batch reports both chains
+// independently so the dashboard can render the three honest states instead
+// of a single "anchored" boolean.
+interface AnchorBatch {
+  anchor_id: string;
+  batch_root_hex: string;
+  n_actions: number;
+  created_at: number;
+  btc_anchor_id: string;
+  sol_anchor_id: string;
+  solana: {
+    confirmed: boolean;
+    slot: number | null;
+    sig: string | null;
+  };
+  bitcoin: {
+    provider: string;
+    ots_upgraded: boolean;
+    block_height: number | null;
+  };
+  /** @deprecated kept one minor version for back-compat — see ADR-001 */
+  anchored?: boolean;
+}
+
+// Threshold past which a BTC anchor that has not been OTS-upgraded is treated
+// as "failed — retry queued" instead of merely "pending". OTS calendars usually
+// upgrade within one Bitcoin block (~1h); 6h is a generous slack window.
+const BTC_STALE_FAILED_SECS = 6 * 60 * 60;
+
+type AnchorState =
+  | "pending"
+  | "solana-only-pending"
+  | "solana-only-failed"
+  | "dually-anchored";
+
+function batchState(b: AnchorBatch, nowSec: number): AnchorState {
+  if (!b.solana.confirmed) return "pending";
+  if (b.bitcoin.ots_upgraded) return "dually-anchored";
+  const age = nowSec - b.created_at;
+  if (age >= BTC_STALE_FAILED_SECS) return "solana-only-failed";
+  return "solana-only-pending";
+}
+
+function stateCopy(s: AnchorState): { status: "ok" | "warn" | "err" | "muted"; label: string } {
+  switch (s) {
+    case "pending":
+      return { status: "muted", label: "PENDING" };
+    case "solana-only-pending":
+      return { status: "warn", label: "SOLANA-CONFIRMED · BTC PENDING" };
+    case "solana-only-failed":
+      return { status: "err", label: "SOLANA-CONFIRMED · BTC FAILED · RETRY QUEUED" };
+    case "dually-anchored":
+      return { status: "ok", label: "DUALLY ANCHORED" };
+  }
+}
+
 interface ActionReceipt {
   receipt_id: string;
   action_hash: string;
@@ -43,18 +99,23 @@ function fmtAgo(unixSec: number): string {
 
 export default function AnchorsPage() {
   const [anchor, setAnchor] = useState<AnchorStatus | null>(null);
+  const [batches, setBatches] = useState<AnchorBatch[]>([]);
   const [actions, setActions] = useState<ActionReceipt[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const [a, r] = await Promise.all([
+        const [a, b, r] = await Promise.all([
           sauronFetch<AnchorStatus>("anchor/status"),
+          sauronFetch<AnchorBatch[]>("anchor/batches?limit=30").catch(
+            () => [] as AnchorBatch[],
+          ),
           sauronFetch<ActionReceipt[]>("agent_actions/recent").catch(() => []),
         ]);
         if (cancelled) return;
         setAnchor(a as AnchorStatus);
+        setBatches((b as AnchorBatch[]) ?? []);
         setActions((r as ActionReceipt[]).slice(0, 30));
       } catch {
         if (!cancelled) setAnchor(null);
@@ -82,7 +143,7 @@ export default function AnchorsPage() {
             in parallel.
           </>
         }
-        description="Every batch of agent action receipts is committed to Bitcoin via OpenTimestamps and to Solana via the Memo program. Tampering requires forging both."
+        description="Every batch of agent action receipts is committed to Bitcoin via OpenTimestamps and to Solana via the Memo program. Each batch surfaces three honest states — Pending, Solana-confirmed (BTC pending), Dually anchored — instead of a single 'anchored' summary. Tampering requires forging both chains."
       />
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
@@ -128,6 +189,66 @@ export default function AnchorsPage() {
             blurb="Root posted as a memo transaction on the Memo program; finalised in roughly 30 seconds."
             verifyCmd="solana confirm -v <signature>"
           />
+        </div>
+      </Card>
+
+      {/* ADR-001: per-batch three-state surface */}
+      <Card title="ANCHOR.BATCHES · STATE" hex="0x215">
+        <div className="overflow-x-auto -mx-3">
+          {batches.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-2">
+              <span className="font-mono-label text-[9.5px] text-white/35">EMPTY</span>
+              <p className="text-[12px] text-white/45 max-w-md text-center leading-relaxed">
+                No anchor batches yet. Run{" "}
+                <code className="text-white/75">POST /admin/anchor/agent-actions/run</code> after
+                producing some action receipts.
+              </p>
+            </div>
+          ) : (
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left">
+                  <Th>WHEN</Th>
+                  <Th>BATCH</Th>
+                  <Th>ROOT</Th>
+                  <Th>ACTIONS</Th>
+                  <Th>SOLANA</Th>
+                  <Th>BITCOIN · OTS</Th>
+                  <Th>STATE</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {batches.map((b) => {
+                  const nowSec = Math.floor(Date.now() / 1000);
+                  const s = batchState(b, nowSec);
+                  const pill = stateCopy(s);
+                  return (
+                    <tr key={b.anchor_id} className="border-t border-white/[0.04]">
+                      <Td muted>{fmtAgo(b.created_at)}</Td>
+                      <Td mono>{b.anchor_id.slice(0, 14)}…</Td>
+                      <Td mono dim>{b.batch_root_hex.slice(0, 16)}…</Td>
+                      <Td>{fmtNum(b.n_actions)}</Td>
+                      <Td>
+                        <StatusPill
+                          status={b.solana.confirmed ? "ok" : "muted"}
+                          label={b.solana.confirmed ? "CONFIRMED" : "UNCONFIRMED"}
+                        />
+                      </Td>
+                      <Td>
+                        <StatusPill
+                          status={b.bitcoin.ots_upgraded ? "ok" : "warn"}
+                          label={b.bitcoin.ots_upgraded ? "UPGRADED" : "PENDING"}
+                        />
+                      </Td>
+                      <Td>
+                        <StatusPill status={pill.status} label={pill.label} />
+                      </Td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       </Card>
 

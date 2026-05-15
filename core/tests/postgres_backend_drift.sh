@@ -23,6 +23,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=../../scripts/lib/dev_secrets.sh
+source "${ROOT}/scripts/lib/dev_secrets.sh"
+load_dev_admin_key
 CORE_BIN="$ROOT/core/target/release/sauron-core"
 TEST_DB_NAME="sauronid_drift_test"
 PG_PORT=15432
@@ -81,7 +84,7 @@ fuser -k 3001/tcp 2>/dev/null || true
 sleep 1
 rm -f "$ROOT/core/sauron.db" "$ROOT/core/sauron.db-shm" "$ROOT/core/sauron.db-wal"
 (cd "$ROOT/core" && \
-    SAURON_ADMIN_KEY=super_secret_hackathon_key \
+    SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
     ENV=development \
     SAURON_DB_BACKEND=postgres \
     DATABASE_URL="$DATABASE_URL" \
@@ -97,7 +100,7 @@ bash "$ROOT/core/seed.sh" >/dev/null
 # 4. Use the existing 8-scenario suite to cause an agent registration
 (cd "$ROOT/redteam" && \
     SAURON_CORE_URL=http://127.0.0.1:3001 \
-    SAURON_ADMIN_KEY=super_secret_hackathon_key \
+    SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
     node dist/index.js >/dev/null 2>&1 || true)
 
 # 5. Check the drift
@@ -106,7 +109,7 @@ echo "════════════════════════�
 echo "  Postgres backend drift verification"
 echo "═══════════════════════════════════════════════════════════"
 
-SQLITE_AGENTS=$(curl -sf -H "x-admin-key: super_secret_hackathon_key" \
+SQLITE_AGENTS=$(curl -sf -H "x-admin-key: $SAURON_ADMIN_KEY" \
     http://127.0.0.1:3001/admin/agents | python3 -c 'import sys, json; print(len(json.load(sys.stdin)))')
 PG_AGENTS=$(docker exec -i sauronid_drift_pg psql -U "$PG_USER" -d "$TEST_DB_NAME" \
     -tAc "SELECT COUNT(*) FROM agents;")

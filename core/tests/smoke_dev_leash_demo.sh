@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "${ROOT_DIR}/.." && pwd)"
+# shellcheck source=../../scripts/lib/dev_secrets.sh
+source "${REPO_ROOT}/scripts/lib/dev_secrets.sh"
+load_dev_admin_key
 PORT="${E2E_PORT:-3991}"
 API_URL="${API_URL:-http://127.0.0.1:${PORT}}"
 DB_PATH="${E2E_DB_PATH:-/tmp/sauron-leash-demo-${USER:-user}-$$.db}"
@@ -19,7 +23,7 @@ trap cleanup EXIT
 (cd "${ROOT_DIR}" && cargo build --bins >/dev/null)
 
 ENV=development \
-SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
+SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
 DATABASE_PATH="${DB_PATH}" \
 PORT="${PORT}" \
 "${ROOT_DIR}/target/debug/sauron-core" >"${LOG_PATH}" 2>&1 &
@@ -27,7 +31,7 @@ SERVER_PID="$!"
 
 ready=0
 for _ in $(seq 1 90); do
-  if curl -sf "${API_URL}/admin/stats" -H "x-admin-key: ${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" >/dev/null 2>&1; then
+  if curl -sf "${API_URL}/admin/stats" -H "x-admin-key: ${SAURON_ADMIN_KEY}" >/dev/null 2>&1; then
     ready=1
     break
   fi

@@ -35,9 +35,24 @@ jobs:
   kya-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Per-run dev admin key (set in the first step, propagated to every
+      # subsequent step + docker compose via $GITHUB_ENV).
+      SAURON_ADMIN_KEY: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Generate per-run admin key + issuer seed
+        run: |
+          KEY="$(openssl rand -hex 32)"
+          ISSUER="$(openssl rand -hex 32)"
+          echo "SAURON_ADMIN_KEY=${KEY}" >> "$GITHUB_ENV"
+          # docker compose interpolation needs the value to be present at compose-up time.
+          {
+            echo "SAURON_ADMIN_KEY=${KEY}"
+            echo "ISSUER_SEED=${ISSUER}"
+          } > .env
 
       - name: Show Docker versions
         run: |
@@ -51,7 +66,7 @@ jobs:
       - name: Wait for backend health
         run: |
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:3001/admin/stats -H 'x-admin-key: super_secret_hackathon_key' >/dev/null; then
+            if curl -sf http://localhost:3001/admin/stats -H "x-admin-key: ${SAURON_ADMIN_KEY}" >/dev/null; then
               echo "backend healthy"
               exit 0
             fi
@@ -77,28 +92,24 @@ jobs:
       - name: Run delegated KYA e2e
         env:
           API_URL: http://localhost:3001
-          SAURON_ADMIN_KEY: super_secret_hackathon_key
         run: |
           bash core/tests/e2e_kya_delegated.sh
 
       - name: Run autonomous KYA e2e
         env:
           API_URL: http://localhost:3001
-          SAURON_ADMIN_KEY: super_secret_hackathon_key
         run: |
           bash core/tests/e2e_kya_autonomous.sh
 
       - name: Run A-JWT jti replay e2e
         env:
           API_URL: http://localhost:3001
-          SAURON_ADMIN_KEY: super_secret_hackathon_key
         run: |
           bash core/tests/e2e_ajwt_jti_replay.sh
 
       - name: Run strict agent payment authorization e2e
         env:
           API_URL: http://localhost:3001
-          SAURON_ADMIN_KEY: super_secret_hackathon_key
         run: |
           bash core/tests/e2e_agent_payment_authorize.sh
 
@@ -113,7 +124,6 @@ jobs:
         working-directory: agentic
         env:
           SAURON_CORE_URL: http://localhost:3001
-          SAURON_ADMIN_KEY: super_secret_hackathon_key
         run: |
           npm ci
           npm test
@@ -123,7 +133,6 @@ jobs:
         working-directory: redteam
         env:
           SAURON_CORE_URL: http://localhost:3001
-          SAURON_ADMIN_KEY: super_secret_hackathon_key
         run: |
           npm ci
           npm run redteam

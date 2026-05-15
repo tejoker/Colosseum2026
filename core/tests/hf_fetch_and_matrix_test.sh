@@ -9,7 +9,7 @@ set -euo pipefail
 #
 # Env:
 #   API_URL                  default: http://127.0.0.1:3001
-#   SAURON_ADMIN_KEY         default: super_secret_hackathon_key
+#   SAURON_ADMIN_KEY         required (sourced from .dev-secrets or env)
 #   HF_TOKEN                 optional Hugging Face token (for gated/private repos)
 #   HF_LOCAL_DIR             default: ./.hf-agents
 #   MATRIX_JITTER_MS_MAX     default: 0
@@ -17,12 +17,14 @@ set -euo pipefail
 
 MODEL_ID="${1:-Qwen/Qwen2.5-0.5B-Instruct}"
 API_URL="${API_URL:-http://127.0.0.1:3001}"
-SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
 HF_LOCAL_DIR="${HF_LOCAL_DIR:-./.hf-agents}"
 MATRIX_JITTER_MS_MAX="${MATRIX_JITTER_MS_MAX:-0}"
 MATRIX_FAULT_PROBE_PCT="${MATRIX_FAULT_PROBE_PCT:-0}"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../../scripts/lib/dev_secrets.sh
+source "${ROOT_DIR}/../scripts/lib/dev_secrets.sh"
+require_admin_key
 
 require_cmd() {
   local cmd="$1"

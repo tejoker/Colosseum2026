@@ -21,7 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 prometheus = { version = "0.13", default-features = false }
 once_cell = "1.19"
 bs58 = "0.5"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "macros"] }
+sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
@@ -31,3 +31,17 @@ subtle = "2.6"
 jsonwebtoken = "9.3"
 base64 = "0.22"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+# TPM2 attestation M2 dependencies. Pure-Rust crates — kept unconditional so
+# `cargo check` (no features) still type-checks the verifier. The `tpm2` feature
+# remains a marker for future client-side TPM helpers (tss-esapi etc.) that
+# pull system libs.
+ring = "0.17"
+webpki = { version = "0.22", features = ["std"] }
+pem = "3"
+
+[features]
+# Hardware-attestation features. M1 ships parsing skeletons only; full TPM2
+# verification (cert-chain walker, vendor roots) is M2 and will hide its
+# system-library deps (tss-esapi → libtss2-esys) behind this feature flag.
+default = []
+tpm2 = []

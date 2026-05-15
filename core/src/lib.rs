@@ -9,6 +9,7 @@ pub mod bitcoin_anchor;
 pub mod compliance;
 pub mod compliance_screening;
 pub mod db;
+pub mod error;
 pub mod feature_flags;
 pub mod identity;
 pub mod issuer_runtime;

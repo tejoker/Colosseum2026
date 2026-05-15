@@ -2,10 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../../scripts/lib/dev_secrets.sh
+source "${ROOT_DIR}/../scripts/lib/dev_secrets.sh"
+load_dev_admin_key
 PORT="${E2E_PORT:-3311}"
 API_URL="${API_URL:-http://127.0.0.1:${PORT}}"
 E2E_ISSUER_URL="${E2E_ISSUER_URL:-http://127.0.0.1:4000}"
-ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
+ADMIN_KEY="$SAURON_ADMIN_KEY"
 DB_PATH="${E2E_DB_PATH:-/tmp/sauron-ring-restore-${USER:-user}-$$.db}"
 LOG_PATH="${E2E_LOG_PATH:-/tmp/sauron-ring-restore-${USER:-user}-$$.log}"
 BANK_SITE="${E2E_BANK_SITE:-RestartBank}"

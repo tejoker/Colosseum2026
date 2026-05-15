@@ -1,0 +1,26 @@
+{
+  "target": "http-sig",
+  "conc": 10,
+  "n": 1000,
+  "warmup": 100,
+  "p50_ms": 7,
+  "p95_ms": 10,
+  "p99_ms": 12,
+  "avg_ms": 7.541,
+  "rps": 1074.1138560687432,
+  "errors": 0,
+  "rejected": 0,
+  "integration_loc": {
+    "client": 22,
+    "server": 60,
+    "total": 82
+  },
+  "host": {
+    "cpu_model": "AMD Ryzen 7 7735HS with Radeon Graphics",
+    "cpu_count": 14,
+    "ram_gb": 14,
+    "node": "20.20.0",
+    "platform": "linux 6.6.114.1-microsoft-standard-WSL2"
+  },
+  "generated_at": "2026-05-15T17:02:31.506Z"
+}

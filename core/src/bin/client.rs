@@ -1,5 +1,7 @@
 use curve25519_dalek::ristretto::CompressedRistretto;
+use rand::rngs::OsRng;
 use rand::Rng;
+use rand::RngCore;
 /// Client CLI pour Sauron — 3 flux + ZKP
 ///
 /// Commands:
@@ -13,7 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 const SERVER: &str = "http://localhost:3001";
-const ADMIN_KEY: &str = "super_secret_hackathon_key";
+
+fn admin_key() -> String {
+    std::env::var("SAURON_ADMIN_KEY")
+        .expect("SAURON_ADMIN_KEY env var required")
+}
 
 // ─── OPRF ───────────────────────────────────────────
 
@@ -51,6 +57,7 @@ async fn derive_identity(client: &reqwest::Client, email: &str, password: &str) 
 }
 
 fn random_idx(len: usize) -> usize {
+    // non-crypto use: pick random issuer index from public list for ring signature decoy
     rand::thread_rng().gen_range(0..len)
 }
 
@@ -110,7 +117,8 @@ async fn cmd_register(args: &[String]) {
     let ki_bytes = identity.key_image().compress().as_bytes().to_vec();
     let profile = UserData::new(first_name, last_name, email);
 
-    let random_bytes: [u8; 32] = rand::thread_rng().gen();
+    let mut random_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut random_bytes);
     let blinded_token_a = hex::encode(random_bytes);
     let hex_pk = hex::encode(&pk_bytes);
     let msg = format!("{}:{}", hex_pk, blinded_token_a);
@@ -192,7 +200,7 @@ async fn cmd_exchange(args: &[String]) {
     let client = reqwest::Client::new();
     let stats: serde_json::Value = client
         .get(format!("{}/admin/stats", SERVER))
-        .header("x-admin-key", ADMIN_KEY)
+        .header("x-admin-key", admin_key())
         .send()
         .await
         .unwrap()
@@ -208,7 +216,8 @@ async fn cmd_exchange(args: &[String]) {
 
     let blinded_tokens_b: Vec<String> = (0..b_count)
         .map(|_| {
-            let b: [u8; 32] = rand::thread_rng().gen();
+            let mut b = [0u8; 32];
+            OsRng.fill_bytes(&mut b);
             hex::encode(b)
         })
         .collect();
@@ -301,7 +310,7 @@ async fn cmd_balance() {
     let client = reqwest::Client::new();
     let resp: serde_json::Value = client
         .get(format!("{}/admin/stats", SERVER))
-        .header("x-admin-key", ADMIN_KEY)
+        .header("x-admin-key", admin_key())
         .send()
         .await
         .unwrap()

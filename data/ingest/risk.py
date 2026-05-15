@@ -11,7 +11,8 @@ Per-company risk engine combining:
 All state is in-memory (deque per company/user). Thread-safe for single
 asyncio worker; no locking needed inside run_in_executor calls since each
 call is sequential in the thread pool (maxWorkers=1 default or the caller
-ensures one at a time per company — good enough for hackathon scale).
+ensures one at a time per company — good enough for dev/small-tenant scale;
+production multi-tenant deployments should swap this for a Redis-backed counter).
 """
 
 import datetime

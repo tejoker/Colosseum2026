@@ -1,7 +1,7 @@
 use axum::{
     body::{to_bytes, Body},
-    extract::{Extension, Json, Path, Request, State},
-    http::{HeaderMap, StatusCode},
+    extract::{DefaultBodyLimit, Extension, Json, Path, Request, State},
+    http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderMap, HeaderName, Method, StatusCode},
     middleware,
     routing::{delete, get, post},
     Router,
@@ -231,21 +231,37 @@ async fn main() {
         sauron_core::solana_anchor::spawn_solana_confirmer(Arc::clone(&db_arc), rpc_url);
     }
 
-    let app = Router::new()
+    // Dev-only endpoints. Disabled in prod. Set SAURON_ENABLE_DEV_ENDPOINTS=1 to enable.
+    let enable_dev_endpoints = std::env::var("SAURON_ENABLE_DEV_ENDPOINTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false);
+
+    let mut app = Router::new()
         // OPRF
         .route("/oprf", post(handle_oprf))
         // Flux 1: dépôt KYC
-        .route("/register", post(handle_register))
-        .route("/dev/register_user", post(dev_register_user))
-        .route("/dev/buy_tokens", post(dev_buy_tokens))
-        .route("/dev/leash/demo", post(dev_leash_demo))
-        .route("/dev/consent_profile", post(dev_consent_profile))
+        .route("/register", post(handle_register));
+
+    if enable_dev_endpoints {
+        app = app
+            .route("/dev/register_user", post(dev_register_user))
+            .route("/dev/buy_tokens", post(dev_buy_tokens))
+            .route("/dev/leash/demo", post(dev_leash_demo))
+            .route("/dev/consent_profile", post(dev_consent_profile));
+    }
+
+    let app = app
         .route("/bank/register", post(bank_register_user))
         .route("/register/bank", post(bank_register_user))
         // ZKP
         .route("/zkp/proof_material", post(handle_zkp_proof_material))
         // A-JWT Agentic Layer
-        .route("/agent/register", post(agent::register_agent))
+        // H1: PEM cert chains (TPM2 EK + attestation) can exceed the global
+        // 64KB body cap. Lift only this route to 1MB.
+        .route(
+            "/agent/register",
+            post(agent::register_agent).route_layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .route("/agent/token", post(agent::issue_agent_token))
         .route("/agent/verify", post(agent::verify_agent_token))
         .route("/agent/pop/challenge", post(agent::agent_pop_challenge))
@@ -353,6 +369,11 @@ async fn main() {
                 .on_request(DefaultOnRequest::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
+        // H1: global 64KB request-body cap. Per-route overrides (e.g. /agent/register
+        // for PEM cert chains) are applied via .route_layer(DefaultBodyLimit::max(...))
+        // on the individual route. tower body-limit short-circuits before the
+        // route handler reads the body.
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .layer({
             let allowed_origins: Vec<axum::http::HeaderValue> =
                 std::env::var("SAURON_ALLOWED_ORIGINS")
@@ -367,10 +388,35 @@ async fn main() {
                      Refusing to start with permissive CORS."
                 );
             } else {
+                // M3: explicit allow-lists for methods + headers. Browser preflight
+                // (OPTIONS) inspects Access-Control-Allow-{Methods,Headers}; with
+                // `Any` any custom header would pass which widens the abuse surface
+                // for cross-origin POSTs. Lock to the verbs + headers actually used
+                // by /agent/* + /admin/* + dashboard.
+                let allowed_headers: Vec<HeaderName> = vec![
+                    CONTENT_TYPE,
+                    AUTHORIZATION,
+                    // SauronID session/admin
+                    HeaderName::from_static("x-sauron-session"),
+                    HeaderName::from_static("x-admin-key"),
+                    // Per-call signature (call-sig middleware)
+                    HeaderName::from_static("x-sauron-agent-id"),
+                    HeaderName::from_static("x-sauron-call-ts"),
+                    HeaderName::from_static("x-sauron-call-nonce"),
+                    HeaderName::from_static("x-sauron-call-sig"),
+                    HeaderName::from_static("x-sauron-agent-config-digest"),
+                    // Issuer-side enrollment
+                    HeaderName::from_static("x-sauron-issuer-key"),
+                ];
                 CorsLayer::new()
                     .allow_origin(allowed_origins)
-                    .allow_methods(tower_http::cors::Any)
-                    .allow_headers(tower_http::cors::Any)
+                    .allow_methods([
+                        Method::GET,
+                        Method::POST,
+                        Method::DELETE,
+                        Method::OPTIONS,
+                    ])
+                    .allow_headers(allowed_headers)
             }
         })
         .with_state(state);
@@ -645,6 +691,30 @@ async fn bank_register_user(
         .unwrap()
         .as_secs() as i64;
     let nationality = payload.nationality.to_uppercase();
+
+    // M2 port: consume the bank attestation nonce via the dual-backend repo
+    // helper BEFORE we acquire the SQLite MutexGuard. Drops the guard across
+    // the await; the legacy path inside Repo::Sqlite still wraps the INSERT
+    // in BEGIN IMMEDIATE for parity with Postgres serialisable isolation.
+    {
+        let repo = {
+            let st = state.read().unwrap();
+            st.repo.clone()
+        };
+        repo.consume_bank_attestation_nonce(
+            &payload.bank_client_name,
+            &payload.attestation_nonce,
+            payload.attestation_issued_at,
+        )
+        .await
+        .map_err(|e| match e {
+            sauron_core::repository::RepoError::Replay(s) => (StatusCode::CONFLICT, s),
+            sauron_core::repository::RepoError::Backend(s) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, s)
+            }
+        })?;
+    }
+
     let user_preexisting = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
@@ -657,19 +727,6 @@ async fn bank_register_user(
             )
             .unwrap_or(0)
             > 0;
-
-        // Atomic INSERT: PRIMARY KEY (provider_id, nonce) enforces uniqueness without a prior SELECT.
-        db.execute(
-            "INSERT INTO bank_attestation_nonces (provider_id, nonce, issued_at) VALUES (?1, ?2, ?3)",
-            params![payload.bank_client_name, payload.attestation_nonce, payload.attestation_issued_at],
-        )
-        .map_err(|e| {
-            if e.to_string().contains("UNIQUE") || e.to_string().contains("PRIMARY KEY") {
-                (StatusCode::CONFLICT, "Replay detected for bank attestation nonce".into())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })?;
 
         db.execute(
             "INSERT INTO users (key_image_hex, public_key_hex, first_name, last_name, email, date_of_birth, nationality)
@@ -916,8 +973,9 @@ async fn handle_register(
 }
 
 // ─────────────────────────────────────────────────────
-//  DEV ENDPOINTS — hackathon only, exposes server crypto
-//  so the frontend doesn't need to implement Ristretto255
+//  Dev-only endpoints. Disabled in prod. Set SAURON_ENABLE_DEV_ENDPOINTS=1 to enable.
+//  Exposes server-side OPRF evaluation so the frontend
+//  doesn't need to implement Ristretto255.
 // ─────────────────────────────────────────────────────
 
 /// Recalcule le résultat OPRF sans le protocole blind.
@@ -2033,16 +2091,19 @@ async fn kyc_request(
     let expires_at = ts + 600; // 10 minutes
 
     // Store pending consent request in canonical consent_log (user_key_image stays empty until consent).
+    // M2 port: pending INSERT goes through Repo::insert_pending_consent so the
+    // Postgres backend handles it natively. requests_log audit insert stays in
+    // the SQLite-only path (it is a fire-and-forget audit trail).
     {
+        let repo = {
+            let st = state.read().unwrap();
+            st.repo.clone()
+        };
+        repo.insert_pending_consent(&request_id, &payload.site_name, &claims_json)
+            .await
+            .map_err(|e| (StatusCode::CONFLICT, format!("Unable to create consent request: {e}")))?;
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
-        db.execute(
-            "INSERT INTO consent_log (request_id, user_key_image, site_name, requested_claims_json, granted_at, token_used, revoked)
-             VALUES (?1, '', ?2, ?3, 0, 0, 0)",
-            params![request_id, payload.site_name, claims_json],
-        )
-        .map_err(|e| (StatusCode::CONFLICT, format!("Unable to create consent request: {e}")))?;
-
         let _ = db.execute(
             "INSERT INTO requests_log (timestamp, action_type, status, detail) VALUES (?1,'KYC_REQUEST','PENDING',?2)",
             params![ts, format!("site={} request_id={}", payload.site_name, request_id)],
@@ -2255,60 +2316,30 @@ async fn kyc_retrieve(
         .unwrap()
         .as_secs() as i64;
 
-    // Atomic claim: mark token consumed before any processing to prevent TOCTOU replay.
-    // Only succeeds if token exists, not used, not revoked, and not expired.
-    let (user_ki, stored_site, issuing_agent_id, requested_claims_json) = {
+    // M2 port: atomic consent-token consume via the dual-backend repo helper.
+    // SQLite path wraps in BEGIN IMMEDIATE; Postgres path uses serialisable
+    // isolation with FOR UPDATE + UPDATE … RETURNING. Replay/expired/revoked
+    // map to RepoError::Replay, surfaced here as 401/409.
+    let repo = {
         let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-
-        let rows = db
-            .execute(
-                "UPDATE consent_log SET token_used = 1 \
-             WHERE consent_token = ?1 AND token_used = 0 AND revoked = 0 \
-             AND (consent_expires_at = 0 OR consent_expires_at > ?2)",
-                params![payload.consent_token, now],
-            )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if rows == 0 {
-            let status = db.query_row(
-                "SELECT token_used, revoked, consent_expires_at FROM consent_log WHERE consent_token = ?1",
-                params![payload.consent_token],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
-            );
-            return Err(match status {
-                Ok((_, 1, _)) => (StatusCode::UNAUTHORIZED, "Consent token revoked".into()),
-                Ok((1, _, _)) => (StatusCode::CONFLICT, "Consent token already used".into()),
-                Ok((_, _, exp)) if exp > 0 && now > exp => {
-                    (StatusCode::UNAUTHORIZED, "Consent token expired".into())
-                }
-                _ => (
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid or expired consent token".into(),
-                ),
-            });
-        }
-
-        db.query_row(
-            "SELECT user_key_image, site_name, issuing_agent_id, requested_claims_json \
-             FROM consent_log WHERE consent_token = ?1",
-            params![payload.consent_token],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            },
-        )
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                "Invalid or expired consent token".into(),
-            )
-        })?
+        st.repo.clone()
     };
+    let (user_ki, stored_site, issuing_agent_id, requested_claims_json) = repo
+        .consume_consent_token(&payload.consent_token, now)
+        .await
+        .map_err(|e| match e {
+            sauron_core::repository::RepoError::Replay(s) => {
+                let code = if s.contains("already used") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                (code, s)
+            }
+            sauron_core::repository::RepoError::Backend(s) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, s)
+            }
+        })?;
 
     if stored_site != payload.site_name {
         return Err((
@@ -3367,6 +3398,9 @@ async fn agent_payment_authorize(
                 "Payment authorization requires pop_challenge_id and pop_jws from /agent/pop/challenge".into(),
             ));
         }
+        // TODO M2-callsite-sweep: sync take_pop_challenge inside a held
+        // MutexGuard; Repo::take_pop_challenge exists for the post-sweep
+        // async port. SELECT+DELETE is wrapped in BEGIN IMMEDIATE today.
         let challenge_plain = sauron_core::ajwt_support::take_pop_challenge(
             &db,
             &payload.pop_challenge_id,
@@ -3422,26 +3456,30 @@ async fn agent_payment_authorize(
 
     let auth_id = format!("payauth_{}", sauron_core::ajwt_support::random_hex_32());
     let expires_at = std::cmp::min(exp, now + 300);
+    // M2 port: insert payment authorization via dual-backend repo helper.
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.execute(
-            "INSERT INTO agent_payment_authorizations
-             (auth_id, agent_id, jti, amount_minor, currency, merchant_id, payment_ref, created_at, expires_at, consumed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
-            params![
-                auth_id,
-                agent_id,
-                jti,
-                payload.amount_minor,
-                currency,
-                merchant_id,
-                payment_ref,
-                now,
-                expires_at,
-            ],
+        let repo = {
+            let st = state.read().unwrap();
+            st.repo.clone()
+        };
+        repo.insert_payment_authorization(
+            &auth_id,
+            &agent_id,
+            &jti,
+            payload.amount_minor,
+            &currency,
+            &merchant_id,
+            &payment_ref,
+            now,
+            expires_at,
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        .await
+        .map_err(|e| match e {
+            sauron_core::repository::RepoError::Replay(s) => (StatusCode::CONFLICT, s),
+            sauron_core::repository::RepoError::Backend(s) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {s}"))
+            }
+        })?;
     }
 
     let issuer_snap = {
@@ -3652,22 +3690,22 @@ async fn merchant_payment_consume(
             .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
     }
 
+    // M2 port: atomic consume of the single-use payment authorization via
+    // the dual-backend repo helper. Postgres uses FOR UPDATE + UPDATE …
+    // RETURNING under SERIALIZABLE; SQLite uses BEGIN IMMEDIATE.
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        let rows = db
-            .execute(
-                "UPDATE agent_payment_authorizations SET consumed = 1 \
-             WHERE auth_id = ?1 AND consumed = 0 AND expires_at > ?2",
-                params![authorization_id, now_i64],
-            )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        if rows == 0 {
-            return Err((
-                StatusCode::CONFLICT,
-                "Authorization already consumed or expired".into(),
-            ));
-        }
+        let repo = {
+            let st = state.read().unwrap();
+            st.repo.clone()
+        };
+        repo.consume_payment_authorization(&authorization_id, now_i64)
+            .await
+            .map_err(|e| match e {
+                sauron_core::repository::RepoError::Replay(s) => (StatusCode::CONFLICT, s),
+                sauron_core::repository::RepoError::Backend(s) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {s}"))
+                }
+            })?;
     }
 
     // Update payment SMT: set key(agent_id, current window) = 1.
@@ -4041,6 +4079,10 @@ async fn user_get_credential(
     ))?;
 
     // Look up pre-auth code (no claimed flag yet — we'll claim atomically below)
+    // TODO M2-callsite-sweep: SELECT-only paths — Repo::select_credential_code
+    // / Repo::select_user_credential exist for the Postgres backend; keeping
+    // the sync SQLite reads here for backwards compatibility until the
+    // handler is refactored to be uniformly async.
     let (pre_auth_code, subject_did) = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
@@ -4068,16 +4110,17 @@ async fn user_get_credential(
         }
     }
 
-    // Atomic claim: only the request that flips claimed 0→1 is allowed to call the issuer.
-    // Prevents two concurrent requests from double-minting the credential.
+    // M3 port: atomic credential-code claim via dual-backend repo helper.
+    // Same TOCTOU pattern as payment_auth: conditional UPDATE under
+    // serialisable isolation, RETURNING confirms the flip.
     let claimed_now = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        let rows = db.execute(
-            "UPDATE credential_codes SET claimed = 1 WHERE key_image_hex = ?1 AND claimed = 0",
-            params![key_image],
-        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        rows == 1
+        let repo = {
+            let st = state.read().unwrap();
+            st.repo.clone()
+        };
+        repo.claim_credential_code(&key_image)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
 
     if !claimed_now {
@@ -4102,6 +4145,12 @@ async fn user_get_credential(
     }
 
     // We won the race — release the claim on any failure path so the user can retry.
+    // TODO M2-callsite-sweep: the sync release_claim closure is called from
+    // multiple await branches below; converting to async would require closure
+    // capture restructuring. The single-statement UPDATE is intrinsically
+    // atomic on SQLite (no TOCTOU window) — leave on legacy path until M5
+    // rewrites the function shape. Repo::release_credential_code exists for
+    // future Postgres routing.
     let release_claim = || {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
@@ -4419,6 +4468,8 @@ async fn agent_kyc_consent(
                     .into(),
             ));
         }
+        // TODO M2-callsite-sweep: same pattern as the /agent/payment/authorize
+        // site — sync take_pop_challenge under MutexGuard. Repo helper exists.
         let challenge_plain = sauron_core::ajwt_support::take_pop_challenge(
             &db,
             &payload.pop_challenge_id,

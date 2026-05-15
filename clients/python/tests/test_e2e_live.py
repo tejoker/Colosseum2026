@@ -63,7 +63,11 @@ def test_register_signed_agent_and_call_round_trip():
     """Full flow: user_auth → register_llm_agent → agent.call() succeeds."""
     from sauronid_client import SauronIDClient, register_llm_agent
 
-    admin_key = os.getenv("SAURON_ADMIN_KEY", "super_secret_hackathon_key")
+    admin_key = os.environ.get("SAURON_ADMIN_KEY")
+    if not admin_key:
+        import pytest
+
+        pytest.skip("SAURON_ADMIN_KEY not set — export it or source .dev-secrets")
     client = SauronIDClient(base_url=CORE_URL, admin_key=admin_key)
 
     # The seed script creates alice@sauron.dev

@@ -1,0 +1,56 @@
+name: Dependency Audit
+
+# Run on every push + PR + weekly cron so a freshly published advisory still
+# fails the build even with no code change.
+on:
+  push:
+    branches: [main, pocv1]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+jobs:
+  cargo-audit:
+    name: cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + advisory-db
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/advisory-db
+          key: cargo-audit-${{ runner.os }}-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            cargo-audit-${{ runner.os }}-
+
+      # actions-rs/audit-check expects a top-level Cargo.lock; ours lives in
+      # core/. Symlink it so the action picks up the workspace lockfile.
+      - name: Link core/Cargo.lock to repo root
+        run: ln -sf core/Cargo.lock Cargo.lock
+
+      - name: cargo audit
+        uses: actions-rs/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: cargo deny (bans / licenses / sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo-deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: core/Cargo.toml
+          command: check
+          arguments: --all-features
+          log-level: warn

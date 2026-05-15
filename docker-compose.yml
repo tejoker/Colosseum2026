@@ -15,8 +15,8 @@ services:
       - SAURON_ACCEPT_SINGLE_NODE_SQLITE=${SAURON_ACCEPT_SINGLE_NODE_SQLITE:-1}
       - SAURON_ISSUER_URL=${SAURON_ISSUER_URL:-http://zkp-issuer:4000}
       - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}
-      # Development default only; production requires >=32-byte keys (see admin::init_admin_auth).
-      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:-super_secret_hackathon_key}
+      # Required. Production requires >=32-byte keys; see admin::init_admin_auth.
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
     healthcheck:
       test: [ "CMD-SHELL", "curl -sf http://localhost:3001/admin/stats -H \"x-admin-key: $$SAURON_ADMIN_KEY\" || exit 1" ]
       interval: 3s
@@ -33,7 +33,7 @@ services:
         condition: service_healthy
     environment:
       - SAURON_URL=http://backend:3001
-      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:-super_secret_hackathon_key}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
     volumes:
       - ./data:/app/data:ro
     entrypoint: [ "bash", "seed.sh" ]
@@ -55,7 +55,7 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=http://backend:3001
       - SAURON_CORE_INTERNAL_URL=http://backend:3001
-      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:-super_secret_hackathon_key}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
       - TRUSTAI_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1
     restart: unless-stopped
 
@@ -78,7 +78,7 @@ services:
       - NEXT_PUBLIC_API_URL=http://backend:3001
       - NEXT_PUBLIC_DASH_API_URL=http://sauron-analytics-api:8002
       - SAURON_CORE_INTERNAL_URL=http://backend:3001
-      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:-super_secret_hackathon_key}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
       - TRUSTAI_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1
     restart: unless-stopped
 
@@ -90,7 +90,7 @@ services:
       - "8002:8002"
     environment:
       - SAURON_URL=http://backend:3001
-      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:-super_secret_hackathon_key}
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
       - DATA_DIR=/app/data
     depends_on:
       backend:
@@ -106,7 +106,7 @@ services:
     environment:
       - PORT=4000
       - ISSUER_DID=did:sauron:issuer:1
-      - ISSUER_SEED=sauronid-issuer-seed-hackathon
+      - ISSUER_SEED=${ISSUER_SEED:?ISSUER_SEED is required — set to a long random string in your .env file.}
       - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}
     depends_on:
       backend:

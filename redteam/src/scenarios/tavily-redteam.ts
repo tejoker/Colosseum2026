@@ -32,7 +32,7 @@
  *
  *   SAURON_REQUIRE_CALL_SIG=1 \
  *     SAURON_CORE_URL=http://127.0.0.1:3001 \
- *     SAURON_ADMIN_KEY=super_secret_hackathon_key \
+ *     SAURON_ADMIN_KEY="$(cat .dev-secrets | awk -F= '/SAURON_ADMIN_KEY/{print $2}')" \
  *     [TAVILY_API_KEY=tvly-...] \
  *     node dist/scenarios/tavily-redteam.js
  *
@@ -59,7 +59,13 @@ interface AttackAttempt {
 }
 
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
-const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
+if (!process.env.SAURON_ADMIN_KEY) {
+    throw new Error(
+        "SAURON_ADMIN_KEY is required for the Tavily red-team. " +
+        "Export it (or source .dev-secrets at the repo root) before running."
+    );
+}
+const adminKey: string = process.env.SAURON_ADMIN_KEY;
 const tavilyKey = process.env.TAVILY_API_KEY;
 
 function adminHeaders(): Record<string, string> {
@@ -391,7 +397,7 @@ async function runRedTeam(): Promise<AttackAttempt[]> {
         async () =>
             rawCall("/admin/stats", {
                 method: "GET",
-                headers: { "x-admin-key": "wrong\r\nx-admin-key: super_secret_hackathon_key" },
+                headers: { "x-admin-key": "wrong\r\nx-admin-key: attacker-guessed-key" },
             })
     );
 

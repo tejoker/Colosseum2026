@@ -39,6 +39,21 @@ use crate::state::ServerState;
 
 const DEFAULT_INTERVAL_SECS: u64 = 600;
 
+/// Hard cap on receipts pulled into memory per anchor batch.
+///
+/// Without this cap, a single anchor pass on a backlog of N receipts allocates
+/// `Vec<(String, String, i64)>` of length N plus a `Vec<[u8; 32]>` of leaves plus
+/// the full rs_merkle tree (~2N internal nodes). At 1M receipts that is on the
+/// order of hundreds of MB transient RSS — a runaway producer (or a malicious
+/// operator generating receipts directly in SQLite) would OOM the box.
+///
+/// 10_000 receipts/batch keeps each pass under ~5 MB and is well above the
+/// expected production producer rate (a 10-minute interval at 10k receipts
+/// equals ~16 receipts/sec sustained, two orders of magnitude over any real
+/// agent workload). When the backlog exceeds the cap, the leftover receipts
+/// are picked up by the next ticker tick — no data is dropped.
+const MAX_RECEIPTS_PER_BATCH: usize = 10_000;
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -90,17 +105,21 @@ pub async fn anchor_pending_actions(
                 "SELECT receipt_id, action_hash, created_at
                  FROM agent_action_receipts
                  WHERE created_at > ?1 OR (created_at = ?1 AND receipt_id > ?2)
-                 ORDER BY created_at ASC, receipt_id ASC",
+                 ORDER BY created_at ASC, receipt_id ASC
+                 LIMIT ?3",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![last_to, last_receipt_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })
+            .query_map(
+                params![last_to, last_receipt_id, MAX_RECEIPTS_PER_BATCH as i64],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
             .map_err(|e| e.to_string())?;
         rows.flatten().collect()
     };
@@ -269,11 +288,11 @@ pub fn proof_for_receipt(
         }
     };
 
-    let batch: Option<(String, String, i64, i64, String, String)> = {
+    let batch: Option<(String, String, i64, i64, String, String, String, String)> = {
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT anchor_id, batch_root_hex, from_created_at, to_created_at, btc_anchor_id, sol_anchor_id
+            "SELECT anchor_id, batch_root_hex, from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, from_receipt_id, to_receipt_id
              FROM agent_action_anchors
              WHERE from_created_at <= ?1 AND to_created_at >= ?1
              ORDER BY created_at ASC LIMIT 1",
@@ -285,17 +304,75 @@ pub fn proof_for_receipt(
                 r.get::<_, i64>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
             )),
         )
         .ok()
     };
 
-    let (anchor_id, batch_root_hex, from_ts, to_ts, btc, sol) = match batch {
+    let (anchor_id, batch_root_hex, from_ts, to_ts, btc, sol, from_rid, to_rid) = match batch {
         Some(b) => b,
         None => return Ok(None),
     };
 
+    // 1b. Resolve the per-chain three-state surface (ADR-001).
+    // `solana.confirmed` = solana_merkle_anchors.confirmed == 1
+    // `bitcoin.ots_upgraded` = bitcoin_merkle_anchors.ots_upgraded == 1
+    // Both default to null/false when the local anchor row is missing
+    // (e.g. the provider was disabled at batch time).
+    let (sol_confirmed, sol_slot, sol_sig) = if sol.is_empty() {
+        (false, None::<i64>, None::<String>)
+    } else {
+        let st = state.read().unwrap();
+        let conn = st.db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT confirmed, slot, signature FROM solana_merkle_anchors WHERE anchor_id = ?1",
+            params![sol],
+            |r| Ok((
+                r.get::<_, i64>(0)? == 1,
+                Some(r.get::<_, i64>(1)?),
+                Some(r.get::<_, String>(2)?),
+            )),
+        )
+        .unwrap_or((false, None, None))
+    };
+    let (btc_ots_upgraded, btc_provider) = if btc.is_empty() {
+        (false, "opentimestamps".to_string())
+    } else {
+        let st = state.read().unwrap();
+        let conn = st.db.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors WHERE anchor_id = ?1",
+            params![btc],
+            |r| Ok((
+                r.get::<_, i64>(0)? == 1,
+                r.get::<_, String>(1)?,
+            )),
+        )
+        .unwrap_or((false, "opentimestamps".to_string()))
+    };
+
+    // Deprecated: keep one minor version for clients still reading a single
+    // bool. Compute as (solana.confirmed && bitcoin.ots_upgraded), or just
+    // solana.confirmed when bitcoin is disabled. See ADR-001.
+    #[allow(deprecated)]
+    let anchored_legacy: bool = if btc.is_empty() {
+        sol_confirmed
+    } else {
+        sol_confirmed && btc_ots_upgraded
+    };
+
     // 2. Re-fetch the same ordered receipt set, build the same tree, ask for the proof.
+    //
+    // Use the exact tuple-ordered range stored in agent_action_anchors:
+    //   (from_created_at, from_receipt_id) <= (created_at, receipt_id) <= (to_created_at, to_receipt_id)
+    //
+    // The plain `created_at BETWEEN from_ts AND to_ts` filter is insufficient
+    // when receipts share a timestamp at the batch boundary — it would pull in
+    // receipts that the anchor batch didn't actually include, producing a
+    // wrong merkle root. Tuple-ordered bounds make the rebuild identical to
+    // the original ordered LIMIT-capped batch.
     let receipts: Vec<(String, String, i64)> = {
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
@@ -303,12 +380,13 @@ pub fn proof_for_receipt(
             .prepare(
                 "SELECT receipt_id, action_hash, created_at
                  FROM agent_action_receipts
-                 WHERE created_at >= ?1 AND created_at <= ?2
+                 WHERE (created_at > ?1 OR (created_at = ?1 AND receipt_id >= ?2))
+                   AND (created_at < ?3 OR (created_at = ?3 AND receipt_id <= ?4))
                  ORDER BY created_at ASC, receipt_id ASC",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![from_ts, to_ts], |r| {
+            .query_map(params![from_ts, from_rid, to_ts, to_rid], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -345,7 +423,126 @@ pub fn proof_for_receipt(
         "tree_size": leaves.len(),
         "btc_anchor_id": btc,
         "sol_anchor_id": sol,
+        // ADR-001: three-state surface. `anchored` retained for one minor
+        // version as a backwards-compat field; new callers should branch on
+        // (solana.confirmed, bitcoin.ots_upgraded).
+        "solana": {
+            "confirmed": sol_confirmed,
+            "slot": sol_slot,
+            "sig": sol_sig,
+        },
+        "bitcoin": {
+            "provider": btc_provider,
+            "ots_upgraded": btc_ots_upgraded,
+            "block_height": serde_json::Value::Null,
+        },
+        "anchored": anchored_legacy,
     })))
+}
+
+/// List the most recent anchor batches with their per-chain three-state
+/// surface (ADR-001). Used by the dashboard /anchors page to render the
+/// three distinct states:
+///   - "Pending"                              (!solana.confirmed)
+///   - "Solana-confirmed (BTC pending)"       (solana.confirmed && !bitcoin.ots_upgraded)
+///   - "Dually anchored"                      (solana.confirmed && bitcoin.ots_upgraded)
+///
+/// Returns at most `limit` rows ordered by created_at DESC.
+pub fn recent_batches(
+    state: &Arc<RwLock<ServerState>>,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let st = state.read().unwrap();
+    let conn = st.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT anchor_id, batch_root_hex, n_actions, btc_anchor_id, sol_anchor_id, created_at
+             FROM agent_action_anchors
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![limit], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let batches: Vec<(String, String, i64, String, String, i64)> = rows.flatten().collect();
+    drop(stmt);
+    drop(conn);
+    drop(st);
+
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(batches.len());
+    for (anchor_id, batch_root_hex, n_actions, btc, sol, created_at) in batches {
+        let (sol_confirmed, sol_slot, sol_sig) = if sol.is_empty() {
+            (false, None::<i64>, None::<String>)
+        } else {
+            let st = state.read().unwrap();
+            let conn = st.db.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT confirmed, slot, signature FROM solana_merkle_anchors WHERE anchor_id = ?1",
+                params![sol],
+                |r| Ok((
+                    r.get::<_, i64>(0)? == 1,
+                    Some(r.get::<_, i64>(1)?),
+                    Some(r.get::<_, String>(2)?),
+                )),
+            )
+            .unwrap_or((false, None, None))
+        };
+        let (btc_ots_upgraded, btc_provider) = if btc.is_empty() {
+            (false, "opentimestamps".to_string())
+        } else {
+            let st = state.read().unwrap();
+            let conn = st.db.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors WHERE anchor_id = ?1",
+                params![btc],
+                |r| Ok((
+                    r.get::<_, i64>(0)? == 1,
+                    r.get::<_, String>(1)?,
+                )),
+            )
+            .unwrap_or((false, "opentimestamps".to_string()))
+        };
+
+        // Deprecated: see ADR-001 / proof_for_receipt.
+        let anchored_legacy: bool = if btc.is_empty() {
+            sol_confirmed
+        } else {
+            sol_confirmed && btc_ots_upgraded
+        };
+
+        out.push(serde_json::json!({
+            "anchor_id": anchor_id,
+            "batch_root_hex": batch_root_hex,
+            "n_actions": n_actions,
+            "created_at": created_at,
+            "btc_anchor_id": btc,
+            "sol_anchor_id": sol,
+            "solana": {
+                "confirmed": sol_confirmed,
+                "slot": sol_slot,
+                "sig": sol_sig,
+            },
+            "bitcoin": {
+                "provider": btc_provider,
+                "ots_upgraded": btc_ots_upgraded,
+                "block_height": serde_json::Value::Null,
+            },
+            // Deprecated: kept one minor version for clients still reading a
+            // single bool. New callers should branch on the three states.
+            "anchored": anchored_legacy,
+        }));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

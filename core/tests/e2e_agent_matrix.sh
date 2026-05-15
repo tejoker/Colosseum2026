@@ -3,11 +3,14 @@ set -euo pipefail
 
 API_URL="${API_URL:-http://localhost:3001}"
 BANK_SITE="${E2E_BANK_SITE:-BNP Paribas}"
-ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
 AGENT_TYPES="${AGENT_TYPES:-claude,openai,gemini,qwen,mistral,openclaw,crewai,langgraph,autogen}"
 MATRIX_JITTER_MS_MAX="${MATRIX_JITTER_MS_MAX:-0}"
 MATRIX_FAULT_PROBE_PCT="${MATRIX_FAULT_PROBE_PCT:-0}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../../scripts/lib/dev_secrets.sh
+source "${ROOT_DIR}/../scripts/lib/dev_secrets.sh"
+require_admin_key
+ADMIN_KEY="$SAURON_ADMIN_KEY"
 
 # shellcheck source=tests/lib/zkp_fixture.sh
 source "${ROOT_DIR}/tests/lib/zkp_fixture.sh"

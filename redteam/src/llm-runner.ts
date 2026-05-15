@@ -17,7 +17,13 @@ import { scenarioParentEmptyScopeDenied } from "./scenarios/parent-empty-scope-d
 import { scenarioPopRequiredOnVerify } from "./scenarios/pop-required-on-verify";
 
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
-const adminKey = process.env.SAURON_ADMIN_KEY || "super_secret_hackathon_key";
+if (!process.env.SAURON_ADMIN_KEY) {
+    throw new Error(
+        "SAURON_ADMIN_KEY is required for the LLM red-team runner. " +
+        "Export it (or source .dev-secrets at the repo root) before running."
+    );
+}
+const adminKey: string = process.env.SAURON_ADMIN_KEY;
 const bankSite = process.env.E2E_BANK_SITE || "BNP Paribas";
 const apiKey = process.env.OPENAI_API_KEY;
 const model = process.env.REDTEAM_MODEL || "gpt-4o-mini";

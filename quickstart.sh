@@ -34,7 +34,9 @@ fail() { echo -e "  ${RED}✗${RST} $*"; }
 # 0. Defaults — operator can override via env
 # ────────────────────────────────────────────────────────────────────────
 export ENV="${ENV:-development}"
-export SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
+# shellcheck source=scripts/lib/dev_secrets.sh
+source "$ROOT/scripts/lib/dev_secrets.sh"
+load_dev_admin_key
 export SAURON_CORE_URL="${SAURON_CORE_URL:-http://127.0.0.1:3001}"
 export SAURON_URL="${SAURON_URL:-$SAURON_CORE_URL}"
 export RUST_LOG="${RUST_LOG:-warn}"

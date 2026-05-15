@@ -4,6 +4,9 @@
 
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/lib/dev_secrets.sh
+source "$ROOT/scripts/lib/dev_secrets.sh"
+load_dev_admin_key
 
 # ── Couleurs ─────────────────────────────────────────────────────────────────
 GRN='\033[0;32m'; YLW='\033[1;33m'; RED='\033[0;31m'; RST='\033[0m'
@@ -36,13 +39,13 @@ if [ ! -f "$BINARY" ]; then
   warn "Aucun binaire trouvé — lance 'cargo build' d'abord !"
   warn "Fallback: cargo run (lent au premier démarrage)"
   ENV="${ENV:-development}" \
-  SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
+  SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
   SAURON_ISSUER_URL="${SAURON_ISSUER_URL:-http://localhost:4000}" \
   SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}" \
   cargo run --bin sauron-core &
 else
   ENV="${ENV:-development}" \
-  SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
+  SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
   SAURON_ISSUER_URL="${SAURON_ISSUER_URL:-http://localhost:4000}" \
   SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}" \
   "$BINARY" &
@@ -54,7 +57,7 @@ PIDS+=("$CORE_PID")
 log "Attente du backend..."
 for i in $(seq 1 120); do
   if curl -sf http://localhost:3001/admin/stats \
-       -H "x-admin-key: super_secret_hackathon_key" > /dev/null 2>&1; then
+       -H "x-admin-key: $SAURON_ADMIN_KEY" > /dev/null 2>&1; then
     log "Backend prêt ✓"
     break
   fi
@@ -128,7 +131,7 @@ if [ ! -d "dist" ]; then
   warn "Build du service issuer..."
   npm run build
 fi
-ISSUER_SEED="${ISSUER_SEED:-sauronid-issuer-seed-hackathon}" \
+ISSUER_SEED="${ISSUER_SEED:-sauronid-issuer-seed-dev}" \
 SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}" \
   npm run start &
 ISSUER_PID=$!

@@ -397,3 +397,69 @@ pub fn spawn_background_gc(db: Arc<DbHandle>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sign_token_produces_blind_colon_hextag_format() {
+        let token = sign_token(b"secret-key", "domain.test", "blind-xyz");
+        let parts: Vec<&str> = token.split(':').collect();
+        assert_eq!(parts.len(), 2, "token format is `blind:hextag`");
+        assert_eq!(parts[0], "blind-xyz");
+        // Tag is hex-encoded HMAC-SHA256 → 64 hex chars.
+        assert_eq!(parts[1].len(), 64);
+        assert!(parts[1].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_sign_token_is_deterministic() {
+        let a = sign_token(b"k", "d", "b");
+        let b = sign_token(b"k", "d", "b");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_verify_token_accepts_freshly_signed_token() {
+        let token = sign_token(b"k1", "kya.consent", "blind-001");
+        assert!(verify_token(b"k1", "kya.consent", &token));
+    }
+
+    #[test]
+    fn test_verify_token_rejects_wrong_secret() {
+        let token = sign_token(b"k1", "kya.consent", "blind-001");
+        assert!(!verify_token(b"k2", "kya.consent", &token));
+    }
+
+    #[test]
+    fn test_verify_token_rejects_wrong_domain() {
+        let token = sign_token(b"k1", "kya.consent", "blind-001");
+        assert!(!verify_token(b"k1", "kya.OTHER", &token));
+    }
+
+    #[test]
+    fn test_verify_token_rejects_tampered_tag() {
+        let token = sign_token(b"k1", "d", "blind-001");
+        // Flip the last hex char of the tag.
+        let mut bytes: Vec<u8> = token.into_bytes();
+        let last = bytes.last_mut().unwrap();
+        *last = if *last == b'0' { b'1' } else { b'0' };
+        let tampered = String::from_utf8(bytes).unwrap();
+        assert!(!verify_token(b"k1", "d", &tampered));
+    }
+
+    #[test]
+    fn test_verify_token_rejects_malformed_input() {
+        // No colon → splitn yields 1 part → reject.
+        assert!(!verify_token(b"k1", "d", "no-colon-here"));
+    }
+
+    #[test]
+    fn test_token_value_extracts_blind_prefix() {
+        let token = sign_token(b"k", "d", "blind-zzz");
+        assert_eq!(token_value(&token), "blind-zzz");
+        // No colon: returns whole input.
+        assert_eq!(token_value("no-colon"), "no-colon");
+    }
+}

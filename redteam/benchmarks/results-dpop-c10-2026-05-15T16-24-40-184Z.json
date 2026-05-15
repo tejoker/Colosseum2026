@@ -1,0 +1,26 @@
+{
+  "target": "dpop",
+  "conc": 10,
+  "n": 1000,
+  "warmup": 100,
+  "p50_ms": 9,
+  "p95_ms": 14,
+  "p99_ms": 21,
+  "avg_ms": 9.549,
+  "rps": 862.8127696289905,
+  "errors": 0,
+  "rejected": 0,
+  "integration_loc": {
+    "client": 28,
+    "server": 55,
+    "total": 83
+  },
+  "host": {
+    "cpu_model": "AMD Ryzen 7 7735HS with Radeon Graphics",
+    "cpu_count": 14,
+    "ram_gb": 14,
+    "node": "20.20.0",
+    "platform": "linux 6.6.114.1-microsoft-standard-WSL2"
+  },
+  "generated_at": "2026-05-15T16:24:40.184Z"
+}

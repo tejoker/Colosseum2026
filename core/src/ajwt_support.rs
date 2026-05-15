@@ -1,5 +1,7 @@
 //! Shared A-JWT / KYA helpers: intent scopes, JTI replay store, PoP JWS verification.
 
+use rand::rngs::OsRng;
+use rand::RngCore;
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -69,29 +71,57 @@ pub fn assert_child_scopes_subset_of_parent(
 }
 
 /// Delete expired JTIs, then insert this one. Fails if `jti` already present.
+///
+/// Wrapped in `BEGIN IMMEDIATE TRANSACTION` to acquire the SQLite writer lock
+/// for the duration of the delete+insert pair. Combined with `journal_mode =
+/// WAL` + `busy_timeout` this gives single-writer serialisable semantics.
+/// On Postgres callers SHOULD route through `Repo::consume_ajwt_jti` which
+/// runs the same operation under `ISOLATION LEVEL SERIALIZABLE` with retry.
 pub fn consume_ajwt_jti(db: &Connection, jti: &str, exp: i64) -> Result<(), String> {
     if jti.is_empty() {
         return Err("missing jti".into());
     }
+    if jti.len() > 256 {
+        return Err("jti too long (max 256 chars)".into());
+    }
     let now = now_secs();
-    db.execute("DELETE FROM ajwt_used_jtis WHERE exp < ?", params![now])
-        .map_err(|e| e.to_string())?;
-    db.execute(
-        "INSERT INTO ajwt_used_jtis (jti, exp) VALUES (?1, ?2)",
-        params![jti, exp],
-    )
-    .map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
-            "A-JWT jti replay (token already used)".to_string()
-        } else {
-            e.to_string()
+    db.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+        .map_err(|e| format!("begin immediate: {e}"))?;
+    let res = (|| -> Result<(), String> {
+        db.execute("DELETE FROM ajwt_used_jtis WHERE exp < ?", params![now])
+            .map_err(|e| e.to_string())?;
+        db.execute(
+            "INSERT INTO ajwt_used_jtis (jti, exp) VALUES (?1, ?2)",
+            params![jti, exp],
+        )
+        .map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                "A-JWT jti replay (token already used)".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
+        Ok(())
+    })();
+    match res {
+        Ok(()) => {
+            db.execute_batch("COMMIT;")
+                .map_err(|e| format!("commit: {e}"))?;
+            Ok(())
         }
-    })?;
-    Ok(())
+        Err(e) => {
+            let _ = db.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
 }
 
 /// Atomic single-use nonce consume for the DPoP-style per-call signature.
 /// Returns Err if (agent_id, nonce) already inserted (replay), or db error.
+///
+/// Legacy direct-DB path. Prefer `Repo::consume_call_nonce` (in
+/// `repository.rs`) which runs under `BEGIN IMMEDIATE` on SQLite and
+/// `ISOLATION LEVEL SERIALIZABLE` (with retry) on Postgres.
 pub fn consume_call_nonce(
     db: &Connection,
     agent_id: &str,
@@ -104,19 +134,28 @@ pub fn consume_call_nonce(
     if nonce.len() > 128 {
         return Err("call nonce too long (max 128 chars)".into());
     }
-    db.execute(
+    db.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+        .map_err(|e| format!("begin immediate: {e}"))?;
+    let res = db.execute(
         "INSERT INTO agent_call_nonces (agent_id, nonce, exp) VALUES (?1, ?2, ?3)",
         params![agent_id, nonce, exp],
-    )
-    .map_err(|e| {
-        let s = e.to_string();
-        if s.contains("UNIQUE") || s.contains("PRIMARY KEY") {
-            "call nonce replay (already used)".to_string()
-        } else {
-            s
+    );
+    match res {
+        Ok(_) => {
+            db.execute_batch("COMMIT;")
+                .map_err(|e| format!("commit: {e}"))?;
+            Ok(())
         }
-    })?;
-    Ok(())
+        Err(e) => {
+            let _ = db.execute_batch("ROLLBACK;");
+            let s = e.to_string();
+            if s.contains("UNIQUE") || s.contains("PRIMARY KEY") {
+                Err("call nonce replay (already used)".to_string())
+            } else {
+                Err(s)
+            }
+        }
+    }
 }
 
 /// Verify compact JWS: EdDSA over `header.payload`, payload decodes to UTF-8 `challenge`.
@@ -166,11 +205,15 @@ pub fn verify_ed25519_pop_jws(
 }
 
 pub fn random_hex_32() -> String {
-    hex::encode(rand::random::<[u8; 16]>())
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 pub fn random_challenge_id() -> String {
-    format!("pch_{}", hex::encode(rand::random::<[u8; 16]>()))
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    format!("pch_{}", hex::encode(bytes))
 }
 
 /// Store one-time PoP challenge for an agent.
@@ -226,4 +269,23 @@ pub fn take_pop_challenge(
     )
     .map_err(|e| e.to_string())?;
     Ok(challenge)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_hex_32_returns_32_hex_chars() {
+        let r = random_hex_32();
+        assert_eq!(r.len(), 32);
+        assert!(r.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn random_hex_32_returns_distinct_values_across_calls() {
+        let a = random_hex_32();
+        let b = random_hex_32();
+        assert_ne!(a, b);
+    }
 }

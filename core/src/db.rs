@@ -20,8 +20,13 @@ pub fn open_db() -> DbHandle {
         .and_then(|v| v.parse::<u32>().ok())
         .map(|v| v.clamp(1, 64))
         .unwrap_or(16);
+    open_db_at(&path, pool_size)
+}
 
-    let manager = SqliteConnectionManager::file(&path).with_init(|conn| {
+/// Opens a SQLite database at the given path with the given pool size.
+/// Exposed for tests + tooling that want to bypass the `DATABASE_PATH` env var.
+pub fn open_db_at(path: &str, pool_size: u32) -> DbHandle {
+    let manager = SqliteConnectionManager::file(path).with_init(|conn| {
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -47,10 +52,7 @@ pub fn open_db() -> DbHandle {
         init_schema(&conn);
     }
 
-    println!(
-        "[DB] SQLite opened at '{}' with pool_size={}.",
-        path, pool_size
-    );
+    println!("[DB] SQLite opened at '{}' with pool_size={}.", path, pool_size);
 
     DbHandle { pool }
 }
@@ -496,6 +498,27 @@ pub fn init_schema(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE agents ADD COLUMN ring_key_image_hex TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+
+    // M1 of TPM2-bound PoP key roadmap (docs/roadmap.md Plan 1):
+    //   - attestation_pubkey_b64u — the AIK public key extracted from the
+    //     hardware attestation (used as the trusted PoP key once M2 lands).
+    //   - attestation_pcr_set — JSON-encoded PCR selection + canonical hash
+    //     the operator expects the TPM2 quote to bind.
+    //   - attestation_ek_cert_chain_pem — verbatim EK cert chain, used at
+    //     verify time to walk to a known TPM-vendor root.
+    // All nullable; existing rows keep working untouched.
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN attestation_pubkey_b64u TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN attestation_pcr_set TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN attestation_ek_cert_chain_pem TEXT",
         [],
     );
 

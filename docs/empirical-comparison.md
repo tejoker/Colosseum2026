@@ -135,10 +135,13 @@ Three honest answers depending on your situation:
 # Build
 cd core && cargo build --release
 
+# Generate a fresh dev admin key for this shell session (every command below
+# inherits it; persisted to .dev-secrets so other terminals can re-source it).
+export SAURON_ADMIN_KEY="$(openssl rand -hex 32)"
+
 # Boot in enforce mode
 fuser -k 3001/tcp 2>/dev/null
 rm -f sauron.db sauron.db-shm sauron.db-wal
-SAURON_ADMIN_KEY=super_secret_hackathon_key \
 ENV=development \
 SAURON_REQUIRE_CALL_SIG=1 \
 RUST_LOG=warn \
@@ -146,13 +149,12 @@ RUST_LOG=warn \
 
 # Seed
 sleep 5
-SAURON_URL=http://localhost:3001 SAURON_ADMIN_KEY=super_secret_hackathon_key bash seed.sh
+SAURON_URL=http://localhost:3001 bash seed.sh
 
-# Run empirical suite
+# Run empirical suite (SAURON_ADMIN_KEY is required — the suite throws if absent)
 cd ../redteam
 SAURON_REQUIRE_CALL_SIG=1 \
 SAURON_CORE_URL=http://127.0.0.1:3001 \
-SAURON_ADMIN_KEY=super_secret_hackathon_key \
 node dist/scenarios/empirical-suite.js
 
 # Latency benchmark

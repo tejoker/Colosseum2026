@@ -2,9 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../../scripts/lib/dev_secrets.sh
+source "${ROOT_DIR}/../scripts/lib/dev_secrets.sh"
+load_dev_admin_key
 PORT="${E2E_PORT:-3316}"
 API_URL="${API_URL:-http://127.0.0.1:${PORT}}"
-ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}"
+ADMIN_KEY="$SAURON_ADMIN_KEY"
 DB_PATH="${E2E_DB_PATH:-/tmp/sauron-nonbank-migration-${USER:-user}-$$.db}"
 LOG_PATH="${E2E_LOG_PATH:-/tmp/sauron-nonbank-migration-${USER:-user}-$$.log}"
 

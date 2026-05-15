@@ -1,0 +1,180 @@
+name: Unit + Postgres integration
+
+# M1 of the Postgres migration roadmap (docs/roadmap.md Plan 2):
+# - `test-sqlite`   runs the existing rusqlite + repo unit suite (default backend).
+# - `test-postgres` boots a postgres:16-alpine sidecar, applies the schema from
+#   migrations/postgres/0001_initial.sql, exports `SAURON_DB_BACKEND=postgres` +
+#   `DATABASE_URL`, runs `cargo test --lib`, then launches the backend and runs
+#   the TOCTOU race scenario at redteam/src/scenarios/postgres-toctou-race.ts.
+
+on:
+  push:
+    branches: [main, pocv1]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-sqlite:
+    name: cargo test --lib (SQLite default backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: cargo-test-sqlite-${{ runner.os }}-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            cargo-test-sqlite-${{ runner.os }}-
+
+      - name: cargo check
+        working-directory: core
+        run: cargo check --lib
+
+      - name: cargo test --lib
+        working-directory: core
+        run: cargo test --lib
+
+  test-postgres:
+    name: cargo test --lib + race scenario (Postgres backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sauron_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/sauron_test
+      SAURON_DB_BACKEND: postgres
+      # Per-run dev admin key; populated in the "Generate per-run admin key" step.
+      SAURON_ADMIN_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate per-run admin key
+        run: echo "SAURON_ADMIN_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install postgres client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U postgres; then
+              echo "postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres never became ready" >&2
+          exit 1
+
+      - name: Apply Postgres schema
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d sauron_test \
+            -f migrations/postgres/0001_initial.sql
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: cargo-test-pg-${{ runner.os }}-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            cargo-test-pg-${{ runner.os }}-
+
+      - name: cargo test --lib (M1 ported modules)
+        working-directory: core
+        # SQLite tests in repository.rs::tests still run (they build their own
+        # tmp DB). The Postgres-specific paths are exercised by the race
+        # scenario below — the unit suite proves the helper compiles + the
+        # SQLite branch behaves correctly.
+        run: |
+          cargo test --lib repository::tests
+          cargo test --lib ajwt
+          cargo test --lib risk
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: redteam/package-lock.json
+
+      - name: Build redteam scenarios
+        working-directory: redteam
+        run: |
+          npm ci
+          npm run build
+
+      - name: Launch backend with Postgres backend
+        working-directory: core
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/sauron_test
+          SAURON_DB_BACKEND: postgres
+          SAURON_REQUIRE_CALL_SIG: "1"
+        run: |
+          cargo build --bin sauron-core
+          nohup ./target/debug/sauron-core > /tmp/sauron-core.log 2>&1 &
+          echo $! > /tmp/sauron-core.pid
+
+      - name: Wait for backend health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3001/admin/stats \
+                 -H "x-admin-key: ${SAURON_ADMIN_KEY}" >/dev/null; then
+              echo "backend healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "backend never became healthy" >&2
+          cat /tmp/sauron-core.log || true
+          exit 1
+
+      - name: Run Postgres TOCTOU race scenario (M1 + M2 expansion)
+        working-directory: redteam
+        env:
+          API_URL: http://localhost:3001
+          SAURON_DB_BACKEND: postgres
+          SAURON_RACE_N: "50"
+        # Covers (M1) Repo::consume_call_nonce, (M2) Repo::consume_payment_authorization,
+        # Repo::consume_bank_attestation_nonce, and the optional
+        # Repo::consume_consent_token / Repo::claim_credential_code paths
+        # (skipped unless SAURON_TEST_CONSENT_TOKEN / SAURON_TEST_CRED_SESSION
+        # are exported).
+        run: node dist/scenarios/postgres-toctou-race.js
+
+      - name: Dump backend log on failure
+        if: failure()
+        run: cat /tmp/sauron-core.log || true
+
+      - name: Stop backend
+        if: always()
+        run: |
+          if [ -f /tmp/sauron-core.pid ]; then
+            kill "$(cat /tmp/sauron-core.pid)" || true
+          fi

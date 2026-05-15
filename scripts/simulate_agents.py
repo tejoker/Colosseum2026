@@ -29,7 +29,9 @@ import requests  # noqa: E402
 from sauronid_client import SauronIDClient, register_llm_agent  # noqa: E402
 
 CORE_URL = os.getenv("SAURON_CORE_URL", "http://127.0.0.1:3001")
-ADMIN_KEY = os.getenv("SAURON_ADMIN_KEY", "super_secret_hackathon_key")
+ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY") or sys.exit(
+    "SAURON_ADMIN_KEY is required — export it or source .dev-secrets first."
+)
 
 SEED_USERS = [
     ("alice@sauron.dev", "pass_alice"),

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock, RwLock};
 use subtle::ConstantTimeEq;
 
+use crate::error::AppError;
 use crate::identity::Identity;
 use crate::risk;
 use crate::runtime_mode::is_development_runtime;
@@ -113,8 +114,16 @@ fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
     } else if full_write_keys.is_empty() && read_only_keys.is_empty() {
         return Err("development admin auth misconfigured (no keys)".into());
     } else {
-        // Warn on the well-known default that ships in docs/seed scripts.
-        const KNOWN_WEAK: &[&str] = &["super_secret_hackathon_key", "changeme", "secret", "admin"];
+        // Warn on the well-known defaults that ship in docs/seed scripts.
+        // NOTE: the legacy seed token is included intentionally so deployments
+        // that copied it from old docs trip this warning. Do not remove.
+        const KNOWN_WEAK: &[&str] = &[
+            "super_secret_hackathon_key",
+            "changeme",
+            "secret",
+            "admin",
+            "password",
+        ];
         for k in &full_write_keys {
             if let Ok(s) = std::str::from_utf8(k) {
                 if KNOWN_WEAK.contains(&s) {
@@ -282,7 +291,12 @@ pub async fn add_client(
     // Ajouter la clé publique au groupe client en mémoire (pour vérifier les ring sigs Flux 1).
     {
         let mut st = state.write().unwrap();
-        if let Some(pt) = CompressedRistretto::from_slice(&hex::decode(&pub_hex).unwrap())
+        // pub_hex is server-generated via Identity::random() so decoding is
+        // expected to succeed, but we defensively avoid panic on any future
+        // refactor that pipes user-influenced hex through this path.
+        let pub_bytes = hex::decode(&pub_hex)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("hex decode: {e}")))?;
+        if let Some(pt) = CompressedRistretto::from_slice(&pub_bytes)
             .ok()
             .and_then(|c| c.decompress())
         {
@@ -334,6 +348,40 @@ pub async fn get_action_anchor_proof(
             StatusCode::NOT_FOUND,
             "receipt_id not yet anchored (next anchor batch will include it)".into(),
         )),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+}
+
+/// GET /admin/anchor/batches?limit=N — list recent anchor batches with the
+/// per-chain three-state surface (ADR-001). Each row reports:
+///
+/// ```json
+/// {
+///   "anchor_id": "...",
+///   "n_actions": 42,
+///   "created_at": 1715800000,
+///   "solana":  {"confirmed": true,  "slot": 12345, "sig": "..."},
+///   "bitcoin": {"provider": "opentimestamps", "ots_upgraded": false, "block_height": null},
+///   "anchored": false   // DEPRECATED — kept one minor version, see ADR-001
+/// }
+/// ```
+///
+/// The three UI states are computed client-side from the two booleans:
+///   - "Pending"                          → !solana.confirmed
+///   - "Solana-confirmed (BTC pending)"   →  solana.confirmed && !bitcoin.ots_upgraded
+///   - "Dually anchored"                  →  solana.confirmed &&  bitcoin.ots_upgraded
+#[derive(Deserialize)]
+pub struct AnchorBatchesQuery {
+    pub limit: Option<i64>,
+}
+
+pub async fn get_anchor_batches(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    axum::extract::Query(q): axum::extract::Query<AnchorBatchesQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    match crate::agent_action_anchor::recent_batches(&state, limit) {
+        Ok(v) => Ok(Json(v)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
@@ -530,7 +578,7 @@ pub struct AdminAgentRecord {
 /// GET /admin/agents — list every registered agent + checksum + revocation status.
 pub async fn get_agents(
     State(state): State<Arc<RwLock<ServerState>>>,
-) -> Json<Vec<AdminAgentRecord>> {
+) -> Result<Json<Vec<AdminAgentRecord>>, AppError> {
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db
@@ -542,8 +590,7 @@ pub async fn get_agents(
              FROM agents a
              LEFT JOIN agent_checksum_inputs ci ON ci.agent_id = a.agent_id
              ORDER BY a.issued_at DESC",
-        )
-        .unwrap();
+        )?;
     let records: Vec<AdminAgentRecord> = stmt
         .query_map([], |row| {
             let pop_len: i64 = row.get(7)?;
@@ -558,11 +605,10 @@ pub async fn get_agents(
                 has_pop: pop_len > 0,
                 agent_type: row.get(8)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 #[derive(Serialize)]
@@ -579,7 +625,7 @@ pub struct AdminActionReceiptRecord {
 pub async fn get_recent_actions(
     State(state): State<Arc<RwLock<ServerState>>>,
     axum::extract::Query(q): axum::extract::Query<RecentLimitQuery>,
-) -> Json<Vec<AdminActionReceiptRecord>> {
+) -> Result<Json<Vec<AdminActionReceiptRecord>>, AppError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
@@ -589,8 +635,7 @@ pub async fn get_recent_actions(
              FROM agent_action_receipts
              ORDER BY created_at DESC
              LIMIT ?1",
-        )
-        .unwrap();
+        )?;
     let records: Vec<AdminActionReceiptRecord> = stmt
         .query_map(rusqlite::params![limit], |row| {
             Ok(AdminActionReceiptRecord {
@@ -601,11 +646,10 @@ pub async fn get_recent_actions(
                 policy_version: row.get(4)?,
                 created_at: row.get(5)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 #[derive(Deserialize)]
@@ -693,7 +737,7 @@ pub struct AdminPerAgentMetric {
 pub async fn get_per_agent_metrics(
     State(state): State<Arc<RwLock<ServerState>>>,
     axum::extract::Query(q): axum::extract::Query<RecentLimitQuery>,
-) -> Json<Vec<AdminPerAgentMetric>> {
+) -> Result<Json<Vec<AdminPerAgentMetric>>, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
@@ -706,8 +750,7 @@ pub async fn get_per_agent_metrics(
              FROM agents a
              ORDER BY act_count DESC, egress_count DESC
              LIMIT ?1",
-        )
-        .unwrap();
+        )?;
     let records: Vec<AdminPerAgentMetric> = stmt
         .query_map(rusqlite::params![limit], |row| {
             Ok(AdminPerAgentMetric {
@@ -716,11 +759,10 @@ pub async fn get_per_agent_metrics(
                 egress_count: row.get(2)?,
                 last_action_at: row.get(3)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 #[derive(Serialize)]
@@ -739,7 +781,7 @@ pub struct AdminEgressEntry {
 pub async fn get_recent_egress(
     State(state): State<Arc<RwLock<ServerState>>>,
     axum::extract::Query(q): axum::extract::Query<RecentLimitQuery>,
-) -> Json<Vec<AdminEgressEntry>> {
+) -> Result<Json<Vec<AdminEgressEntry>>, AppError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
@@ -748,8 +790,7 @@ pub async fn get_recent_egress(
             "SELECT id, agent_id, target_host, target_path, method, status_code, ts, allowed
              FROM agent_egress_log
              ORDER BY ts DESC LIMIT ?1",
-        )
-        .unwrap();
+        )?;
     let records: Vec<AdminEgressEntry> = stmt
         .query_map(rusqlite::params![limit], |row| {
             Ok(AdminEgressEntry {
@@ -762,11 +803,10 @@ pub async fn get_recent_egress(
                 ts: row.get(6)?,
                 allowed: row.get::<_, i64>(7)? != 0,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 /// GET /admin/checksum/audit/{agent_id} — every checksum rotation for an agent.
@@ -782,7 +822,7 @@ pub struct AdminChecksumAudit {
 pub async fn get_checksum_audit(
     State(state): State<Arc<RwLock<ServerState>>>,
     Path(agent_id): Path<String>,
-) -> Json<Vec<AdminChecksumAudit>> {
+) -> Result<Json<Vec<AdminChecksumAudit>>, AppError> {
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db
@@ -791,8 +831,7 @@ pub async fn get_checksum_audit(
              FROM agent_checksum_audit
              WHERE agent_id = ?1
              ORDER BY ts DESC",
-        )
-        .unwrap();
+        )?;
     let records: Vec<AdminChecksumAudit> = stmt
         .query_map(rusqlite::params![agent_id], |row| {
             Ok(AdminChecksumAudit {
@@ -802,21 +841,19 @@ pub async fn get_checksum_audit(
                 actor: row.get(3)?,
                 ts: row.get(4)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 pub async fn get_users(
     State(state): State<Arc<RwLock<ServerState>>>,
-) -> Json<Vec<AdminUserRecord>> {
+) -> Result<Json<Vec<AdminUserRecord>>, AppError> {
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db
-        .prepare("SELECT key_image_hex, first_name, last_name, nationality FROM users")
-        .unwrap();
+        .prepare("SELECT key_image_hex, first_name, last_name, nationality FROM users")?;
     let records: Vec<AdminUserRecord> = stmt
         .query_map([], |row| {
             Ok(AdminUserRecord {
@@ -825,11 +862,10 @@ pub async fn get_users(
                 last_name: row.get(2)?,
                 nationality: row.get(3)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 // ─────────────────────────────────────────────────────
@@ -847,12 +883,12 @@ pub struct AdminClientRecord {
 
 pub async fn get_clients(
     State(state): State<Arc<RwLock<ServerState>>>,
-) -> Json<Vec<AdminClientRecord>> {
+) -> Result<Json<Vec<AdminClientRecord>>, AppError> {
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT name, public_key_hex, key_image_hex, tokens_b, client_type FROM clients ORDER BY id"
-    ).unwrap();
+    )?;
     let records: Vec<AdminClientRecord> = stmt
         .query_map([], |row| {
             Ok(AdminClientRecord {
@@ -862,11 +898,10 @@ pub async fn get_clients(
                 tokens_b: row.get(3)?,
                 client_type: row.get(4)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 // ─────────────────────────────────────────────────────
@@ -886,7 +921,7 @@ pub struct SiteUserRecord {
 pub async fn get_site_users(
     State(state): State<Arc<RwLock<ServerState>>>,
     Path(name): Path<String>,
-) -> Json<Vec<SiteUserRecord>> {
+) -> Result<Json<Vec<SiteUserRecord>>, AppError> {
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db
@@ -897,8 +932,7 @@ pub async fn get_site_users(
              WHERE r.client_name = ?1
              ORDER BY r.timestamp DESC
              LIMIT 500",
-        )
-        .unwrap();
+        )?;
     let records: Vec<SiteUserRecord> = stmt
         .query_map(params![name], |row| {
             Ok(SiteUserRecord {
@@ -909,11 +943,10 @@ pub async fn get_site_users(
                 source: row.get(4)?,
                 timestamp: row.get(5)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 // ─────────────────────────────────────────────────────
@@ -932,7 +965,7 @@ pub struct SiteZkpProofRecord {
 pub async fn get_site_zkp_proofs(
     State(state): State<Arc<RwLock<ServerState>>>,
     Path(name): Path<String>,
-) -> Json<Vec<SiteZkpProofRecord>> {
+) -> Result<Json<Vec<SiteZkpProofRecord>>, AppError> {
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let pattern = format!("site={} %", name);
@@ -941,16 +974,14 @@ pub async fn get_site_zkp_proofs(
             "SELECT id, timestamp, detail FROM requests_log \
          WHERE action_type = 'ZKP_VERIFY' AND status = 'OK' AND detail LIKE ?1 \
          ORDER BY id DESC LIMIT 200",
-        )
-        .unwrap();
+        )?;
     let records: Vec<SiteZkpProofRecord> = stmt
         .query_map(rusqlite::params![pattern], |row| {
             let id: i64 = row.get(0)?;
             let ts: i64 = row.get(1)?;
             let detail: String = row.get(2)?;
             Ok((id, ts, detail))
-        })
-        .unwrap()
+        })?
         .flatten()
         .map(|(id, timestamp, detail)| {
             // detail = "site=Discord ring=5 claims=age≥18,nationality:FRA"
@@ -975,7 +1006,7 @@ pub async fn get_site_zkp_proofs(
             }
         })
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 // ─────────────────────────────────────────────────────
@@ -993,12 +1024,12 @@ pub struct RequestLogRecord {
 
 pub async fn get_requests(
     State(state): State<Arc<RwLock<ServerState>>>,
-) -> Json<Vec<RequestLogRecord>> {
+) -> Result<Json<Vec<RequestLogRecord>>, AppError> {
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT id, timestamp, action_type, status, detail FROM requests_log ORDER BY id DESC LIMIT 200"
-    ).unwrap();
+    )?;
     let records: Vec<RequestLogRecord> = stmt
         .query_map([], |row| {
             Ok(RequestLogRecord {
@@ -1008,11 +1039,10 @@ pub async fn get_requests(
                 status: row.get(3)?,
                 detail: row.get(4)?,
             })
-        })
-        .unwrap()
+        })?
         .flatten()
         .collect();
-    Json(records)
+    Ok(Json(records))
 }
 
 // ─────────────────────────────────────────────────────

@@ -103,24 +103,40 @@ CREATE INDEX IF NOT EXISTS idx_consent_log_request ON consent_log (request_id, t
 
 -- AI agents delegated by human owners
 CREATE TABLE IF NOT EXISTS agents (
-    id                  BIGSERIAL PRIMARY KEY,
-    agent_id            TEXT    UNIQUE NOT NULL,
-    human_key_image     TEXT    NOT NULL,
-    agent_checksum      TEXT    NOT NULL,
-    intent_json         TEXT    NOT NULL DEFAULT '{}',
-    assurance_level     TEXT    NOT NULL DEFAULT 'delegated_nonbank'
-                                CHECK (assurance_level IN ('delegated_bank', 'delegated_nonbank', 'autonomous_web3')),
-    public_key_hex      TEXT    NOT NULL DEFAULT '',
-    ring_key_image_hex  TEXT    NOT NULL DEFAULT '',
-    parent_agent_id     TEXT    DEFAULT NULL,
-    delegation_depth    INTEGER NOT NULL DEFAULT 0,
-    pop_jkt             TEXT    NOT NULL DEFAULT '',
-    pop_public_key_b64u TEXT    NOT NULL DEFAULT '',
-    issued_at           BIGINT  NOT NULL,
-    expires_at          BIGINT  NOT NULL,
-    revoked             INTEGER NOT NULL DEFAULT 0
+    id                          BIGSERIAL PRIMARY KEY,
+    agent_id                    TEXT    UNIQUE NOT NULL,
+    human_key_image             TEXT    NOT NULL,
+    agent_checksum              TEXT    NOT NULL,
+    intent_json                 TEXT    NOT NULL DEFAULT '{}',
+    assurance_level             TEXT    NOT NULL DEFAULT 'delegated_nonbank'
+                                        CHECK (assurance_level IN ('delegated_bank', 'delegated_nonbank', 'autonomous_web3')),
+    public_key_hex              TEXT    NOT NULL DEFAULT '',
+    ring_key_image_hex          TEXT    NOT NULL DEFAULT '',
+    parent_agent_id             TEXT    DEFAULT NULL,
+    delegation_depth            INTEGER NOT NULL DEFAULT 0,
+    pop_jkt                     TEXT    NOT NULL DEFAULT '',
+    pop_public_key_b64u         TEXT    NOT NULL DEFAULT '',
+    attestation_blob            TEXT,
+    attestation_kind            TEXT    NOT NULL DEFAULT '',
+    -- M1 of TPM2-bound PoP key roadmap (docs/roadmap.md Plan 1):
+    -- nullable hardware-attestation fields, populated when attestation_kind
+    -- is 'tpm2_quote'. The verifier (M2) reads these to walk the EK chain
+    -- and compare PCRs against the registered measurement.
+    attestation_pubkey_b64u     TEXT,
+    attestation_pcr_set         TEXT,
+    attestation_ek_cert_chain_pem TEXT,
+    issued_at                   BIGINT  NOT NULL,
+    expires_at                  BIGINT  NOT NULL,
+    revoked                     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_agents_human_active ON agents (human_key_image, revoked, expires_at);
+
+-- Idempotent ALTERs for clusters running an earlier 0001_initial.sql snapshot.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS attestation_blob              TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS attestation_kind              TEXT NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS attestation_pubkey_b64u       TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS attestation_pcr_set           TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS attestation_ek_cert_chain_pem TEXT;
 
 -- Agent VCs (self-sovereign KYA path)
 CREATE TABLE IF NOT EXISTS agent_vcs (
@@ -193,6 +209,35 @@ CREATE TABLE IF NOT EXISTS agent_pop_challenges (
     exp         BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_pop_challenges_exp ON agent_pop_challenges (exp);
+
+-- Server-computed agent checksum inputs (M3 port).
+-- See core/src/db.rs init_schema for the SQLite mirror.
+CREATE TABLE IF NOT EXISTS agent_checksum_inputs (
+    agent_id          TEXT    PRIMARY KEY NOT NULL,
+    agent_type        TEXT    NOT NULL,
+    inputs_canonical  TEXT    NOT NULL,
+    computed_checksum TEXT    NOT NULL,
+    version           INTEGER NOT NULL DEFAULT 1,
+    created_at        BIGINT  NOT NULL,
+    updated_at        BIGINT  NOT NULL
+);
+
+-- Append-only audit trail for checksum rotations (M3 port).
+-- NOTE: SQLite uses INTEGER PRIMARY KEY AUTOINCREMENT; Postgres uses
+-- BIGSERIAL. Callers MUST NOT rely on gap-free monotonic ids on Postgres:
+-- a BIGSERIAL sequence advances on rollback as well as commit.
+CREATE TABLE IF NOT EXISTS agent_checksum_audit (
+    id                BIGSERIAL PRIMARY KEY,
+    agent_id          TEXT    NOT NULL,
+    from_checksum     TEXT    NOT NULL,
+    to_checksum       TEXT    NOT NULL,
+    from_inputs_hash  TEXT    NOT NULL,
+    to_inputs_hash    TEXT    NOT NULL,
+    reason            TEXT    NOT NULL DEFAULT '',
+    actor             TEXT    NOT NULL DEFAULT '',
+    ts                BIGINT  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_checksum_audit_agent ON agent_checksum_audit (agent_id, ts);
 
 -- Per-call signature nonces (DPoP-style replay protection)
 CREATE TABLE IF NOT EXISTS agent_call_nonces (

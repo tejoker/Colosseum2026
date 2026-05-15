@@ -90,6 +90,9 @@ tarpaulin-report.html
 # env files (can opt-in for committing if needed)
 .env*
 
+# Local dev-only generated secrets (admin key, etc.) — never commit.
+.dev-secrets
+
 # vercel
 .vercel
 

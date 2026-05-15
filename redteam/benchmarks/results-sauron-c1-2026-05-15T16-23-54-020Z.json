@@ -1,0 +1,26 @@
+{
+  "target": "sauron",
+  "conc": 1,
+  "n": 1000,
+  "warmup": 100,
+  "p50_ms": 1,
+  "p95_ms": 2,
+  "p99_ms": 75,
+  "avg_ms": 4.014,
+  "rps": 244.08103490358798,
+  "errors": 0,
+  "rejected": 0,
+  "integration_loc": {
+    "client": 25,
+    "server": 0,
+    "total": 25
+  },
+  "host": {
+    "cpu_model": "AMD Ryzen 7 7735HS with Radeon Graphics",
+    "cpu_count": 14,
+    "ram_gb": 14,
+    "node": "20.20.0",
+    "platform": "linux 6.6.114.1-microsoft-standard-WSL2"
+  },
+  "generated_at": "2026-05-15T16:23:54.020Z"
+}

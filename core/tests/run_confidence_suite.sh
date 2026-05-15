@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# shellcheck source=../../scripts/lib/dev_secrets.sh
+source "${ROOT_DIR}/../scripts/lib/dev_secrets.sh"
+load_dev_admin_key
+
 # shellcheck source=tests/lib/zkp_fixture.sh
 source "${ROOT_DIR}/tests/lib/zkp_fixture.sh"
 
@@ -94,7 +98,7 @@ for i in $(seq 1 "$SHARED_ITERS"); do
   rm -f "$db" "$db-wal" "$db-shm"
 
   ENV=development \
-  SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
+  SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
   SAURON_ISSUER_URL="${ISSUER_URL}" \
   SAURON_ISSUER_SHARED_SECRET="${ISSUER_SHARED_SECRET}" \
   DATABASE_PATH="$db" \
@@ -105,7 +109,7 @@ for i in $(seq 1 "$SHARED_ITERS"); do
 
   ready=0
   for _ in $(seq 1 90); do
-    if curl -sf "http://127.0.0.1:${port}/admin/stats" -H 'x-admin-key: super_secret_hackathon_key' >/dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${port}/admin/stats" -H "x-admin-key: $SAURON_ADMIN_KEY" >/dev/null 2>&1; then
       ready=1
       break
     fi
@@ -129,7 +133,7 @@ for i in $(seq 1 "$SHARED_ITERS"); do
 
   if [[ -f "${ROOT_DIR}/../redteam/dist/index.js" ]]; then
     SAURON_CORE_URL="http://127.0.0.1:${port}" \
-    SAURON_ADMIN_KEY="${SAURON_ADMIN_KEY:-super_secret_hackathon_key}" \
+    SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
     node "${ROOT_DIR}/../redteam/dist/index.js" >"${LOG_DIR}/shared-${i}.redteam.log"
   fi
 

@@ -19,7 +19,12 @@ import httpx
 logger = logging.getLogger(__name__)
 
 SAURON_URL = os.getenv("SAURON_URL", "http://localhost:3001").rstrip("/")
-ADMIN_KEY = os.getenv("SAURON_ADMIN_KEY", "super_secret_hackathon_key")
+ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY") or (_ for _ in ()).throw(
+    RuntimeError(
+        "SAURON_ADMIN_KEY is not set. Export it (or source .dev-secrets at the "
+        "repo root) before importing live_source."
+    )
+)
 TIMEOUT_SECS = float(os.getenv("SAURON_HTTP_TIMEOUT_SECS", "5"))
 
 

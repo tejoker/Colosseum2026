@@ -139,3 +139,210 @@ impl Default for MerkleCommitmentLedger {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rs_merkle::{algorithms::Sha256 as MerkleSha256, MerkleProof};
+    use sha2::{Digest, Sha256};
+
+    /// Helper: produce a 32-byte commitment hex string from a label.
+    fn commitment_hex_for(label: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(label);
+        hex::encode(h.finalize())
+    }
+
+    #[test]
+    fn test_merkle_new_ledger_is_empty() {
+        let ledger = MerkleCommitmentLedger::new();
+        assert!(ledger.is_empty());
+        assert_eq!(ledger.len(), 0);
+        assert!(ledger.root_hex().is_none());
+    }
+
+    #[test]
+    fn test_merkle_build_root_single_leaf() {
+        let mut ledger = MerkleCommitmentLedger::new();
+        let c = commitment_hex_for(b"leaf-0");
+        let receipt = ledger.add_commitment(&c).expect("insert");
+        assert_eq!(receipt.leaf_index, 0);
+        assert_eq!(receipt.total_leaves, 1);
+        assert_eq!(receipt.merkle_root.len(), 64);
+        // Single leaf: root equals the leaf itself in rs_merkle's SHA256 algo.
+        assert_eq!(receipt.merkle_root, c);
+        // Proof for single leaf is empty (no siblings).
+        assert!(receipt.merkle_proof.is_empty());
+    }
+
+    #[test]
+    fn test_merkle_build_root_two_leaves_changes() {
+        let mut ledger = MerkleCommitmentLedger::new();
+        let r1 = ledger
+            .add_commitment(&commitment_hex_for(b"leaf-A"))
+            .expect("insert A")
+            .merkle_root;
+        let r2 = ledger
+            .add_commitment(&commitment_hex_for(b"leaf-B"))
+            .expect("insert B")
+            .merkle_root;
+        assert_ne!(r1, r2, "root must change when a new leaf is added");
+        assert_eq!(ledger.len(), 2);
+    }
+
+    #[test]
+    fn test_merkle_build_root_three_leaves_has_proof() {
+        let mut ledger = MerkleCommitmentLedger::new();
+        for i in 0..3 {
+            let _ = ledger
+                .add_commitment(&commitment_hex_for(format!("leaf-{i}").as_bytes()))
+                .expect("insert");
+        }
+        assert_eq!(ledger.len(), 3);
+        let root = ledger.root_hex().expect("root present");
+        assert_eq!(root.len(), 64);
+    }
+
+    #[test]
+    fn test_merkle_build_root_one_thousand_leaves() {
+        let mut ledger = MerkleCommitmentLedger::new();
+        let mut last_root = String::new();
+        for i in 0..1000 {
+            let r = ledger
+                .add_commitment(&commitment_hex_for(
+                    format!("bulk-leaf-{i}").as_bytes(),
+                ))
+                .expect("insert");
+            assert_eq!(r.leaf_index, i);
+            assert_eq!(r.total_leaves, i + 1);
+            last_root = r.merkle_root;
+        }
+        assert_eq!(ledger.len(), 1000);
+        assert_eq!(ledger.root_hex().unwrap(), last_root);
+    }
+
+    #[test]
+    fn test_merkle_proof_verifies_for_inserted_leaf() {
+        // Build a 5-leaf tree and verify the proof for leaf #2 reconstructs the root.
+        let mut ledger = MerkleCommitmentLedger::new();
+        let leaves_hex: Vec<String> = (0..5)
+            .map(|i| commitment_hex_for(format!("verify-{i}").as_bytes()))
+            .collect();
+        let mut last_receipt = None;
+        for h in &leaves_hex {
+            last_receipt = Some(ledger.add_commitment(h).expect("insert"));
+        }
+        let final_root_hex = last_receipt.unwrap().merkle_root;
+
+        // Re-fetch proof for leaf 2 via the underlying tree (the public API only
+        // returns the proof captured at insertion time, so re-add a fresh ledger).
+        let leaf_bytes: Vec<[u8; 32]> = leaves_hex
+            .iter()
+            .map(|h| hex::decode(h).unwrap().try_into().unwrap())
+            .collect();
+        let mut tree = rs_merkle::MerkleTree::<MerkleSha256>::new();
+        for lb in &leaf_bytes {
+            tree.insert(*lb);
+        }
+        tree.commit();
+        let proof = tree.proof(&[2]);
+        let root_bytes: [u8; 32] = tree.root().unwrap();
+        assert_eq!(hex::encode(root_bytes), final_root_hex);
+
+        let ok = proof.verify(root_bytes, &[2], &[leaf_bytes[2]], leaf_bytes.len());
+        assert!(ok, "valid proof must verify against the published root");
+    }
+
+    #[test]
+    fn test_merkle_proof_rejects_tampered_leaf() {
+        // Build proof for a known leaf, then flip a bit and confirm verify fails.
+        let mut tree = rs_merkle::MerkleTree::<MerkleSha256>::new();
+        let leaves: Vec<[u8; 32]> = (0..4)
+            .map(|i| {
+                let mut h = Sha256::new();
+                h.update(format!("tamper-{i}").as_bytes());
+                h.finalize().into()
+            })
+            .collect();
+        for l in &leaves {
+            tree.insert(*l);
+        }
+        tree.commit();
+        let root: [u8; 32] = tree.root().unwrap();
+        let proof = tree.proof(&[1]);
+
+        // Honest verify: passes.
+        assert!(proof.verify(root, &[1], &[leaves[1]], leaves.len()));
+
+        // Tamper: flip the first bit of leaf #1.
+        let mut tampered = leaves[1];
+        tampered[0] ^= 0x01;
+        assert!(
+            !proof.verify(root, &[1], &[tampered], leaves.len()),
+            "tampered leaf must NOT verify against the original root"
+        );
+
+        // Also check that the proof bytes round-trip but a wrong root rejects.
+        let mut bogus_root = root;
+        bogus_root[0] ^= 0x80;
+        let proof_bytes = proof.to_bytes();
+        let reparsed = MerkleProof::<MerkleSha256>::from_bytes(&proof_bytes).unwrap();
+        assert!(!reparsed.verify(bogus_root, &[1], &[leaves[1]], leaves.len()));
+    }
+
+    #[test]
+    fn test_merkle_add_commitment_rejects_invalid_hex() {
+        let mut ledger = MerkleCommitmentLedger::new();
+        match ledger.add_commitment("zznothex") {
+            Err(err) => assert!(err.contains("hex invalide"), "got: {err}"),
+            Ok(_) => panic!("invalid hex must be rejected"),
+        }
+    }
+
+    #[test]
+    fn test_merkle_add_commitment_rejects_wrong_length() {
+        let mut ledger = MerkleCommitmentLedger::new();
+        // 16 bytes hex == 32 chars; expected 64 chars / 32 bytes.
+        match ledger.add_commitment(&"ab".repeat(16)) {
+            Err(err) => assert!(err.contains("32 octets"), "got: {err}"),
+            Ok(_) => panic!("short commitment must be rejected"),
+        }
+    }
+
+    #[test]
+    fn test_merkle_from_db_leaves_empty_returns_empty_ledger() {
+        let ledger = MerkleCommitmentLedger::from_db_leaves(Vec::new()).expect("empty ok");
+        assert!(ledger.is_empty());
+        assert!(ledger.root_hex().is_none());
+    }
+
+    #[test]
+    fn test_merkle_from_db_leaves_reconstructs_same_root() {
+        // Build a ledger A by sequential inserts, build a ledger B by from_db_leaves,
+        // both must yield identical roots.
+        let hexes: Vec<String> = (0..7)
+            .map(|i| commitment_hex_for(format!("restore-{i}").as_bytes()))
+            .collect();
+
+        let mut a = MerkleCommitmentLedger::new();
+        for h in &hexes {
+            a.add_commitment(h).unwrap();
+        }
+        let root_a = a.root_hex().unwrap();
+
+        let b = MerkleCommitmentLedger::from_db_leaves(hexes.clone()).unwrap();
+        let root_b = b.root_hex().unwrap();
+
+        assert_eq!(root_a, root_b);
+        assert_eq!(a.len(), b.len());
+    }
+
+    #[test]
+    fn test_merkle_from_db_leaves_rejects_corrupt_hex() {
+        let bad = vec!["not-hex".to_string()];
+        match MerkleCommitmentLedger::from_db_leaves(bad) {
+            Err(err) => assert!(err.contains("corrompue"), "got: {err}"),
+            Ok(_) => panic!("corrupt hex must be rejected"),
+        }
+    }
+}

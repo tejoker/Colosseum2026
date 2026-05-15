@@ -5,7 +5,7 @@
 # Groth16 proof generation and verification.
 #
 # For production, use a multi-party computation ceremony.
-# This script runs a LOCAL ceremony suitable for development/hackathon.
+# This script runs a LOCAL ceremony suitable for development only.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -41,7 +41,7 @@ else
     snarkjs powersoftau contribute \
         "$KEYS_DIR/pot${PTAU_POWER}_0.ptau" \
         "$KEYS_DIR/pot${PTAU_POWER}_1.ptau" \
-        --name="SauronID Hackathon Ceremony" \
+        --name="SauronID Dev Ceremony" \
         -e="SauronID-hackeurope-2024-trusted-setup-entropy"
 
     echo "  [3/4] Applying random beacon..."

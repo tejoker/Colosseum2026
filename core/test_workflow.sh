@@ -1,7 +1,13 @@
 #!/bin/bash
+set -euo pipefail
 
 # Script de test complet pour le système Sauron
 # Ce script montre comment utiliser toutes les fonctionnalités
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=../scripts/lib/dev_secrets.sh
+source "${SCRIPT_DIR}/../scripts/lib/dev_secrets.sh"
+require_admin_key
 
 echo "=== Démarrage du serveur Sauron ==="
 # Dans un terminal séparé, lancez :
@@ -34,7 +40,7 @@ echo "\n=== Étape 2 : Récupération de la liste des utilisateurs (admin) ==="
 echo "Envoi d'une requête GET à /admin/users"
 
 curl -X GET http://localhost:3001/admin/users \
-  -H "x-admin-key: super_secret_hackathon_key"
+  -H "x-admin-key: $SAURON_ADMIN_KEY"
 
 echo "\n=== Étape 3 : Vérification d'une signature ==="
 echo "Envoi d'une requête POST à /verify avec une signature"
@@ -60,7 +66,7 @@ echo "\n=== Étape 4 : Récupération de l'historique des requêtes (admin) ==="
 echo "Envoi d'une requête GET à /admin/requests"
 
 curl -X GET http://localhost:3001/admin/requests \
-  -H "x-admin-key: super_secret_hackathon_key"
+  -H "x-admin-key: $SAURON_ADMIN_KEY"
 
 echo "\n=== Test complet terminé ==="
 echo "Vous pouvez maintenant voir que :"
