@@ -23,6 +23,12 @@ export function TopNav() {
     <header className="fixed top-0 inset-x-0 z-50 h-12 flex items-center px-6 bg-[var(--bg)] border-b border-[var(--border)]">
       {/* Logo */}
       <Link href="/" className="flex items-center gap-2 mr-8 flex-shrink-0">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo.svg"
+          alt="SauronID"
+          className="h-6 w-6 object-contain logo-invert"
+        />
         <span
           className="text-sm font-semibold tracking-tight"
           style={{ fontFamily: "var(--font-sans)" }}
