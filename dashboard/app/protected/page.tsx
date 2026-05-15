@@ -1,9 +1,7 @@
 import { getTranslations } from "next-intl/server";
 import { fetchProtected } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
-import { Table, Thead, Tbody, Th, Td, Tr } from "@/components/ui/Table";
-import { Badge } from "@/components/ui/Badge";
-import { fmtRelativeTime } from "@/lib/format";
+import { ProtectedFeed } from "@/components/protected/ProtectedFeed";
 
 export default async function ProtectedPage() {
   const t = await getTranslations("protected");
@@ -36,32 +34,22 @@ export default async function ProtectedPage() {
           {t("empty")}
         </p>
       ) : (
-        <Table>
-          <Thead>
-            <tr>
-              <Th>{t("colTime")}</Th>
-              <Th>{t("colAgent")}</Th>
-              <Th>{t("colReason")}</Th>
-            </tr>
-          </Thead>
-          <Tbody>
-            {events.map((event) => (
-              <Tr key={event.id}>
-                <Td>
-                  <span className="text-mono-sm text-[var(--text-muted)]">
-                    {fmtRelativeTime(event.timestamp)}
-                  </span>
-                </Td>
-                <Td className="text-[var(--text-primary)]">{event.agent_name}</Td>
-                <Td>
-                  <Badge variant="stopped">
-                    {t(`reasons.${event.reason_code}` as Parameters<typeof t>[0])}
-                  </Badge>
-                </Td>
-              </Tr>
-            ))}
-          </Tbody>
-        </Table>
+        <ProtectedFeed
+          events={events}
+          labels={{
+            colTime: t("colTime"),
+            colAgent: t("colAgent"),
+            colReason: t("colReason"),
+            reasons: {
+              replay: t("reasons.replay"),
+              scope: t("reasons.scope"),
+              signature: t("reasons.signature"),
+              nonce: t("reasons.nonce"),
+              revoked: t("reasons.revoked"),
+              expired: t("reasons.expired"),
+            },
+          }}
+        />
       )}
     </PageShell>
   );
