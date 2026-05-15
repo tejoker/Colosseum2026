@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+/* ── Fonts loaded via <link> tags in app/layout.tsx only ───────────── */
+/* Satoshi: Fontshare requires an HTML <link> tag — @font-face with a  */
+/* Fontshare URL will not work in CSS. Space Mono: Google Fonts <link>. */
+/* Do not add font imports here.                                        */
+
+/* ── Tailwind theme extension ──────────────────────────────────────── */
+@theme {
+  --font-sans: "Satoshi", system-ui, sans-serif;
+  --font-mono: "Space Mono", monospace;
+  --transition-fast: 150ms;
+  --transition-base: 200ms;
+}
+
+/* ── Dark mode tokens (default) ────────────────────────────────────── */
+:root {
+  --bg: #06090f;
+  --bg-surface: #111114;
+  --bg-elevated: #18181b;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-hover: rgba(255, 255, 255, 0.12);
+  --text-primary: #ffffff;
+  --text-secondary: rgba(255, 255, 255, 0.55);
+  --text-muted: rgba(255, 255, 255, 0.30);
+  --accent: #2563eb;
+  --accent-hover: #4f8cfe;
+  --status-ok: #34d399;
+  --status-stopped: #f87171;
+  --status-warning: rgba(251, 191, 36, 0.6);
+}
+
+/* ── Light mode tokens ─────────────────────────────────────────────── */
+.light {
+  --bg: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f1f5f9;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-hover: rgba(0, 0, 0, 0.16);
+  --text-primary: #0f172a;
+  --text-secondary: rgba(15, 23, 42, 0.55);
+  --text-muted: rgba(15, 23, 42, 0.35);
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --status-ok: #059669;
+  --status-stopped: #dc2626;
+  --status-warning: rgba(217, 119, 6, 0.7);
+}
+
+/* ── Base ──────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ── Motion — calm, purposeful ─────────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+  .animate-pulse-calm {
+    animation: pulse-calm 1.2s ease-in-out infinite;
+  }
+  .animate-fade-in {
+    animation: fade-in 200ms ease-out;
+  }
+}
+
+@keyframes pulse-calm {
+  0%, 100% { opacity: 0.4; }
+  50%       { opacity: 0.8; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ── Typography utilities ──────────────────────────────────────────── */
+.text-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.text-mono-sm {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
