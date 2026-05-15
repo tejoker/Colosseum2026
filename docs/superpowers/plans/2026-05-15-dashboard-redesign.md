@@ -41,6 +41,7 @@ dashboard/
     api/
       health/route.ts
       agents/route.ts
+      agents/[id]/revoke/route.ts
       protected/route.ts
       activity/route.ts
       proofs/route.ts
@@ -226,13 +227,10 @@ git commit -m "feat(dashboard): scaffold Next.js 16 project with deps"
 ```css
 @import "tailwindcss";
 
-/* ── Font loading ──────────────────────────────────────────────────── */
-@import url("https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap");
-
-@font-face {
-  font-family: "Satoshi";
-  src: url("https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700&display=swap");
-}
+/* ── Fonts loaded via <link> tags in app/layout.tsx only ───────────── */
+/* Satoshi: Fontshare requires an HTML <link> tag — @font-face with a  */
+/* Fontshare URL will not work in CSS. Space Mono: Google Fonts <link>. */
+/* Do not add font imports here.                                        */
 
 /* ── Tailwind theme extension ──────────────────────────────────────── */
 @theme {
@@ -355,6 +353,10 @@ git commit -m "feat(dashboard): CSS theme tokens dark/light + motion system"
 
 ```json
 {
+  "notFound": {
+    "message": "Page not found.",
+    "link": "Go home"
+  },
   "nav": {
     "home": "Home",
     "protected": "Protected",
@@ -390,6 +392,9 @@ git commit -m "feat(dashboard): CSS theme tokens dark/light + motion system"
     "mandate": "Mandate",
     "configDigest": "Config digest",
     "recentCalls": "Recent calls",
+    "labelType": "Type",
+    "labelRegistered": "Registered",
+    "noIntents": "No intents declared.",
     "audit": "View full audit",
     "revoke": "Revoke agent",
     "revokeConfirmTitle": "Revoke this agent?",
@@ -400,6 +405,7 @@ git commit -m "feat(dashboard): CSS theme tokens dark/light + motion system"
   "protected": {
     "title": "Protected",
     "subtitle": "Your governance layer stopped these actions.",
+    "empty": "Nothing stopped yet.",
     "summaryToday": "{count} today",
     "summaryWeek": "{count} this week",
     "summaryTotal": "{count} total",
@@ -424,6 +430,7 @@ git commit -m "feat(dashboard): CSS theme tokens dark/light + motion system"
     "colAction": "Action",
     "colResult": "Result",
     "colLatency": "Latency",
+    "empty": "No activity yet.",
     "filterAll": "All",
     "filterAllowed": "Allowed",
     "filterStopped": "Stopped",
@@ -478,6 +485,9 @@ git commit -m "feat(dashboard): CSS theme tokens dark/light + motion system"
     "tabConfig": "Configuration",
     "companiesEmpty": "No companies registered.",
     "peopleEmpty": "No people registered.",
+    "colName": "Name",
+    "colAgents": "Agents",
+    "colRegistered": "Registered",
     "configCoreUrl": "Core URL",
     "configDashUrl": "Analytics URL",
     "configPollInterval": "Poll interval (ms)"
@@ -506,6 +516,7 @@ git commit -m "feat(dashboard): CSS theme tokens dark/light + motion system"
     "scopeAll": "All agents",
     "dateRange": "Date range",
     "download": "Download",
+    "exporting": "Exporting…",
     "signedUnavailable": "Signing endpoint not yet available on this core version."
   },
   "common": {
@@ -1310,8 +1321,13 @@ export function ThemeToggle() {
 
 - [ ] **Step 2: Create dashboard/components/layout/TopNav.tsx**
 
+Client component — uses `usePathname()` for active link detection. No prop needed, no middleware needed.
+
 ```tsx
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { SystemStatus } from "./SystemStatus";
 import { ThemeToggle } from "./ThemeToggle";
@@ -1325,8 +1341,9 @@ const NAV_LINKS = [
   { key: "settings",  href: "/settings" },
 ] as const;
 
-export function TopNav({ currentPath }: { currentPath: string }) {
+export function TopNav() {
   const t = useTranslations("nav");
+  const pathname = usePathname();
 
   return (
     <header className="fixed top-0 inset-x-0 z-50 h-12 flex items-center px-6 bg-[var(--bg)] border-b border-[var(--border)]">
@@ -1344,9 +1361,7 @@ export function TopNav({ currentPath }: { currentPath: string }) {
       <nav className="flex items-center gap-1 flex-1" aria-label="Main navigation">
         {NAV_LINKS.map(({ key, href }) => {
           const isActive =
-            key === "home"
-              ? currentPath === "/"
-              : currentPath.startsWith(href);
+            key === "home" ? pathname === "/" : pathname.startsWith(href);
 
           return (
             <Link
@@ -1423,12 +1438,13 @@ export function PageShell({ children, title, subtitle }: PageShellProps) {
 
 - [ ] **Step 2: Create dashboard/app/layout.tsx**
 
+`TopNav` is a client component — no need to pass `currentPath` or read headers. Layout stays a simple Server Component.
+
 ```tsx
 import type { Metadata } from "next";
 import { ThemeProvider } from "next-themes";
 import { NextIntlClientProvider } from "next-intl";
 import { getMessages } from "next-intl/server";
-import { headers } from "next/headers";
 import { TopNav } from "@/components/layout/TopNav";
 import "./globals.css";
 
@@ -1443,8 +1459,6 @@ export default async function RootLayout({
   children: React.ReactNode;
 }) {
   const messages = await getMessages();
-  const headersList = await headers();
-  const pathname = headersList.get("x-pathname") ?? "/";
 
   return (
     <html lang="en" suppressHydrationWarning>
@@ -1468,7 +1482,7 @@ export default async function RootLayout({
           disableTransitionOnChange
         >
           <NextIntlClientProvider messages={messages}>
-            <TopNav currentPath={pathname} />
+            <TopNav />
             {children}
           </NextIntlClientProvider>
         </ThemeProvider>
@@ -1523,13 +1537,15 @@ export default function GlobalError({
 
 ```tsx
 import Link from "next/link";
+import { getTranslations } from "next-intl/server";
 
-export default function NotFound() {
+export default async function NotFound() {
+  const t = await getTranslations("notFound");
   return (
     <div className="min-h-screen pt-12 flex flex-col items-center justify-center gap-4">
-      <p className="text-sm text-[var(--text-muted)]">Page not found.</p>
+      <p className="text-sm text-[var(--text-muted)]">{t("message")}</p>
       <Link href="/" className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150">
-        Go home
+        {t("link")}
       </Link>
     </div>
   );
@@ -1744,11 +1760,11 @@ export default async function AgentDetailPage({
             <p className="text-mono-sm text-[var(--text-muted)] uppercase mb-3">{t("identity")}</p>
             <dl className="space-y-2 text-sm">
               <div className="flex justify-between">
-                <dt className="text-[var(--text-muted)]">Type</dt>
+                <dt className="text-[var(--text-muted)]">{t("labelType")}</dt>
                 <dd className="text-[var(--text-secondary)] font-mono">{agent.agent_type}</dd>
               </div>
               <div className="flex justify-between">
-                <dt className="text-[var(--text-muted)]">Registered</dt>
+                <dt className="text-[var(--text-muted)]">{t("labelRegistered")}</dt>
                 <dd className="text-[var(--text-secondary)]">{fmtTimestamp(agent.registered_at)}</dd>
               </div>
             </dl>
@@ -1771,7 +1787,7 @@ export default async function AgentDetailPage({
         <CardBody>
           <p className="text-mono-sm text-[var(--text-muted)] uppercase mb-3">{t("mandate")}</p>
           {agent.allowed_intents.length === 0 ? (
-            <p className="text-sm text-[var(--text-muted)]">No intents declared.</p>
+            <p className="text-sm text-[var(--text-muted)]">{t("noIntents")}</p>
           ) : (
             <ul className="flex flex-wrap gap-2">
               {agent.allowed_intents.map((intent) => (
@@ -1792,22 +1808,22 @@ export default async function AgentDetailPage({
         >
           {t("audit")} →
         </Link>
-        <RevokeButton agentId={id} agentName={agent.name} />
+        <RevokeButton agentId={id} label={t("revoke")} />
       </div>
     </PageShell>
   );
 }
 
-function RevokeButton({ agentId, agentName }: { agentId: string; agentName: string }) {
-  // Server component shell — revoke action handled via separate client component
+function RevokeButton({ agentId, label }: { agentId: string; label: string }) {
+  // Posts to the revoke route created in Task 19. Uses a form so it works
+  // without JavaScript. Page will revalidate after redirect.
   return (
     <form action={`/api/agents/${agentId}/revoke`} method="POST">
-      <input type="hidden" name="agentName" value={agentName} />
       <button
         type="submit"
         className="text-sm text-[var(--status-stopped)] hover:opacity-80 transition-opacity duration-150"
       >
-        Revoke agent
+        {label}
       </button>
     </form>
   );
@@ -1866,7 +1882,7 @@ export default async function ProtectedPage() {
 
       {events.length === 0 ? (
         <p className="text-sm text-[var(--text-muted)] py-12 text-center">
-          Nothing stopped yet.
+          {t("empty")}
         </p>
       ) : (
         <Table>
@@ -1975,7 +1991,7 @@ export function LiveFeed() {
         <Spinner />
       ) : calls.length === 0 ? (
         <p className="text-sm text-[var(--text-muted)] py-12 text-center">
-          No activity yet.
+          {t("empty")}
         </p>
       ) : (
         <Table>
@@ -2395,9 +2411,9 @@ export default async function SettingsPage() {
           <Table>
             <Thead>
               <tr>
-                <Th>Name</Th>
-                <Th>Agents</Th>
-                <Th>Registered</Th>
+                <Th>{t("colName")}</Th>
+                <Th>{t("colAgents")}</Th>
+                <Th>{t("colRegistered")}</Th>
               </tr>
             </Thead>
             <Tbody>
@@ -2428,9 +2444,9 @@ export default async function SettingsPage() {
           <Table>
             <Thead>
               <tr>
-                <Th>Name</Th>
+                <Th>{t("colName")}</Th>
                 <Th>Company</Th>
-                <Th>Registered</Th>
+                <Th>{t("colRegistered")}</Th>
               </tr>
             </Thead>
             <Tbody>
@@ -2880,6 +2896,7 @@ export function AuditExportPanel({ agentId }: AuditExportPanelProps) {
       <p className="text-sm font-medium text-[var(--text-primary)] mb-1">{t("title")}</p>
       <p className="text-sm text-[var(--text-muted)] mb-4">{t("subtitle")}</p>
 
+      {/* Format selector — json + pdf active, signed disabled */}
       <div className="flex items-center gap-2 mb-4">
         {(["json", "pdf"] as ExportFormat[]).map((f) => (
           <button
@@ -2894,6 +2911,14 @@ export function AuditExportPanel({ agentId }: AuditExportPanelProps) {
             {f === "json" ? t("formatJson") : t("formatPdf")}
           </button>
         ))}
+        {/* Signed report — disabled until core provides signing endpoint */}
+        <button
+          disabled
+          title={t("signedUnavailable")}
+          className="px-3 py-1.5 text-sm rounded text-[var(--text-muted)] opacity-40 cursor-not-allowed"
+        >
+          {t("formatSigned")}
+        </button>
       </div>
 
       <p className="text-mono-sm text-[var(--text-muted)] mb-4">
@@ -2906,36 +2931,57 @@ export function AuditExportPanel({ agentId }: AuditExportPanelProps) {
         onClick={handleExport}
         disabled={loading}
       >
-        {loading ? "Exporting…" : `${t("download")} ${format.toUpperCase()}`}
+        {loading ? t("exporting") : `${t("download")} ${format.toUpperCase()}`}
       </Button>
     </div>
   );
 }
 ```
 
-- [ ] **Step 2: Update dashboard/app/activity/page.tsx to add export button**
+- [ ] **Step 2: Update dashboard/app/activity/page.tsx — export button in header, opens Dialog**
 
-Replace the existing `app/activity/page.tsx` content with:
+Export is a discrete button top-right of the page header. Clicking opens `AuditExportPanel` in a Dialog. Replace the existing `app/activity/page.tsx`:
 
 ```tsx
-import { getTranslations } from "next-intl/server";
+"use client";
+
+import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { PageShell } from "@/components/layout/PageShell";
 import { LiveFeed } from "@/components/live/LiveFeed";
 import { AuditExportPanel } from "@/components/audit/AuditExportPanel";
+import * as Dialog from "@radix-ui/react-dialog";
 
-export default async function ActivityPage() {
-  const t = await getTranslations("activity");
+export default function ActivityPage() {
+  const t = useTranslations("activity");
+  const [exportOpen, setExportOpen] = useState(false);
 
   return (
-    <PageShell title={t("title")} subtitle={t("subtitle")}>
-      <div className="flex items-start justify-between gap-4 mb-6">
-        <div className="flex-1 min-w-0">
-          <LiveFeed />
+    <PageShell>
+      {/* Page header with export button */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-[var(--text-primary)] tracking-tight">
+            {t("title")}
+          </h1>
+          <p className="mt-1 text-sm text-[var(--text-muted)]">{t("subtitle")}</p>
         </div>
+        <Dialog.Root open={exportOpen} onOpenChange={setExportOpen}>
+          <Dialog.Trigger asChild>
+            <button className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors duration-150 ease-out">
+              {t("exportAudit")} ↗
+            </button>
+          </Dialog.Trigger>
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40 animate-fade-in" />
+            <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md animate-fade-in">
+              <AuditExportPanel />
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
       </div>
-      <div className="mt-8 max-w-sm">
-        <AuditExportPanel />
-      </div>
+
+      <LiveFeed />
     </PageShell>
   );
 }
@@ -2950,28 +2996,44 @@ git commit -m "feat(dashboard): AuditExportPanel — JSON + PDF export, wired in
 
 ---
 
-## Task 21: Final build check + middleware for pathname
+## Task 21: Revoke API route + final build check
 
 **Files:**
-- Create: `dashboard/middleware.ts`
+- Create: `dashboard/app/api/agents/[id]/revoke/route.ts`
 
-- [ ] **Step 1: Create middleware to inject x-pathname header**
+- [ ] **Step 1: Create the revoke proxy route**
 
-The root layout reads `x-pathname` from headers to pass to `TopNav`. Add the middleware that sets it:
+`RevokeButton` in `app/agents/[id]/page.tsx` posts to `/api/agents/{id}/revoke`. Create that route now:
 
 ```typescript
+// dashboard/app/api/agents/[id]/revoke/route.ts
 import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
 
-export function middleware(request: NextRequest) {
-  const response = NextResponse.next();
-  response.headers.set("x-pathname", request.nextUrl.pathname);
-  return response;
+const CORE_URL = process.env.CORE_URL ?? "http://localhost:3001";
+
+export async function POST(
+  _req: Request,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const res = await fetch(
+      `${CORE_URL}/api/v1/agents/${params.id}/revoke`,
+      { method: "POST" }
+    );
+    if (!res.ok) {
+      return NextResponse.json(
+        { ok: false, error: `Core returned ${res.status}` },
+        { status: res.status }
+      );
+    }
+    return NextResponse.json({ ok: true, revoked: true });
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "Core unreachable" },
+      { status: 502 }
+    );
+  }
 }
-
-export const config = {
-  matcher: ["/((?!_next|favicon.ico).*)"],
-};
 ```
 
 - [ ] **Step 2: Run full build**
@@ -2997,7 +3059,7 @@ cd dashboard && npm run dev
 ```
 
 Open http://localhost:3000 — navigate to all 6 routes, verify:
-- TopNav active link highlights correctly on each route
+- TopNav active link highlights correctly on each route (client-side `usePathname()`)
 - SystemStatus shows in top nav
 - ThemeToggle switches light/dark without flash
 - Home shows agent grid or empty state (no charts, no KPI widgets)
@@ -3006,8 +3068,8 @@ Open http://localhost:3000 — navigate to all 6 routes, verify:
 - [ ] **Step 5: Final commit**
 
 ```bash
-git add dashboard/middleware.ts
-git commit -m "feat(dashboard): middleware for x-pathname + final build verified"
+git add dashboard/app/api/agents/
+git commit -m "feat(dashboard): revoke proxy route + final build verified"
 ```
 
 ---
