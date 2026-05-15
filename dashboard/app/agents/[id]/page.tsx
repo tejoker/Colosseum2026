@@ -1,12 +1,14 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
-import { fetchAgent } from "@/lib/api";
+import { fetchAgent, fetchActivity } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody } from "@/components/ui/Card";
 import { StatusDot } from "@/components/ui/StatusDot";
-import { truncateHash, fmtTimestamp } from "@/lib/format";
+import { Table, Thead, Tbody, Th, Td, Tr } from "@/components/ui/Table";
+import { truncateHash, fmtTimestamp, fmtRelativeTime } from "@/lib/format";
+import { RevokeButton } from "@/components/agents/RevokeButton";
 
 export default async function AgentDetailPage({
   params,
@@ -15,10 +17,14 @@ export default async function AgentDetailPage({
 }) {
   const { id } = await params;
   const t = await getTranslations("agentDetail");
-  const result = await fetchAgent(id);
+  const [result, activityResult] = await Promise.all([
+    fetchAgent(id),
+    fetchActivity({ agent_id: id, limit: 10 }),
+  ]);
 
   if (!result.ok) notFound();
   const agent = result.data;
+  const recentCalls = activityResult.ok ? activityResult.data : [];
 
   return (
     <PageShell>
@@ -90,6 +96,43 @@ export default async function AgentDetailPage({
         </CardBody>
       </Card>
 
+      {/* Recent calls */}
+      <Card className="mb-6">
+        <CardBody>
+          <p className="text-mono-sm text-[var(--text-muted)] uppercase mb-3">{t("recentCalls")}</p>
+          {recentCalls.length === 0 ? (
+            <p className="text-sm text-[var(--text-muted)]">—</p>
+          ) : (
+            <Table>
+              <Thead>
+                <Tr>
+                  <Th>Time</Th>
+                  <Th>Action</Th>
+                  <Th>Result</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                {recentCalls.map((call) => (
+                  <Tr key={call.id}>
+                    <Td className="text-mono-sm text-[var(--text-muted)]">
+                      {fmtRelativeTime(call.timestamp)}
+                    </Td>
+                    <Td className="text-mono-sm text-[var(--text-secondary)]">
+                      {call.action}
+                    </Td>
+                    <Td>
+                      <Badge variant={call.result === "allowed" ? "ok" : "stopped"}>
+                        {call.result === "allowed" ? "✓" : "✗"}
+                      </Badge>
+                    </Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
+          )}
+        </CardBody>
+      </Card>
+
       {/* Actions */}
       <div className="flex items-center gap-3">
         <Link
@@ -98,21 +141,8 @@ export default async function AgentDetailPage({
         >
           {t("audit")} →
         </Link>
-        <RevokeButton agentId={id} label={t("revoke")} />
+        <RevokeButton agentId={id} agentName={agent.name} label={t("revoke")} />
       </div>
     </PageShell>
-  );
-}
-
-function RevokeButton({ agentId, label }: { agentId: string; label: string }) {
-  return (
-    <form action={`/api/agents/${agentId}/revoke`} method="POST">
-      <button
-        type="submit"
-        className="text-sm text-[var(--status-stopped)] hover:opacity-80 transition-opacity duration-150"
-      >
-        {label}
-      </button>
-    </form>
   );
 }
