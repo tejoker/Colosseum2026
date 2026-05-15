@@ -27,7 +27,7 @@ export function TopNav() {
         <img
           src="/logo.svg"
           alt="SauronID"
-          className="h-6 w-6 object-contain logo-invert"
+          className="h-6 w-6 object-contain"
         />
         <span
           className="text-sm font-semibold tracking-tight"
