@@ -14,6 +14,9 @@ export function LiveFeed() {
   const t = useTranslations("activity");
   const [calls, setCalls] = useState<ActivityCall[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
+  const [agentFilter, setAgentFilter] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -36,10 +39,21 @@ export function LiveFeed() {
 
   const filters: Filter[] = ["all", "allowed", "stopped"];
 
+  const visibleCalls = calls
+    .filter((c) => filter === "all" || c.result === filter)
+    .filter((c) => !agentFilter || c.agent_name.toLowerCase().includes(agentFilter.toLowerCase()))
+    .filter((c) => !dateFrom || new Date(c.timestamp) >= new Date(dateFrom))
+    .filter((c) => !dateTo || new Date(c.timestamp) <= new Date(dateTo + "T23:59:59"));
+
+  const INPUT_CLASS =
+    "px-3 py-1.5 text-sm bg-[var(--bg-surface)] border border-[var(--border)] rounded " +
+    "text-[var(--text-primary)] placeholder:text-[var(--text-muted)] " +
+    "focus:outline-none focus:border-[var(--border-hover)] transition-colors duration-150 ease-out";
+
   return (
     <div>
       {/* Filter tabs */}
-      <div className="flex items-center gap-1 mb-6">
+      <div className="flex items-center gap-1">
         {filters.map((f) => (
           <button
             key={f}
@@ -55,9 +69,34 @@ export function LiveFeed() {
         ))}
       </div>
 
+      {/* Secondary filters */}
+      <div className="flex items-center gap-3 mt-3 mb-6">
+        <input
+          type="text"
+          value={agentFilter}
+          onChange={(e) => setAgentFilter(e.target.value)}
+          placeholder={t("filterAgent")}
+          className={`${INPUT_CLASS} w-40`}
+        />
+        <input
+          type="date"
+          value={dateFrom}
+          onChange={(e) => setDateFrom(e.target.value)}
+          placeholder={t("filterFrom")}
+          className={`${INPUT_CLASS} w-36`}
+        />
+        <input
+          type="date"
+          value={dateTo}
+          onChange={(e) => setDateTo(e.target.value)}
+          placeholder={t("filterTo")}
+          className={`${INPUT_CLASS} w-36`}
+        />
+      </div>
+
       {loading ? (
         <Spinner />
-      ) : calls.length === 0 ? (
+      ) : visibleCalls.length === 0 ? (
         <p className="text-sm text-[var(--text-muted)] py-12 text-center">
           {t("empty")}
         </p>
@@ -73,7 +112,7 @@ export function LiveFeed() {
             </tr>
           </Thead>
           <Tbody>
-            {calls.map((call) => {
+            {visibleCalls.map((call) => {
               const isExpanded = expandedId === call.id;
               const { body_hash, nonce, jti, dpop_binding } = call.detail;
               const detailEntries: { label: string; value: string }[] = [
