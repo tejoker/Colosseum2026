@@ -15,6 +15,11 @@ export function LiveFeed() {
   const [calls, setCalls] = useState<ActivityCall[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const toggleExpand = (id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  };
 
   const load = useCallback(async () => {
     const result = await fetchActivity({ filter, limit: 100 });
@@ -68,31 +73,72 @@ export function LiveFeed() {
             </tr>
           </Thead>
           <Tbody>
-            {calls.map((call) => (
-              <Tr key={call.id}>
-                <Td>
-                  <span className="text-mono-sm text-[var(--text-muted)]">
-                    {fmtRelativeTime(call.timestamp)}
-                  </span>
-                </Td>
-                <Td className="text-[var(--text-primary)]">{call.agent_name}</Td>
-                <Td>
-                  <span className="text-mono-sm text-[var(--text-secondary)]">
-                    {call.action}
-                  </span>
-                </Td>
-                <Td>
-                  <Badge variant={call.result === "allowed" ? "ok" : "stopped"}>
-                    {t(call.result === "allowed" ? "resultAllowed" : "resultStopped")}
-                  </Badge>
-                </Td>
-                <Td>
-                  <span className="text-mono-sm text-[var(--text-muted)]">
-                    {fmtLatency(call.latency_ms)}
-                  </span>
-                </Td>
-              </Tr>
-            ))}
+            {calls.map((call) => {
+              const isExpanded = expandedId === call.id;
+              const { body_hash, nonce, jti, dpop_binding } = call.detail;
+              const detailEntries: { label: string; value: string }[] = [
+                { label: t("detailIntent"), value: call.intent },
+                ...(body_hash ? [{ label: t("detailBodyHash"), value: body_hash }] : []),
+                ...(nonce ? [{ label: t("detailNonce"), value: nonce }] : []),
+                ...(jti ? [{ label: t("detailJti"), value: jti }] : []),
+                ...(dpop_binding ? [{ label: t("detailDpop"), value: dpop_binding }] : []),
+              ];
+
+              return (
+                <>
+                  <Tr
+                    key={call.id}
+                    onClick={() => toggleExpand(call.id)}
+                    className="cursor-pointer"
+                  >
+                    <Td>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span
+                          className={`inline-block transition-transform duration-150 ease-out text-[var(--text-muted)] text-xs ${
+                            isExpanded ? "rotate-90" : ""
+                          }`}
+                        >
+                          ›
+                        </span>
+                        <span className="text-mono-sm text-[var(--text-muted)]">
+                          {fmtRelativeTime(call.timestamp)}
+                        </span>
+                      </span>
+                    </Td>
+                    <Td className="text-[var(--text-primary)]">{call.agent_name}</Td>
+                    <Td>
+                      <span className="text-mono-sm text-[var(--text-secondary)]">
+                        {call.action}
+                      </span>
+                    </Td>
+                    <Td>
+                      <Badge variant={call.result === "allowed" ? "ok" : "stopped"}>
+                        {t(call.result === "allowed" ? "resultAllowed" : "resultStopped")}
+                      </Badge>
+                    </Td>
+                    <Td>
+                      <span className="text-mono-sm text-[var(--text-muted)]">
+                        {fmtLatency(call.latency_ms)}
+                      </span>
+                    </Td>
+                  </Tr>
+                  {isExpanded && (
+                    <tr key={`${call.id}-detail`}>
+                      <td colSpan={5} className="px-4 pb-3 pt-0">
+                        <dl className="bg-[var(--bg-elevated)] rounded p-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
+                          {detailEntries.map(({ label, value }) => (
+                            <>
+                              <dt className="text-xs text-[var(--text-muted)]">{label}</dt>
+                              <dd className="font-mono text-xs text-[var(--text-muted)] break-all">{value}</dd>
+                            </>
+                          ))}
+                        </dl>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })}
           </Tbody>
         </Table>
       )}

@@ -82,7 +82,12 @@
     "filterStopped": "Stopped",
     "exportAudit": "Export audit",
     "resultAllowed": "Allowed",
-    "resultStopped": "Stopped"
+    "resultStopped": "Stopped",
+    "detailIntent": "Intent",
+    "detailBodyHash": "Body hash",
+    "detailNonce": "Nonce",
+    "detailJti": "JTI",
+    "detailDpop": "DPoP binding"
   },
   "proofs": {
     "title": "Proofs",
