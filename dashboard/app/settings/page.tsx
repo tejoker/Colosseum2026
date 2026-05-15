@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getTranslations } from "next-intl/server";
 import { fetchCompanies, fetchPeople } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
@@ -35,7 +36,14 @@ export default async function SettingsPage() {
             <Tbody>
               {companies.map((c) => (
                 <Tr key={c.id}>
-                  <Td className="text-[var(--text-primary)]">{c.name}</Td>
+                  <Td>
+                    <Link
+                      href={`/companies/${c.id}`}
+                      className="text-[var(--text-primary)] hover:text-[var(--accent)] transition-colors duration-150 ease-out"
+                    >
+                      {c.name}
+                    </Link>
+                  </Td>
                   <Td>{fmtNumber(c.agent_count)}</Td>
                   <Td>
                     <span className="text-mono-sm text-[var(--text-muted)]">

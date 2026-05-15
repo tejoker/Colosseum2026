@@ -171,8 +171,16 @@ export async function fetchCompanies(): Promise<ApiResult<Company[]>> {
   return get<Company[]>(`${DASH_URL}/api/live/clients`);
 }
 
+export async function fetchCompany(id: string): Promise<ApiResult<Company>> {
+  return get<Company>(`${DASH_URL}/api/live/clients/${id}`);
+}
+
 export async function fetchPeople(): Promise<ApiResult<Person[]>> {
   return get<Person[]>(`${DASH_URL}/api/live/users`);
+}
+
+export async function fetchCompanyPeople(companyId: string): Promise<ApiResult<Person[]>> {
+  return get<Person[]>(`${DASH_URL}/api/live/users?company_id=${companyId}`);
 }
 
 export async function fetchHealth(): Promise<ApiResult<SystemHealth>> {

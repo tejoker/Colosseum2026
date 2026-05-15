@@ -165,6 +165,16 @@
     "exporting": "Exporting…",
     "signedUnavailable": "Signing endpoint not yet available on this core version."
   },
+  "company": {
+    "back": "Back to Settings",
+    "people": "People",
+    "empty": "No people registered.",
+    "colName": "Name",
+    "colEmail": "Email",
+    "colRegistered": "Registered",
+    "statPeople": "{count, plural, one {# person} other {# people}}",
+    "statAgents": "{count, plural, one {# agent} other {# agents}}"
+  },
   "common": {
     "loading": "Loading…",
     "error": "Something went wrong.",
