@@ -47,7 +47,7 @@ export function TopNav() {
                   : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
               }`}
             >
-              {t(key as keyof typeof t)}
+              {t(key)}
             </Link>
           );
         })}
