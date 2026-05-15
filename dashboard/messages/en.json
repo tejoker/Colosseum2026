@@ -123,6 +123,13 @@
         "description": "Configure the agent type, intent, and scenario freely."
       }
     },
+    "customAgentType": "Agent type",
+    "customIntent": "Intent",
+    "customScenario": "Scenario",
+    "customScenarioNormal": "Normal call",
+    "customScenarioReplay": "Token replay",
+    "customScenarioScope": "Scope escalation",
+    "customRun": "Run scenario",
     "running": "Running…",
     "resultAllowed": "Allowed",
     "resultStopped": "Stopped",
