@@ -98,7 +98,3 @@ body {
   letter-spacing: 0.10em;
 }
 
-/* Logo colour inversion for light mode (logo SVG is white by default) */
-.light .logo-invert {
-  filter: invert(1);
-}
