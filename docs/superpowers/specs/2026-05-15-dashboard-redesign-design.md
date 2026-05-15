@@ -267,7 +267,43 @@ All UI strings are externalized from day one. English only at launch, but the ar
 
 ---
 
-## 9. Component Guidelines
+## 9. Home Integrity Constraint
+
+The Home page answers exactly one question: **"Are my agents running normally?"**
+
+It must never drift toward:
+- Charts or graphs of any kind
+- KPI dashboards or analytics widgets
+- Multi-zone layouts (split panels, sidebars, stats columns)
+- Ops-style metrics ("p99 latency", "error rate", "throughput")
+
+If a feature request for Home cannot be justified by the single question above, it belongs in Activity, Proofs, or a new route — not on Home.
+
+The only numbers on Home are: agent count, calls today, protected count. These appear in a single slim line, not in cards or charts.
+
+---
+
+## 10. Motion System
+
+Motion is the difference between a clean dashboard and a memorable product. These rules are absolute — no exceptions during implementation.
+
+### Rules
+- **Duration:** 150ms for micro-interactions (hover, focus), 200ms for state transitions (show/hide, expand/collapse). Nothing longer.
+- **Easing:** `ease-out` only. Never `ease-in`, never `linear`, never spring/bounce.
+- **Purpose:** Motion is used only to clarify a state change — something appeared, something disappeared, something updated. Never for decoration.
+- **Hover:** Extremely subtle. Color shift only (`--text-secondary → --text-primary`, border opacity `0.06 → 0.12`). No translate, no scale, no glow on non-interactive elements.
+- **Loading:** Calm, continuous pulse (`opacity 0.4 → 0.8`, 1.2s, `ease-in-out infinite`). Never a spinner that implies urgency. Never a skeleton that flickers.
+- **Results in Try:** Single smooth reveal — result fades in at 200ms. No bounce, no flash, no terminal-style character-by-character render.
+- **Forbidden:** Typewriter effects, scanline animations, glitch effects, rapid flickers, orbit/glow pulses, anything that reads as "cyber terminal". These belong on the marketing site, not the dashboard.
+
+### Implementation checklist (applied to every component)
+- [ ] No `transition-all` — be explicit: `transition-colors duration-150 ease-out`
+- [ ] No animation on mount unless it carries meaning (e.g. a new event appearing in Activity)
+- [ ] `prefers-reduced-motion` respected — wrap all animations in `@media (prefers-reduced-motion: no-preference)`
+
+---
+
+## 11. Component Guidelines
 
 - **No box shadows** — depth via background color stacking and border opacity
 - **No rounded-xl cards** — `rounded-lg` max, consistent across all surfaces
@@ -279,7 +315,7 @@ All UI strings are externalized from day one. English only at launch, but the ar
 
 ---
 
-## 10. What This Is Not
+## 12. What This Is Not
 
 - Not a redesign of the marketing site or landing page
 - Not a replacement for the Rust core or Python analytics API
@@ -288,7 +324,7 @@ All UI strings are externalized from day one. English only at launch, but the ar
 
 ---
 
-## 11. Out of Scope
+## 13. Out of Scope
 
 - Authentication / login flow (no auth in current dashboard, none added here)
 - Mobile-first optimization (desktop-primary, responsive but not native mobile)
