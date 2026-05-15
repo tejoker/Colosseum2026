@@ -15,7 +15,12 @@ export default async function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const messages = await getMessages();
+  let messages: Awaited<ReturnType<typeof getMessages>>;
+  try {
+    messages = await getMessages();
+  } catch {
+    messages = {};
+  }
 
   return (
     <html lang="en" suppressHydrationWarning>
