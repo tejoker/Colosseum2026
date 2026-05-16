@@ -65,15 +65,8 @@ jobs:
           npm ci
           npm test
 
-      - name: Partner portal
-        working-directory: partner-portal
-        run: |
-          npm ci
-          npm run lint
-          npm run build
-
       - name: Dashboard
-        working-directory: sauron-dashboard
+        working-directory: dashboard
         run: |
           npm ci
           npm run lint

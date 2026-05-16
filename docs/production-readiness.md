@@ -36,10 +36,10 @@ SQLite is the local/CI default. Production-like startup requires `SAURON_ACCEPT_
 Before a demo or release, run:
 
 ```bash
-bash run-all.sh
+bash scripts/dev/run-all.sh
 ```
 
-For production-shaped container configuration, use `docker-compose.prod.yml` as a starting template. It intentionally requires secrets and does not ship development defaults.
+For production-shaped container configuration, use `deploy/docker-compose.prod.yml` as a starting template. It intentionally requires secrets and does not ship development defaults.
 
 At minimum, the gate should include:
 

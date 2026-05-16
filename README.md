@@ -85,7 +85,7 @@ Honest table. Re-verifiable from the source.
 
 ```bash
 git clone https://github.com/tejoker/Colosseum2026 sauronid && cd sauronid
-./quickstart.sh
+./scripts/dev/quickstart.sh
 ```
 
 The script: builds the Rust core, builds the TS clients, starts the server in dev mode, seeds clients/users, and runs the 9-scenario invariant suite + the empirical suite (10 attacks dynamic, 6 attacks via source-code review). Both must pass green at the end.
@@ -93,7 +93,7 @@ The script: builds the Rust core, builds the TS clients, starts the server in de
 By default the server runs in **advisory** mode (logs call-signature violations but accepts them). To run in **fail-closed** (production-like) enforcement mode:
 
 ```bash
-SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
+SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
 ```
 
 The "16/16 blocked" empirical claim assumes this flag is set.
@@ -101,7 +101,7 @@ The "16/16 blocked" empirical claim assumes this flag is set.
 For a full local demo (core + analytics shim + branded Next.js dashboard) in one shot:
 
 ```bash
-./launch.sh
+./scripts/dev/launch.sh
 # core      → http://127.0.0.1:3001
 # analytics → http://127.0.0.1:8002
 # dashboard → http://127.0.0.1:3000   (Mandate Console)
@@ -111,7 +111,7 @@ To deploy in production: see [docs/operations.md](docs/operations.md).
 
 ## Mandate Console — the web dashboard
 
-A branded Next.js console at `sauron-dashboard/` reads only live data from the running core (no parquet, no fixtures). Six routes:
+A branded Next.js console at `dashboard/` reads only live data from the running core (no parquet, no fixtures). Six routes:
 
 | Route | What it shows |
 |---|---|
@@ -185,7 +185,7 @@ Every claim above has a runnable test. See [docs/empirical-comparison.md](docs/e
 To reproduce the empirical claim (requires fail-closed mode):
 
 ```bash
-SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
+SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
 # at the end, the dynamic empirical suite reports "10/10 blocked" for A1–A10.
 # A11–A16 are validated by reading core/src for the canonical patterns.
 ```
@@ -218,47 +218,39 @@ SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
                    audit anchor    audit anchor   storage
 ```
 
-## Repo layout — what is current, what is historical
-
-The repo carries a previous-life of bank-KYC code under `legacy/` and adjacent
-fixtures. The active SauronID surface is a focused subset.
-
-**Current SauronID code** (review these):
+## Repo layout
 
 ```
-core/                  Rust axum service (SauronID core, ~14k lines core Rust)
-sauron-dashboard/      Next.js Mandate Console
-clients/python/        Python adapter (SignedAgent + LLM wrappers)
+core/                  Rust axum service (~14k lines core Rust)
+dashboard/             Next.js Mandate Console (live data from core)
+clients/python/        Python adapter (SignedAgent + LangChain/OpenAI/Anthropic wrappers)
 agentic/               TypeScript adapter
-redteam/               16-attack empirical suite + 18-attack Tavily fuzzer
-scripts/               simulate_real_actions.py, solana_audit.py, etc.
+redteam/               16-attack empirical suite + 18-attack Tavily fuzzer + competitive benchmark
 contracts/             Solana Anchor program (sauron_ledger)
-docs/                  threat-model, operations, production-readiness
-BRANDING.md            Visual identity (Mandate Console)
-SauronID_Pitch_Deck.pdf
-```
+migrations/postgres/   Postgres schema
+schemas/               Shared JSON schemas (external crypto, attestation)
+zkp/                   ZKP issuer + circuits
 
-**Historical / not part of the SauronID product surface** (do not depend on):
+scripts/dev/           Dev orchestration shell scripts (quickstart, launch, start, ...)
+scripts/               Python simulation + audit utilities (simulate_real_actions.py, solana_audit.py, ...)
+deploy/                docker-compose files (dev, prod, postgres)
+branding/              BRANDING.md, logo.svg, brand-book.pdf
+docs/                  threat-model, operations, production-readiness, roadmap, competitive-benchmark
 
+archive/banking-2025/  Pre-pivot bank-KYC code. Feature-flagged off by default; kept for git
+                       continuity. Do not depend on. Removed from active product surface.
 ```
-legacy/KYC/            Old bank-KYC ingest. Feature-flagged off by default.
-data/sauron/data/*.csv Banking-era persona/expense fixtures. Unused.
-anomaly-engine/        Old anomaly pipeline. Unused.
-partner-portal/        Bank/retail UI. Demo-quality, not core to SauronID.
-subgraph/              Subgraph schema scaffolding. Inactive.
-```
-
-These exist for git history continuity and may be removed in a future cleanup.
 
 ## Critical files
 
 - Core service: [`core/`](core/) — Rust, axum, ~14k lines core Rust (count: `find core/src -name '*.rs' | xargs wc -l`).
-- Mandate Console: [`sauron-dashboard/`](sauron-dashboard/) — Next.js + Chart.js, dark branded UI reading live core data only.
-- Brand system: [`BRANDING.md`](BRANDING.md), pitch deck at [`SauronID_Pitch_Deck.pdf`](SauronID_Pitch_Deck.pdf), eye logo at [`logo.svg`](logo.svg).
+- Mandate Console: [`dashboard/`](dashboard/) — Next.js + Chart.js, dark branded UI reading live core data only.
+- Brand system: [`branding/`](branding/) — `BRANDING.md`, eye logo, brand book.
 - TypeScript client: [`agentic/`](agentic/) — `signCall`, `register`, `popKeys`.
 - Python client: [`clients/python/sauronid_client/`](clients/python/sauronid_client/) — LangChain + OpenAI + Anthropic adapters.
 - Empirical attack suite: [`redteam/`](redteam/) — 9 invariant scenarios + 16-attack empirical suite + 18-attack Tavily fuzzer.
-- Simulation + audit scripts: [`scripts/`](scripts/) — real action receipts, agent stress, Solana devnet setup + wire audit.
+- Simulation + audit scripts: [`scripts/`](scripts/) — Python utilities; dev orchestration shells under [`scripts/dev/`](scripts/dev/).
+- Deploy config: [`deploy/`](deploy/) — docker-compose for dev / prod / postgres.
 - Custom Solana program: [`contracts/sauron_ledger/`](contracts/sauron_ledger/) — Anchor program (optional; default uses Solana Memo).
 - Operations: [`docs/operations.md`](docs/operations.md) — every env var, every deploy step.
 - Threat model: [`docs/threat-model.md`](docs/threat-model.md) — what we protect against, what we don't.
@@ -306,7 +298,7 @@ make verify
 make empirical
 
 # Cold rebuild + re-run
-make clean && ./quickstart.sh
+make clean && ./scripts/dev/quickstart.sh
 ```
 
 The full session log of how this was built (multi-week, agent-driven) is intentionally not in the repo. The codebase is the spec.

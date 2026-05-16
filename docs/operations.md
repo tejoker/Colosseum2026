@@ -192,7 +192,7 @@ Postgres backend recommended for production; SQLite default acceptable for dev/s
 #### Local Postgres dev
 
 ```bash
-docker compose -f docker-compose-postgres.yml up -d
+docker compose -f deploy/docker-compose-postgres.yml up -d
 psql "postgres://sauronid:dev@localhost:5432/sauronid" -f migrations/postgres/0001_initial.sql
 
 # or, with sqlx-cli installed:
@@ -234,7 +234,7 @@ Each port follows the template in `core/src/repository.rs::consume_call_nonce`:
 2. Match `&self` over `Sqlite` / `Postgres`, dispatch to the right driver.
 3. Map driver-specific errors (e.g. `sqlx::Error::Database::is_unique_violation`) onto the same `RepoError::Replay` variant SQLite already produces from `UNIQUE` text matching.
 4. Update callers from raw `db.execute(...)` to `state.repo.method(...).await`.
-5. Run `bash run-all.sh` (default + enforce). Both must stay green.
+5. Run `bash scripts/dev/run-all.sh` (default + enforce). Both must stay green.
 
 #### Dialect mapping
 
@@ -357,8 +357,8 @@ Before merging:
 ```bash
 cargo clippy -- -D warnings
 cargo test --workspace
-bash run-all.sh                                  # 9-scenario default
-SAURON_REQUIRE_CALL_SIG=1 bash run-all.sh        # 9-scenario enforce
+bash scripts/dev/run-all.sh                                  # 9-scenario default
+SAURON_REQUIRE_CALL_SIG=1 bash scripts/dev/run-all.sh        # 9-scenario enforce
 cargo audit                                      # dependency CVEs
 ```
 

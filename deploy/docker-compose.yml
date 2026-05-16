@@ -1,0 +1,69 @@
+# SauronID local stack: core + ZKP issuer + dashboard + EVM node.
+# Archived banking services (partner-portal, anomaly-engine, analytics) removed —
+# see archive/banking-2025/ for the pre-pivot product surface.
+services:
+  # ── Rust backend (Sauron Core) ──────────────────────────────────────────────
+  backend:
+    build: ../core
+    image: hackeurope-24-backend:latest
+    container_name: sauron-backend
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - ENV=${ENV:-development}
+      - SAURON_ACCEPT_SINGLE_NODE_SQLITE=${SAURON_ACCEPT_SINGLE_NODE_SQLITE:-1}
+      - SAURON_ISSUER_URL=${SAURON_ISSUER_URL:-http://zkp-issuer:4000}
+      - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}
+      # Required. Production requires >=32-byte keys; see admin::init_admin_auth.
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:3001/admin/stats -H \"x-admin-key: $$SAURON_ADMIN_KEY\" || exit 1" ]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  # ── Dashboard (Next.js — Mandate Console, port 3000) ────────────────────────
+  dashboard:
+    build:
+      context: ../dashboard
+      args:
+        NEXT_PUBLIC_API_URL: "http://localhost:3001"
+    container_name: sauron-dashboard
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:3001
+      - SAURON_CORE_INTERNAL_URL=http://backend:3001
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
+      - SAURONID_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1
+    restart: unless-stopped
+
+  # ── ZKP Issuer (OID4VCI — port 4000) ────────────────────────────────────────
+  zkp-issuer:
+    build: ../zkp/issuer
+    container_name: sauron-zkp-issuer
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - ISSUER_DID=did:sauron:issuer:1
+      - ISSUER_SEED=${ISSUER_SEED:?ISSUER_SEED is required — set to a long random string in your .env file.}
+      - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Hardhat Local EVM Node (port 8545) ──────────────────────────────────────
+  hardhat-node:
+    build: ../contracts/revocation
+    container_name: sauron-hardhat
+    ports:
+      - "8545:8545"
+    command: npx hardhat node --hostname 0.0.0.0
+    restart: unless-stopped
