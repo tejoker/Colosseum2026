@@ -61,7 +61,7 @@ jobs:
 
       - name: Start backend via docker-compose
         run: |
-          ENV=development SAURON_ISSUER_URL=http://zkp-issuer:4000 docker compose up -d backend zkp-issuer
+          ENV=development SAURON_ISSUER_URL=http://zkp-issuer:4000 docker compose -f deploy/docker-compose.yml up -d backend zkp-issuer
 
       - name: Wait for backend health
         run: |
@@ -73,7 +73,7 @@ jobs:
             sleep 2
           done
           echo "backend not healthy" >&2
-          docker compose logs backend || true
+          docker compose -f deploy/docker-compose.yml logs backend || true
           exit 1
 
       - name: Wait for issuer health
@@ -86,7 +86,7 @@ jobs:
             sleep 2
           done
           echo "issuer not healthy" >&2
-          docker compose logs zkp-issuer || true
+          docker compose -f deploy/docker-compose.yml logs zkp-issuer || true
           exit 1
 
       - name: Run delegated KYA e2e
@@ -139,11 +139,11 @@ jobs:
 
       - name: Dump logs on failure
         if: failure()
-        run: docker compose logs backend || true
+        run: docker compose -f deploy/docker-compose.yml logs backend || true
 
       - name: Shutdown stack
         if: always()
-        run: docker compose down -v --remove-orphans
+        run: docker compose -f deploy/docker-compose.yml down -v --remove-orphans
 
   confidence-gate:
     runs-on: ubuntu-latest

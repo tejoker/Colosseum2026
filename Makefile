@@ -21,10 +21,10 @@ test:  ## Run cargo test for the workspace
 	cd core && cargo test --release --workspace
 
 demo:  ## Quickstart: build + start + invariants (advisory mode)
-	./quickstart.sh
+	./scripts/dev/quickstart.sh
 
 demo-strict:  ## Quickstart in fail-closed mode + 16-attack empirical
-	SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
+	SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
 
 empirical:  ## Run 16-attack empirical suite against an already-running server
 	SAURON_REQUIRE_CALL_SIG=1 \
@@ -40,11 +40,11 @@ redteam:  ## Run Tavily-driven autonomous red-team agent (15 attacks; needs runn
 verify: build  ## cargo test + invariants + empirical (full release gate)
 	cd core && cargo clippy --release -- -D warnings || true
 	cd core && cargo test --release --workspace
-	./quickstart.sh
-	SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh
+	./scripts/dev/quickstart.sh
+	SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
 
 bench:  ## Latency benchmark on /agent/payment/authorize with full call-sig stack
-	@./quickstart.sh > /dev/null 2>&1 && \
+	@./scripts/dev/quickstart.sh > /dev/null 2>&1 && \
 	  node redteam/dist/bench/call-sig.js 2>/dev/null || node /tmp/bench-callsig.mjs
 
 docs:  ## Open the empirical comparison doc

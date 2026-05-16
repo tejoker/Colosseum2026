@@ -58,7 +58,7 @@ These routes are rejected outside development-like runtimes:
 
 ## Archived product paths
 
-- **Python KYC adapter** → `legacy/KYC/` (not started by default compose / `start.sh`).
-- **CAMARA, card login, phone verification, consent-popup UIs** → see `legacy/` (e.g. `legacy/camara/`, archived portal flows per `legacy/README.md`).
+- **Python KYC adapter** → `archive/banking-2025/KYC/` (not started by default compose / `scripts/dev/start.sh`).
+- **CAMARA, card login, phone verification, consent-popup UIs** → see `archive/banking-2025/` (e.g. `archive/banking-2025/camara/`, archived portal flows per `archive/banking-2025/README.md`).
 
 Rust core still exposes `/kyc/*` and `/agent/kyc/*` routes for **consent + retrieval** against the in-process DB; those are **not** the archived Python service. If you want those removed too, that is a separate core refactor.

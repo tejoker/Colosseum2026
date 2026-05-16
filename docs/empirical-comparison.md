@@ -15,7 +15,7 @@ A deployed AI agent acts on behalf of a human or system. The attacker's goals ar
 
 ## 16-attack matrix
 
-Run live: `SAURON_REQUIRE_CALL_SIG=1 ./quickstart.sh` (or directly `node dist/scenarios/empirical-suite.js`).
+Run live: `SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh` (or directly `node dist/scenarios/empirical-suite.js`).
 Latest result on commit at the time of writing: **16/16 blocked**.
 
 | ID  | Attack | SauronID | Verifier |
