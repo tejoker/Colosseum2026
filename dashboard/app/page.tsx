@@ -1,5 +1,7 @@
 import { getTranslations } from "next-intl/server";
 import { fetchAgents, fetchOverview } from "@/lib/api";
+
+export const dynamic = "force-dynamic";
 import { PageShell } from "@/components/layout/PageShell";
 import { AgentCard } from "@/components/agents/AgentCard";
 import { fmtNumber } from "@/lib/format";

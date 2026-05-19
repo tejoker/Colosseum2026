@@ -5,6 +5,8 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Table, Thead, Tbody, Th, Td, Tr } from "@/components/ui/Table";
 import { fmtNumber, fmtTimestamp } from "@/lib/format";
 
+export const dynamic = "force-dynamic";
+
 export default async function SettingsPage() {
   const t = await getTranslations("settings");
   const [companiesResult, peopleResult] = await Promise.all([

@@ -10,6 +10,8 @@ import { Table, Thead, Tbody, Th, Td, Tr } from "@/components/ui/Table";
 import { truncateHash, fmtTimestamp, fmtRelativeTime } from "@/lib/format";
 import { RevokeButton } from "@/components/agents/RevokeButton";
 
+export const dynamic = "force-dynamic";
+
 export default async function AgentDetailPage({
   params,
 }: {

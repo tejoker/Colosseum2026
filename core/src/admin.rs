@@ -575,6 +575,35 @@ pub struct AdminAgentRecord {
     pub agent_type: String,
 }
 
+/// POST /admin/agents/{agent_id}/revoke — operator-side revocation (admin auth).
+///
+/// The public `DELETE /agent/{agent_id}` requires a user session header tied
+/// to the human key image that owns the agent. The dashboard runs in an admin
+/// context (no end-user session), so it uses this admin variant to revoke any
+/// agent by id. Records an audit log entry under "AGENT_REVOKE_ADMIN".
+pub async fn revoke_agent_admin(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let rows = {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        db.execute(
+            "UPDATE agents SET revoked = 1 WHERE agent_id = ?1",
+            params![agent_id],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    if rows == 0 {
+        return Err((StatusCode::NOT_FOUND, "Agent not found".into()));
+    }
+    {
+        let st = state.read().unwrap();
+        st.log("AGENT_REVOKE_ADMIN", "OK", &agent_id);
+    }
+    Ok(Json(serde_json::json!({ "revoked": true, "agent_id": agent_id })))
+}
+
 /// GET /admin/agents — list every registered agent + checksum + revocation status.
 pub async fn get_agents(
     State(state): State<Arc<RwLock<ServerState>>>,

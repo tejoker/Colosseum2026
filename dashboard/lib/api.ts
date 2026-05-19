@@ -1,7 +1,6 @@
-const CORE_URL =
-  process.env.NEXT_PUBLIC_CORE_URL ?? "http://localhost:3001";
-const DASH_URL =
-  process.env.NEXT_PUBLIC_DASH_API_URL ?? "http://localhost:8002";
+// All public fetchers hit the SAME-ORIGIN Next.js /api/* surface. The dashboard's
+// /api routes proxy to the SauronID core /admin/* surface server-side. The
+// browser never knows the core URL — no CORS, no env leakage.
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 
@@ -103,31 +102,39 @@ export interface SystemHealth {
 
 /* ── Fetch helpers ─────────────────────────────────────────────────── */
 
+// Server-side fetches (Server Components, route handlers) need absolute URLs.
+// Browser fetches use relative URLs (same-origin proxy).
+function absolutize(path: string): string {
+  if (typeof window !== "undefined") return path; // browser: relative is fine
+  const port = process.env.PORT ?? "3000";
+  return `http://127.0.0.1:${port}${path}`;
+}
+
 async function get<T>(url: string): Promise<ApiResult<T>> {
   try {
-    const res = await fetch(url, { next: { revalidate: 10 } });
+    const res = await fetch(absolutize(url), { next: { revalidate: 10 } });
     if (!res.ok) {
       return { ok: false, error: `HTTP ${res.status}` };
     }
-    const data = await res.json() as T;
+    const data = (await res.json()) as T;
     return { ok: true, data };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error" };
   }
 }
 
-/* ── Public API functions ──────────────────────────────────────────── */
+/* ── Public API functions (all same-origin) ────────────────────────── */
 
 export async function fetchOverview(): Promise<ApiResult<OverviewStats>> {
-  return get<OverviewStats>(`${DASH_URL}/api/live/overview`);
+  return get<OverviewStats>(`/api/overview`);
 }
 
 export async function fetchAgents(): Promise<ApiResult<AgentStatus[]>> {
-  return get<AgentStatus[]>(`${DASH_URL}/api/live/agents`);
+  return get<AgentStatus[]>(`/api/agents`);
 }
 
 export async function fetchAgent(id: string): Promise<ApiResult<AgentStatus>> {
-  return get<AgentStatus>(`${DASH_URL}/api/live/agents/${id}`);
+  return get<AgentStatus>(`/api/agents/${id}`);
 }
 
 export async function fetchAgentAudit(
@@ -138,7 +145,7 @@ export async function fetchAgentAudit(
   if (params?.from) qs.set("from", params.from);
   if (params?.to) qs.set("to", params.to);
   const query = qs.toString() ? `?${qs}` : "";
-  return get<AuditEvent[]>(`${DASH_URL}/api/live/agents/${id}/audit${query}`);
+  return get<AuditEvent[]>(`/api/agents/${id}/audit${query}`);
 }
 
 export async function fetchProtected(params?: {
@@ -147,7 +154,7 @@ export async function fetchProtected(params?: {
   const qs = new URLSearchParams();
   if (params?.limit) qs.set("limit", String(params.limit));
   const query = qs.toString() ? `?${qs}` : "";
-  return get<ProtectedEvent[]>(`${DASH_URL}/api/live/protected${query}`);
+  return get<ProtectedEvent[]>(`/api/protected${query}`);
 }
 
 export async function fetchActivity(params?: {
@@ -160,36 +167,36 @@ export async function fetchActivity(params?: {
   if (params?.agent_id) qs.set("agent_id", params.agent_id);
   if (params?.limit) qs.set("limit", String(params.limit));
   const query = qs.toString() ? `?${qs}` : "";
-  return get<ActivityCall[]>(`${DASH_URL}/api/live/activity${query}`);
+  return get<ActivityCall[]>(`/api/activity${query}`);
 }
 
 export async function fetchProofs(): Promise<ApiResult<AnchorStats>> {
-  return get<AnchorStats>(`${DASH_URL}/api/live/anchors`);
+  return get<AnchorStats>(`/api/proofs`);
 }
 
 export async function fetchCompanies(): Promise<ApiResult<Company[]>> {
-  return get<Company[]>(`${DASH_URL}/api/live/clients`);
+  return get<Company[]>(`/api/clients`);
 }
 
 export async function fetchCompany(id: string): Promise<ApiResult<Company>> {
-  return get<Company>(`${DASH_URL}/api/live/clients/${id}`);
+  return get<Company>(`/api/clients/${id}`);
 }
 
 export async function fetchPeople(): Promise<ApiResult<Person[]>> {
-  return get<Person[]>(`${DASH_URL}/api/live/users`);
+  return get<Person[]>(`/api/users`);
 }
 
 export async function fetchCompanyPeople(companyId: string): Promise<ApiResult<Person[]>> {
-  return get<Person[]>(`${DASH_URL}/api/live/users?company_id=${companyId}`);
+  return get<Person[]>(`/api/users?company_id=${encodeURIComponent(companyId)}`);
 }
 
 export async function fetchHealth(): Promise<ApiResult<SystemHealth>> {
-  return get<SystemHealth>(`${DASH_URL}/api/live/health`);
+  return get<SystemHealth>(`/api/health`);
 }
 
 export async function revokeAgent(id: string): Promise<ApiResult<{ revoked: true }>> {
   try {
-    const res = await fetch(`${CORE_URL}/api/v1/agents/${id}/revoke`, {
+    const res = await fetch(absolutize(`/api/agents/${id}/revoke`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });

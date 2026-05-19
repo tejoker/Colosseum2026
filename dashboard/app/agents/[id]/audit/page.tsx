@@ -5,6 +5,8 @@ import { fetchAgent, fetchAgentAudit } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { AuditTimeline } from "@/components/audit/AuditTimeline";
 
+export const dynamic = "force-dynamic";
+
 export default async function AuditPage({
   params,
 }: {
