@@ -1,12 +1,33 @@
 import { NextRequest } from "next/server";
 
-const CORE_URL = process.env.NEXT_PUBLIC_CORE_URL ?? "http://localhost:3001";
+// Playground demo endpoints on the core were removed alongside the dead
+// analytics path. The dashboard playground is now a client-side simulation
+// only — return a deterministic stub so the UI renders correctly.
+//
+// When real demo endpoints land in the core, swap this for a `proxyCore(...)`
+// call against the right /admin/* path.
 
-const SCENARIO_MAP: Record<string, string> = {
-  normal:  "happy_path",
-  replay:  "replay_attack",
-  scope:   "scope_escalation",
-  custom:  "custom",
+const SCENARIO_RESULTS: Record<string, { result: "allowed" | "stopped"; status_code: number; detail: Record<string, unknown> }> = {
+  normal: {
+    result: "allowed",
+    status_code: 200,
+    detail: { scenario: "happy_path", note: "simulated — core demo endpoints not yet wired" },
+  },
+  replay: {
+    result: "stopped",
+    status_code: 409,
+    detail: { scenario: "replay_attack", reason: "duplicate nonce detected (simulated)" },
+  },
+  scope: {
+    result: "stopped",
+    status_code: 403,
+    detail: { scenario: "scope_escalation", reason: "intent outside mandate (simulated)" },
+  },
+  custom: {
+    result: "stopped",
+    status_code: 400,
+    detail: { scenario: "custom", note: "custom scenarios require live core demo endpoints" },
+  },
 };
 
 export async function POST(
@@ -14,24 +35,9 @@ export async function POST(
   { params }: { params: Promise<{ scenario: string }> }
 ) {
   const { scenario } = await params;
-  const mapped = SCENARIO_MAP[scenario];
-
-  if (!mapped) {
+  const out = SCENARIO_RESULTS[scenario];
+  if (!out) {
     return Response.json({ ok: false, error: "Unknown scenario" }, { status: 400 });
   }
-
-  try {
-    const res = await fetch(`${CORE_URL}/api/v1/demo/${mapped}`, { method: "POST" });
-    const json = await res.json() as unknown;
-    return Response.json({
-      result: res.ok ? "allowed" : "stopped",
-      status_code: res.status,
-      detail: json,
-    });
-  } catch {
-    return Response.json(
-      { result: "stopped", status_code: 0, detail: { error: "Core unreachable" } },
-      { status: 503 }
-    );
-  }
+  return Response.json(out);
 }

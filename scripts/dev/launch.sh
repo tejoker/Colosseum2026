@@ -125,9 +125,8 @@ if [[ "$SKIP_DASHBOARD" != "1" ]]; then
     step "Start dashboard (Next.js on :$DASHBOARD_PORT)"
     (cd "$ROOT/dashboard" && \
         (test -d node_modules || npm install --silent 2>&1 | tail -2) && \
-        NEXT_PUBLIC_API_URL="$SAURON_CORE_URL" \
         SAURON_CORE_INTERNAL_URL="$SAURON_CORE_URL" \
-        SAURONID_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1 \
+        SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
         PORT="$DASHBOARD_PORT" \
         npm run dev > /tmp/sauron-dashboard.log 2>&1 &)
     DASHBOARD_PID=$!

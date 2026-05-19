@@ -17,6 +17,7 @@ pub fn admin_router() -> Router<Arc<RwLock<ServerState>>> {
         .route("/anchor/batches", get(admin::get_anchor_batches))
         // Live-data analytics endpoints (Analytics 5/5 — replaces parquet path)
         .route("/agents", get(admin::get_agents))
+        .route("/agents/{agent_id}/revoke", post(admin::revoke_agent_admin))
         .route("/agent_actions/recent", get(admin::get_recent_actions))
         .route("/anchor/status", get(admin::get_anchor_status))
         .route("/per_agent_metrics", get(admin::get_per_agent_metrics))

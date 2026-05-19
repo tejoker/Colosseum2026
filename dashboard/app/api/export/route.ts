@@ -1,25 +1,48 @@
 import { NextRequest } from "next/server";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-
-const DASH_URL = process.env.NEXT_PUBLIC_DASH_API_URL ?? "http://localhost:8002";
+import { fetchCoreJson } from "../_proxy";
+import {
+  adaptActivity,
+  adaptAuditEvents,
+  buildAgentNameMap,
+  filterReceiptsByAgent,
+  type CoreActionReceipt,
+  type CoreAgentRecord,
+} from "../_adapters";
 
 export async function POST(req: NextRequest) {
-  const body = await req.json() as { format: "json" | "pdf"; agent_id?: string; from?: string; to?: string };
+  const body = (await req.json()) as {
+    format: "json" | "pdf";
+    agent_id?: string;
+    from?: string;
+    to?: string;
+  };
   const { format, agent_id, from, to } = body;
 
-  const qs = new URLSearchParams();
-  if (from) qs.set("from", from);
-  if (to) qs.set("to", to);
-  const path = agent_id ? `agents/${agent_id}/audit` : "activity";
-  const query = qs.toString() ? `?${qs}` : "";
+  // Pull receipts + agents directly from the core (same path the /api/activity
+  // and /api/agents/[id]/audit handlers use) so export is consistent with what
+  // the user sees in the UI.
+  const [receiptsR, agentsR] = await Promise.all([
+    fetchCoreJson<CoreActionReceipt[]>("agent_actions/recent", "?limit=1000"),
+    fetchCoreJson<CoreAgentRecord[]>("agents"),
+  ]);
+  if (!receiptsR.ok) return receiptsR.response;
+  const agents = agentsR.ok ? agentsR.data : [];
 
-  let auditData: unknown[] = [];
-  try {
-    const res = await fetch(`${DASH_URL}/api/live/${path}${query}`);
-    if (res.ok) auditData = await res.json() as unknown[];
-  } catch {
-    return Response.json({ ok: false, error: "Could not fetch audit data" }, { status: 503 });
+  let rows = receiptsR.data;
+  if (agent_id) rows = filterReceiptsByAgent(rows, agent_id);
+  if (from) {
+    const fromSec = Math.floor(new Date(from).getTime() / 1000);
+    rows = rows.filter((x) => x.created_at >= fromSec);
   }
+  if (to) {
+    const toSec = Math.floor(new Date(to).getTime() / 1000);
+    rows = rows.filter((x) => x.created_at <= toSec);
+  }
+
+  const auditData: unknown[] = agent_id
+    ? adaptAuditEvents(rows)
+    : adaptActivity(rows, buildAgentNameMap(agents));
 
   if (format === "json") {
     return new Response(JSON.stringify(auditData, null, 2), {

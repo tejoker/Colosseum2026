@@ -3,6 +3,8 @@ import { fetchProtected } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
 import { ProtectedFeed } from "@/components/protected/ProtectedFeed";
 
+export const dynamic = "force-dynamic";
+
 export default async function ProtectedPage() {
   const t = await getTranslations("protected");
   const result = await fetchProtected({ limit: 100 });

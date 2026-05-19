@@ -4,6 +4,8 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Card, CardBody } from "@/components/ui/Card";
 import { fmtNumber, fmtRelativeTime } from "@/lib/format";
 
+export const dynamic = "force-dynamic";
+
 export default async function ProofsPage() {
   const t = await getTranslations("proofs");
   const result = await fetchProofs();

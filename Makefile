@@ -1,5 +1,5 @@
 # SauronID Makefile — minimal, opinionated.
-.PHONY: help build clean test verify empirical demo demo-strict bench docs
+.PHONY: help build clean test verify empirical demo demo-strict bench docs python-setup
 
 help:  ## Show this help
 	@echo "SauronID — agent-binding stack"
@@ -11,6 +11,13 @@ build:  ## Build Rust core (release) + TS clients
 	cd core && cargo build --release
 	cd redteam && (test -d node_modules || npm install --silent) && npm run build --silent
 	cd agentic && (test -d node_modules || npm install --silent) && (test -f tsconfig.json && tsc -p . || true)
+
+python-setup:  ## Create .venv at repo root + install Python SDK + script deps
+	python3 -m venv .venv
+	. .venv/bin/activate && pip install -q --upgrade pip && pip install -q -e clients/python && pip install -q httpx requests solana solders
+	@echo
+	@echo "  Activate: source .venv/bin/activate"
+	@echo "  Test:     python -c 'from sauronid_client import SauronIDClient; print(\"OK\")'"
 
 clean:  ## Remove build artefacts and DB files
 	cd core && cargo clean && rm -f sauron.db sauron.db-shm sauron.db-wal
