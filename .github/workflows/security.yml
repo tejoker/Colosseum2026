@@ -1,0 +1,92 @@
+name: Security scans
+
+# Combines four scanners that overlap on different threat surfaces:
+#
+# - cargo-audit  — RustSec advisory database (CVEs in Rust deps).
+# - cargo-deny   — license / ban / source policy on Rust deps.
+# - gitleaks     — credentials accidentally committed to the repo.
+# - trivy        — filesystem + (optionally) container scan.
+#
+# Runs on every PR + weekly cron so a freshly published advisory still
+# fails the build between releases.
+
+on:
+  push:
+    branches: [main, pocv1]
+  pull_request:
+  schedule:
+    - cron: "37 7 * * 1" # Mondays 07:37 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  cargo-audit:
+    name: cargo audit (RustSec)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Link core/Cargo.lock to repo root
+        run: ln -sf core/Cargo.lock Cargo.lock
+      - uses: actions-rs/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: cargo-deny (bans / licenses / sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: core/Cargo.toml
+          command: check
+          arguments: --all-features
+          log-level: warn
+
+  gitleaks:
+    name: gitleaks (committed secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE only needed for organisations — leave unset for
+          # personal repos and the action falls back to the free tier.
+
+  trivy-fs:
+    name: trivy filesystem scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Trivy DB downloads + scans are heavy. Skip on `pull_request` runs from
+    # forks unless the PR carries the `security:full` label so spammy PRs
+    # don't burn CI minutes.
+    if: |
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'security:full')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs

@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Customer-support chatbot — high RPM, public-scope only.
+version: "1"
+agent: support_chatbot
+description: >
+  Front-line customer support assistant. High request volume, but strictly
+  scoped to public-facing data and a small toolset.
+binding:
+  allowed_tools:
+    - kb_search
+    - ticket_create
+    - http_get
+  max_budget_usd: 200
+  data_scope:
+    allow: [public]
+    deny: [pii, financial, restricted]
+  rate_limit:
+    requests_per_minute: 600
+  delegation:
+    max_depth: 0
+    allowed_subagents: []
+invariants:
+  - "rate_limit_compliant"
+  - "no_pii_in_output"
+metadata:
+  created_at: "2026-01-15"
+  author: "cx-ops@example.com"
+  tags: [support, chatbot, public-scope]

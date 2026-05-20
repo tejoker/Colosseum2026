@@ -148,60 +148,6 @@ export async function generateMerkleInclusionProof(
     return { proof, publicSignals };
 }
 
-/**
- * Generate a Payment Non-Membership proof.
- *
- * Proves that an agent had NO consumed payment in a 30-day window.
- * The SMT path (pathElements, pathIndices) is obtained from the server's
- * /agent/payment/nonexistence/material endpoint.
- *
- * @param keyHex       64-char hex SHA256(agent_id|window_start) — split internally
- * @param windowStart  30-day window start timestamp (public)
- * @param smtRoot      Current SMT root (public, from /material endpoint)
- * @param pathElements Poseidon siblings along the path (20 elements, decimal strings)
- * @param pathIndices  Direction bits 0/1 for each level (20 elements)
- */
-export async function generatePaymentNonMembershipProof(
-    keyHex: string,
-    windowStart: number,
-    smtRoot: string,
-    pathElements: string[],
-    pathIndices: number[]
-): Promise<ZKProof> {
-    const { wasmPath, zkeyPath } = getCircuitPaths("PaymentNonMembershipSMT");
-
-    // Split 256-bit key into two 128-bit halves to fit BN254 scalar field.
-    const keyBig = BigInt("0x" + keyHex);
-    const mask128 = (1n << 128n) - 1n;
-    const keyLow  = (keyBig & mask128).toString();
-    const keyHigh = (keyBig >> 128n).toString();
-
-    const input = {
-        // Private
-        leafValue: "0",
-        pathElements: pathElements.map((e) => e.toString()),
-        pathIndices: pathIndices.map((i) => i.toString()),
-        // Public
-        keyHigh,
-        keyLow,
-        windowStart: windowStart.toString(),
-        smtRoot,
-    };
-
-    console.log("[PROVER] Generating payment non-membership proof...");
-    const startTime = Date.now();
-
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-        input,
-        wasmPath,
-        zkeyPath
-    );
-
-    const elapsed = Date.now() - startTime;
-    console.log(`[PROVER] Payment non-membership proof generated in ${elapsed}ms`);
-
-    return { proof, publicSignals };
-}
 
 /**
  * Generate a full credential verification proof (master circuit).
@@ -271,5 +217,71 @@ export async function generateCredentialProof(
     const elapsed = Date.now() - startTime;
     console.log(`[PROVER] Credential proof generated in ${elapsed}ms`);
 
+    return { proof, publicSignals };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Action-log circuit prover entry points (Sprint 4)
+//
+// Thin wrappers around `snarkjs.groth16.fullProve` for the new action-log
+// circuits. Same path-resolution helper as the legacy methods, but resolves
+// the DEV zkey produced by `zkp/ceremony/dev_setup.sh`.
+//
+// IMPORTANT: keys are DEV-ONLY. Production needs a real ceremony.
+// ════════════════════════════════════════════════════════════════════════
+
+function getActionLogPaths(circuitName: string) {
+    const wasmPath = path.join(BUILD_DIR, `${circuitName}_js`, `${circuitName}.wasm`);
+    const zkeyPath = path.join(KEYS_DIR, `${circuitName}_final.dev.zkey`);
+    if (!fs.existsSync(wasmPath)) {
+        throw new Error(`[PROVER] WASM missing: ${wasmPath}`);
+    }
+    if (!fs.existsSync(zkeyPath)) {
+        throw new Error(
+            `[PROVER] DEV zkey missing: ${zkeyPath} — run zkp/ceremony/dev_setup.sh.`
+        );
+    }
+    return { wasmPath, zkeyPath };
+}
+
+export async function generateActionRangeProof(input: Record<string, any>): Promise<ZKProof> {
+    const { wasmPath, zkeyPath } = getActionLogPaths("ActionRangeProof");
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
+    return { proof, publicSignals };
+}
+
+export async function generateActionSumBoundProof(input: Record<string, any>): Promise<ZKProof> {
+    const { wasmPath, zkeyPath } = getActionLogPaths("ActionSumBound");
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
+    return { proof, publicSignals };
+}
+
+export async function generateActionSetMembershipProof(input: Record<string, any>): Promise<ZKProof> {
+    const { wasmPath, zkeyPath } = getActionLogPaths("ActionSetMembership");
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
+    return { proof, publicSignals };
+}
+
+export async function generateActionSetNonMembershipProof(input: Record<string, any>): Promise<ZKProof> {
+    const { wasmPath, zkeyPath } = getActionLogPaths("ActionSetNonMembership");
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
+    return { proof, publicSignals };
+}
+
+export async function generateActionTimeWindowProof(input: Record<string, any>): Promise<ZKProof> {
+    const { wasmPath, zkeyPath } = getActionLogPaths("ActionTimeWindow");
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
+    return { proof, publicSignals };
+}
+
+export async function generateActionCountInRangeProof(input: Record<string, any>): Promise<ZKProof> {
+    const { wasmPath, zkeyPath } = getActionLogPaths("ActionCountInRange");
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
+    return { proof, publicSignals };
+}
+
+export async function generateSignedLogEntryProof(input: Record<string, any>): Promise<ZKProof> {
+    const { wasmPath, zkeyPath } = getActionLogPaths("SignedLogEntry");
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, wasmPath, zkeyPath);
     return { proof, publicSignals };
 }

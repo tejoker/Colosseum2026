@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Banking payment agent — strict budget, narrow tool allowlist, EU business hours.
+version: "1"
+agent: payment_agent_eu
+description: >
+  Initiates SEPA payments on behalf of corporate treasury. Hard cap per
+  policy lifetime, only allowed to call the payment + ledger tools, and may
+  only act during EU business hours.
+binding:
+  allowed_tools:
+    - sepa_payment_initiate
+    - ledger_read
+    - fx_quote
+  max_budget_usd: 5000
+  data_scope:
+    allow: [customer_owned, financial]
+    deny: [pii, restricted]
+  rate_limit:
+    requests_per_minute: 30
+  time_window:
+    start: "09:00"
+    end:   "18:00"
+    timezone: "Europe/Paris"
+  required_signatures:
+    - role: human_approver
+      threshold: 1
+  delegation:
+    max_depth: 0
+    allowed_subagents: []
+  # Sprint 3 additions — daily ceiling, single-action cap, sanctioned
+  # currencies, EU business hours per weekday, year-end blackout.
+  daily_budget_usd: 500
+  max_single_action_usd: 1000
+  currency_allowlist: [EUR, USD]
+  business_hours:
+    weekday_windows:
+      1: ["09:00", "18:00"]
+      2: ["09:00", "18:00"]
+      3: ["09:00", "18:00"]
+      4: ["09:00", "18:00"]
+      5: ["09:00", "18:00"]
+    timezone: "Europe/Paris"
+  holiday_blackout_dates:
+    - "2026-12-25"
+    - "2026-12-26"
+invariants:
+  - "spend_total <= max_budget_usd"
+  - "payment_currency in ('EUR', 'USD')"
+  - "no_external_call_to(domain: 'competitor.com')"
+metadata:
+  created_at: "2026-05-17"
+  author: "compliance@example.com"
+  tags: [banking, eu-region, treasury]

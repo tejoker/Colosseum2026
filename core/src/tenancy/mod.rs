@@ -1,0 +1,318 @@
+//! Multi-tenancy primitives (Sprint 11).
+//!
+//! SauronID is single-operator multi-tenant: a single deployed core process
+//! serves N logically isolated tenants. Every legacy request (no tenant
+//! header, no JWT `tnt` claim) is treated as `tenant_id = "default"`, which
+//! preserves the 412-test backwards-compatibility baseline.
+//!
+//! ## Resolution order
+//!
+//! 1. HTTP header `x-sauron-tenant-id`
+//! 2. Admin JWT claim `tnt` (when the request carries a Bearer JWT)
+//! 3. URL path param `:tenant_id` — NOT in scope for S11 (header-only)
+//! 4. Fallback to `DEFAULT_TENANT`
+//!
+//! The resolved `TenantId` is inserted into the request `Extensions` so
+//! downstream handlers can extract it via `Extension<TenantId>`.
+//!
+//! ## What is scoped vs global
+//!
+//! See `docs/multi-tenancy.md` for the full matrix. Summary:
+//!
+//! - **SCOPED** (data-isolated per tenant): `agents`, `policies`,
+//!   `agent_action_receipts`, `agent_egress_log`, `consent_log`,
+//!   `agent_payment_authorizations`, `credential_codes`, `user_credentials`,
+//!   `user_registrations`, `merkle_leaves`, `risk_rate_counters`,
+//!   `spend_ledger`, `spend_log`, `bitcoin_merkle_anchors`,
+//!   `solana_merkle_anchors`, `agent_action_anchors`.
+//! - **KEEP_GLOBAL** (cross-tenant reuse / aggregate): `users`, `clients`,
+//!   `bank_kyc_links`, `bank_attestation_nonces`, `agent_pop_challenges`,
+//!   `agent_call_nonces`, `ajwt_used_jtis`, `agent_action_nonces`,
+//!   `agent_vcs`, `device_tokens`, `api_usage`, `requests_log`,
+//!   `company_data`, `agent_checksum_inputs`, `agent_checksum_audit`,
+//!   `payment_smt_leaves`, `user_compliance_screening`,
+//!   `lightning_l402_invoices`.
+//!
+//! Rationale for KEEP_GLOBAL on session-scoped tables (`ajwt_used_jtis`,
+//! `agent_call_nonces`, `agent_pop_challenges`): their primary keys carry
+//! enough entropy (UUID-like + agent_id derived from SHA-256) to avoid
+//! cross-tenant collisions, and every consumer already qualifies by
+//! `agent_id`. Tenant isolation is inherited transitively from the
+//! tenant-scoped `agents` table.
+//!
+//! `users` / `clients` stay global by design: SauronID's identity registry
+//! is a single OPRF-derived directory; multi-tenant access control lives on
+//! the *registration* (`user_registrations`) and *consent* (`consent_log`)
+//! tables, both of which are tenant-scoped.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::Request,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use serde::Deserialize;
+
+pub mod billing;
+
+/// Header used to convey the tenant id on every legacy HTTP call.
+pub const TENANT_HEADER: &str = "x-sauron-tenant-id";
+
+/// Fallback tenant id when no header / JWT claim is supplied. Every legacy
+/// request, every existing test, every dashboard demo call lands here, so
+/// backwards compatibility is preserved by construction.
+pub const DEFAULT_TENANT: &str = "default";
+
+/// Max accepted tenant-id length. Matches the conservative bound on
+/// other tenant-style strings (consent token, agent id, policy id) so we
+/// can't be embarrassed by an unbounded `Vec<u8>` payload.
+pub const MAX_TENANT_ID_LEN: usize = 64;
+
+/// Resolved tenant for the current request. Attached to the axum
+/// `Extensions` map by [`extract_tenant`] middleware; handlers extract via
+/// `Extension<TenantId>`. The single-field tuple is intentional — we want
+/// `.0` access semantics and `Debug`/`Clone` for free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantId(pub String);
+
+impl TenantId {
+    /// Build a `TenantId` from an explicit string. Used by tests + handlers
+    /// that derive the tenant from non-HTTP sources (background jobs,
+    /// scheduled GC, anchor batcher).
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The default tenant — every legacy / unscoped request.
+    pub fn default_tenant() -> Self {
+        Self(DEFAULT_TENANT.to_string())
+    }
+
+    /// Borrow the underlying string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for TenantId {
+    fn default() -> Self {
+        Self::default_tenant()
+    }
+}
+
+impl std::fmt::Display for TenantId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Validate a tenant-id string is well-formed: 1..=64 chars, ASCII
+/// alphanumeric + `-` + `_`. Anything else is rejected at the middleware
+/// boundary as `400 Bad Request` to keep injection / smuggling at bay.
+fn valid_tenant_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_TENANT_ID_LEN
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Optional admin-JWT claim used to override the tenant header. Only `tnt`
+/// is interpreted by this module; other claims are validated elsewhere.
+#[derive(Debug, Deserialize)]
+struct TenantClaims {
+    #[serde(default)]
+    tnt: Option<String>,
+    /// Validated by `jsonwebtoken` exp handling. Not used here directly.
+    #[allow(dead_code)]
+    #[serde(default)]
+    exp: Option<i64>,
+}
+
+/// Pull the `tnt` claim from a Bearer JWT, if present and the operator has
+/// configured `SAURON_ADMIN_JWT_HS256_SECRET`. Returns `None` on any
+/// failure — we never reject a request just because the JWT isn't usable
+/// for tenant resolution (the admin auth middleware does that check
+/// separately).
+fn tenant_from_jwt(headers: &HeaderMap, secret: &[u8]) -> Option<String> {
+    let auth = headers.get(AUTHORIZATION)?.to_str().ok()?.trim();
+    let token = auth
+        .strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))?
+        .trim();
+    if token.is_empty() {
+        return None;
+    }
+    let mut v = Validation::new(Algorithm::HS256);
+    v.validate_exp = true;
+    let data = decode::<TenantClaims>(token, &DecodingKey::from_secret(secret), &v).ok()?;
+    data.claims
+        .tnt
+        .filter(|s| valid_tenant_id(s))
+}
+
+/// Resolve the tenant id for an incoming request and stash it in
+/// `request.extensions_mut()` so handlers can extract it with
+/// `Extension<TenantId>`. On a malformed `x-sauron-tenant-id` header we
+/// return `400 Bad Request` — we never silently fall back to the default
+/// when the caller explicitly asked for something else.
+pub async fn extract_tenant(mut request: Request, next: Next) -> Response {
+    // Priority 1: explicit header.
+    let header_value = request
+        .headers()
+        .get(TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if let Some(raw) = header_value {
+        if !valid_tenant_id(&raw) {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid {TENANT_HEADER}: must match [A-Za-z0-9_-]{{1,{MAX_TENANT_ID_LEN}}}"),
+            )
+                .into_response();
+        }
+        request.extensions_mut().insert(TenantId::new(raw));
+        return next.run(request).await;
+    }
+
+    // Priority 2: admin JWT `tnt` claim (only if the operator runs JWT auth).
+    if let Some(secret) = std::env::var("SAURON_ADMIN_JWT_HS256_SECRET").ok() {
+        if !secret.is_empty() {
+            if let Some(t) = tenant_from_jwt(request.headers(), secret.as_bytes()) {
+                request.extensions_mut().insert(TenantId::new(t));
+                return next.run(request).await;
+            }
+        }
+    }
+
+    // Priority 4: fallback to default. (Priority 3 — URL `:tenant_id` path
+    // params — is intentionally out of scope for S11; revisit in 11.5.)
+    request
+        .extensions_mut()
+        .insert(TenantId::default_tenant());
+    next.run(request).await
+}
+
+/// Helper for background tasks that need a tenant id without an HTTP request.
+/// The anchor batcher, GC, OTS upgrader, and Solana confirmer use this as a
+/// rendezvous point — for S11 they run in "all tenants" mode using the
+/// default tenant for legacy rows and per-tenant for new rows. We may
+/// upgrade to per-tenant batching in 11.5.
+pub fn tenant_id_for_background_job() -> TenantId {
+    TenantId::default_tenant()
+}
+
+/// First-seen registry of tenant ids. SauronID has no separate tenant
+/// CRUD API yet (Sprint 11.5); operators provision tenants out-of-band
+/// (rotating a JWT secret, distributing an x-sauron-tenant-id value to
+/// their tenant). This helper records the first time we see a tenant so
+/// admin tooling has a list to display.
+///
+/// Storage: an in-memory `Arc<Mutex<HashSet<String>>>` initialised at
+/// process startup. Persistence to a `tenants` SQL table is deferred.
+#[derive(Debug, Default, Clone)]
+pub struct TenantRegistry {
+    inner: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl TenantRegistry {
+    /// Build an empty registry pre-populated with the default tenant.
+    pub fn new() -> Self {
+        let mut set = std::collections::HashSet::new();
+        set.insert(DEFAULT_TENANT.to_string());
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(set)),
+        }
+    }
+
+    /// Record (or no-op) that we've seen this tenant id. Returns `true`
+    /// if the tenant is new (just registered).
+    pub fn ensure_tenant_exists(&self, tenant_id: &str) -> bool {
+        if !valid_tenant_id(tenant_id) {
+            return false;
+        }
+        let mut g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // poisoned: recover; the data is a set.
+        };
+        g.insert(tenant_id.to_string())
+    }
+
+    /// Snapshot of known tenants, sorted for stable admin output.
+    pub fn list(&self) -> Vec<String> {
+        let g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let mut out: Vec<String> = g.iter().cloned().collect();
+        out.sort();
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenant_id_default_is_default_const() {
+        let t = TenantId::default_tenant();
+        assert_eq!(t.as_str(), DEFAULT_TENANT);
+        assert_eq!(t.0, "default");
+    }
+
+    #[test]
+    fn tenant_id_new_roundtrips() {
+        let t = TenantId::new("acme_inc");
+        assert_eq!(t.as_str(), "acme_inc");
+        assert_eq!(format!("{t}"), "acme_inc");
+    }
+
+    #[test]
+    fn valid_tenant_id_accepts_alnum_dash_underscore() {
+        assert!(valid_tenant_id("default"));
+        assert!(valid_tenant_id("acme-corp_42"));
+        assert!(valid_tenant_id("a"));
+        assert!(valid_tenant_id("0"));
+    }
+
+    #[test]
+    fn valid_tenant_id_rejects_special_chars_and_empty() {
+        assert!(!valid_tenant_id(""));
+        assert!(!valid_tenant_id("../etc/passwd"));
+        assert!(!valid_tenant_id("acme corp"));
+        assert!(!valid_tenant_id("acme.corp"));
+        assert!(!valid_tenant_id("tnt!"));
+    }
+
+    #[test]
+    fn valid_tenant_id_enforces_length_cap() {
+        let max = "a".repeat(MAX_TENANT_ID_LEN);
+        assert!(valid_tenant_id(&max));
+        let over = "a".repeat(MAX_TENANT_ID_LEN + 1);
+        assert!(!valid_tenant_id(&over));
+    }
+
+    #[test]
+    fn tenant_registry_inserts_and_lists() {
+        let r = TenantRegistry::new();
+        assert!(r.list().contains(&"default".to_string()));
+        assert!(r.ensure_tenant_exists("acme"));
+        // Idempotent: second insert returns false.
+        assert!(!r.ensure_tenant_exists("acme"));
+        let listed = r.list();
+        assert!(listed.contains(&"acme".to_string()));
+        assert!(listed.contains(&"default".to_string()));
+    }
+
+    #[test]
+    fn tenant_registry_rejects_malformed_ids() {
+        let r = TenantRegistry::new();
+        assert!(!r.ensure_tenant_exists("bad tenant"));
+        assert!(!r.ensure_tenant_exists(""));
+        assert!(!r.list().iter().any(|s| s == "bad tenant"));
+    }
+}

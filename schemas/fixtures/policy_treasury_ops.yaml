@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Treasury operations — multi-sig + strict daily cap.
+version: "1"
+agent: treasury_ops_agent
+description: >
+  Executes treasury moves between corporate accounts. Strict daily cap and
+  two independent role signatures required for every outbound transfer.
+binding:
+  allowed_tools:
+    - account_balance_read
+    - internal_transfer
+    - fx_quote
+    - audit_log_write
+  max_budget_usd: 250000
+  data_scope:
+    allow: [customer_owned, financial]
+    deny: [pii, restricted]
+  rate_limit:
+    requests_per_minute: 10
+  time_window:
+    start: "07:30"
+    end:   "19:30"
+    timezone: "Europe/Paris"
+  required_signatures:
+    - role: treasury_officer
+      threshold: 1
+    - role: cfo_delegate
+      threshold: 1
+  delegation:
+    max_depth: 0
+    allowed_subagents: []
+invariants:
+  - "spend_total <= max_budget_usd"
+  - "daily_outflow_total <= 250000"
+  - "transfer_requires(roles: ['treasury_officer', 'cfo_delegate'])"
+metadata:
+  created_at: "2026-05-10"
+  author: "treasury@example.com"
+  tags: [treasury, multi-sig, daily-cap]

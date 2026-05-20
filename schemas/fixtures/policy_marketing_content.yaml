@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Marketing content agent — only posts to approved domains.
+version: "1"
+agent: marketing_content_agent
+description: >
+  Drafts and posts marketing copy. Posts only to a vetted set of company
+  domains; never reaches third-party social platforms directly.
+binding:
+  allowed_tools:
+    - draft_copy
+    - cms_publish
+    - asset_lookup
+  max_budget_usd: 150
+  data_scope:
+    allow: [public, customer_owned]
+    deny: [pii, restricted]
+  rate_limit:
+    requests_per_minute: 30
+  time_window:
+    start: "07:00"
+    end:   "22:00"
+    timezone: "Europe/Paris"
+  required_signatures:
+    - role: marketing_reviewer
+      threshold: 1
+  delegation:
+    max_depth: 0
+    allowed_subagents: []
+  # Sprint 3 additions — English-only output, cap recipients per send,
+  # pin to the reviewed agent build, dry-run while operators tune the
+  # policy (allow all, observe denials in the trace).
+  language_allowlist: [en]
+  max_recipients: 50
+  pinned_version: "1.4.2"
+  dry_run: false
+invariants:
+  - "posting_domain in ('example.com', 'blog.example.com', 'press.example.com')"
+  - "allowed_domain_only"
+  - "spend_total <= max_budget_usd"
+metadata:
+  created_at: "2026-03-22"
+  author: "brand-ops@example.com"
+  tags: [marketing, content, domain-allowlist]

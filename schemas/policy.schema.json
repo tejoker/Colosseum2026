@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sauron.example/schemas/policy.schema.json",
+  "title": "SauronID Agent-Binding Policy",
+  "description": "Declarative DSL describing the limits and obligations of an agent. Sprint 1 schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "agent"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1",
+      "description": "DSL version. Currently always \"1\"."
+    },
+    "agent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Agent identifier or human label this policy binds."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description."
+    },
+    "binding": {
+      "$ref": "#/$defs/Binding"
+    },
+    "invariants": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "First-class invariant predicate strings (parsed by the Sprint 2 compiler)."
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    }
+  },
+  "$defs": {
+    "Binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed_tools": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Optional explicit tool allowlist. Absent => any tool allowed by upstream policies."
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Maximum spend in USD over the policy lifetime."
+        },
+        "data_scope": {
+          "$ref": "#/$defs/DataScope"
+        },
+        "rate_limit": {
+          "$ref": "#/$defs/RateLimit"
+        },
+        "time_window": {
+          "$ref": "#/$defs/TimeWindow"
+        },
+        "required_signatures": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SignatureRequirement" }
+        },
+        "delegation": {
+          "$ref": "#/$defs/DelegationLimits"
+        }
+      }
+    },
+    "DataScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "deny": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "RateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests_per_minute"],
+      "properties": {
+        "requests_per_minute": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "TimeWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "timezone"],
+      "properties": {
+        "start": {
+          "type": "string",
+          "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$",
+          "description": "Window start, HH:MM 24-hour."
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$",
+          "description": "Window end, HH:MM 24-hour."
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IANA timezone identifier (e.g. Europe/Paris)."
+        }
+      }
+    },
+    "SignatureRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "threshold"],
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "threshold": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "DelegationLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_depth"],
+      "properties": {
+        "max_depth": { "type": "integer", "minimum": 0 },
+        "allowed_subagents": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "Metadata": {
+      "type": "object",
+      "description": "Free-form metadata; additional keys allowed.",
+      "properties": {
+        "created_at": { "type": "string" },
+        "author":     { "type": "string" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -38,6 +38,16 @@ export SAURON_SOLANA_RPC_URL=https://api.devnet.solana.com
 export SAURON_SOLANA_NETWORK=devnet
 export SAURON_SOLANA_KEYPAIR_PATH=/etc/sauronid/solana-keypair.json
 export SAURON_ACCEPT_SINGLE_NODE_SQLITE=1                  # acknowledge single-node DB until Postgres swap
+
+# Sprint 11 multi-tenancy (see docs/multi-tenancy.md). SauronID is
+# single-operator multi-tenant out-of-the-box: every legacy request lands
+# on the reserved `default` tenant. Operators that need real isolation
+# distribute an `x-sauron-tenant-id: <id>` header to downstream SDK
+# consumers (or mint admin JWTs carrying a `tnt` claim). The variable
+# below is reserved for an 11.5 enhancement that overrides the default
+# tenant string for legacy callers; leaving it unset preserves today's
+# back-compat (412-test baseline + dashboard demo flow).
+# export SAURON_DEFAULT_TENANT_ID=default
 ```
 
 ### Profile B: Full identity stack (legacy / regulated deployments)

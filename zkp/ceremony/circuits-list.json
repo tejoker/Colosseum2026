@@ -1,0 +1,44 @@
+[
+    {
+        "circuit_name": "SignedLogEntry",
+        "security_level": "high",
+        "contributors_required": 8,
+        "notes": "Authenticated leaf — forging this lets an attacker mint signed log entries."
+    },
+    {
+        "circuit_name": "ActionRangeProof",
+        "security_level": "medium",
+        "contributors_required": 5,
+        "notes": "Range bound over a single field. Forgery would let the agent claim arbitrary amounts."
+    },
+    {
+        "circuit_name": "ActionSumBound",
+        "security_level": "high",
+        "contributors_required": 8,
+        "notes": "Budget bound — direct revenue-loss surface."
+    },
+    {
+        "circuit_name": "ActionSetMembership",
+        "security_level": "medium",
+        "contributors_required": 5,
+        "notes": "Tool allowlist; forgery permits unauthorised-tool actions to pass compliance."
+    },
+    {
+        "circuit_name": "ActionSetNonMembership",
+        "security_level": "high",
+        "contributors_required": 8,
+        "notes": "Denylist non-membership — forgery permits denied-tool actions."
+    },
+    {
+        "circuit_name": "ActionTimeWindow",
+        "security_level": "low",
+        "contributors_required": 3,
+        "notes": "Time window only — combined with other circuits in practice."
+    },
+    {
+        "circuit_name": "ActionCountInRange",
+        "security_level": "medium",
+        "contributors_required": 5,
+        "notes": "Rate-limit-like bound — see threat model in zkp/circuits/ActionCountInRange.circom."
+    }
+]

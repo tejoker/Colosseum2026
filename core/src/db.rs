@@ -427,6 +427,189 @@ pub fn init_schema(conn: &Connection) {
             list_version    TEXT NOT NULL DEFAULT '',
             updated_at      INTEGER NOT NULL DEFAULT 0
         );
+
+        -- Sprint 2: agent policy DSL store. raw_yaml round-trips back through the
+        -- DSL parser → compiler on `PolicyStore::hydrate()` at startup.
+        CREATE TABLE IF NOT EXISTS policies (
+            policy_id   TEXT PRIMARY KEY,
+            agent       TEXT NOT NULL,
+            version     TEXT NOT NULL,
+            raw_yaml    TEXT NOT NULL,
+            created_at  BIGINT NOT NULL,
+            updated_at  BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent);
+
+        -- Sprint 3 follow-up: server-side spend ledger. Closes the documented
+        -- gap "Local budget can be tampered" (redteam A3). The SDK's in-memory
+        -- BudgetTracker flushes periodically into `spend_log`; `spend_ledger`
+        -- holds the running total per (policy_id, agent_id, period_start).
+        -- POST /v1/policy/evaluate now looks up the authoritative value from
+        -- this ledger when the request carries an `agent_id`.
+        CREATE TABLE IF NOT EXISTS spend_ledger (
+            policy_id    TEXT NOT NULL,
+            agent_id     TEXT NOT NULL,
+            period_start BIGINT NOT NULL,        -- unix epoch, 0 = lifetime
+            total_usd    REAL NOT NULL DEFAULT 0,
+            last_updated BIGINT NOT NULL,
+            PRIMARY KEY (policy_id, agent_id, period_start)
+        );
+        CREATE INDEX IF NOT EXISTS idx_spend_ledger_agent ON spend_ledger(agent_id);
+
+        CREATE TABLE IF NOT EXISTS spend_log (
+            log_id       TEXT PRIMARY KEY,           -- uuid
+            policy_id    TEXT NOT NULL,
+            agent_id     TEXT NOT NULL,
+            action_id    TEXT,                       -- nullable; sdk-provided
+            amount_usd   REAL NOT NULL,
+            recorded_at  BIGINT NOT NULL,
+            source       TEXT NOT NULL               -- 'sdk_flush' | 'server_recompute'
+        );
+        CREATE INDEX IF NOT EXISTS idx_spend_log_pa ON spend_log(policy_id, agent_id, recorded_at);
+
+        -- Sprint 7: customer-side stat aggregation + ZK integrity.
+        -- Holds per-tenant per-period claimed metric values together with the
+        -- ZK proof that bound the claim to a Merkle-committed receipt set.
+        -- Primary key is the idempotency tuple — same submission re-arriving
+        -- overwrites in place via ON CONFLICT.
+        CREATE TABLE IF NOT EXISTS customer_stats (
+            tenant_id     TEXT NOT NULL DEFAULT 'default',
+            agent_id      TEXT NOT NULL DEFAULT '',     -- '' for tenant-aggregate
+            metric_id     TEXT NOT NULL,
+            claimed_value INTEGER NOT NULL,             -- fixed-point ×1000
+            n_records     INTEGER NOT NULL,
+            period_start  INTEGER NOT NULL,
+            period_end    INTEGER NOT NULL,
+            merkle_root   TEXT NOT NULL,
+            proof_b64     TEXT NOT NULL,
+            vk_id         TEXT NOT NULL,
+            submitted_at  INTEGER NOT NULL,
+            PRIMARY KEY (tenant_id, agent_id, metric_id, period_start)
+        );
+        CREATE INDEX IF NOT EXISTS idx_customer_stats_tenant_period
+            ON customer_stats(tenant_id, period_start, period_end);
+        CREATE INDEX IF NOT EXISTS idx_customer_stats_metric_period
+            ON customer_stats(metric_id, period_start, period_end);
+
+        -- Sprint 8: operator-managed cohort definitions for DP-published
+        -- cross-tenant benchmarks. Global (NOT tenant-scoped) — see
+        -- docs/privacy-model.md "Publication pipeline".
+        CREATE TABLE IF NOT EXISTS cohort_definitions (
+            cohort_id              TEXT PRIMARY KEY,
+            label                  TEXT NOT NULL,
+            vendor                 TEXT,
+            sector                 TEXT,
+            tenant_ids_json        TEXT NOT NULL,
+            k_anonymity_threshold  INTEGER NOT NULL DEFAULT 5,
+            epsilon_per_metric     REAL NOT NULL,
+            delta                  REAL NOT NULL,
+            created_at             INTEGER NOT NULL,
+            updated_at             INTEGER NOT NULL
+        );
+
+        -- S8 extension: persistent per-cohort per-metric ε ledger. Each
+        -- publication checks remaining ε against the cohort's lifetime
+        -- budget for the current regulatory cycle and refuses publication
+        -- when the budget is exhausted. Operators rotate (reset) the
+        -- budget per regulatory cycle through POST /v1/cohort/:id/budget/rotate.
+        -- See docs/privacy-model.md § "Inter-period ε budget tracking".
+        CREATE TABLE IF NOT EXISTS dp_budget_ledger (
+            cohort_id     TEXT NOT NULL,
+            metric_id     TEXT NOT NULL,
+            cycle_start   INTEGER NOT NULL,
+            epsilon_spent REAL NOT NULL DEFAULT 0,
+            delta_spent   REAL NOT NULL DEFAULT 0,
+            epsilon_cap   REAL NOT NULL,
+            delta_cap     REAL NOT NULL,
+            last_published INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (cohort_id, metric_id, cycle_start)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dp_budget_cohort
+            ON dp_budget_ledger(cohort_id, cycle_start);
+
+        CREATE TABLE IF NOT EXISTS dp_budget_publications (
+            publication_id TEXT PRIMARY KEY,
+            cohort_id      TEXT NOT NULL,
+            metric_id      TEXT NOT NULL,
+            cycle_start    INTEGER NOT NULL,
+            epsilon        REAL NOT NULL,
+            delta          REAL NOT NULL,
+            noise_scale    REAL NOT NULL,
+            published_at   INTEGER NOT NULL,
+            FOREIGN KEY (cohort_id, metric_id, cycle_start)
+                REFERENCES dp_budget_ledger(cohort_id, metric_id, cycle_start)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dp_pub_cohort
+            ON dp_budget_publications(cohort_id, cycle_start);
+
+        -- Sprint 13-14 Tier 2: Paillier homomorphic-encryption aggregations.
+        -- One row per `(cohort_id, metric_id, period_start)` keyed by a
+        -- stable `aggregation_id`. The server homomorphically sums customer
+        -- ciphertexts in place and stores only the running ciphertext —
+        -- per-customer values are never decrypted server-side.
+        --
+        -- NEEDS_CRYPTO_REVIEW: rotating `pk_id` mid-period without keying
+        -- a new aggregation row will corrupt the running sum. Operators
+        -- MUST treat the (cohort, metric, period) tuple as bound to a
+        -- single public key for the lifetime of the row.
+        CREATE TABLE IF NOT EXISTS he_aggregations (
+            aggregation_id    TEXT PRIMARY KEY,
+            cohort_id         TEXT NOT NULL,
+            metric_id         TEXT NOT NULL,
+            period_start      INTEGER NOT NULL,
+            pk_id             TEXT NOT NULL,
+            sum_ciphertext_b64 TEXT NOT NULL,
+            n_contributions   INTEGER NOT NULL DEFAULT 0,
+            last_updated      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_he_agg_cohort
+            ON he_aggregations(cohort_id, period_start);
+
+        -- S10: server-side agent → policy binding registry.
+        -- One row per (tenant_id, agent_id); last-write-wins via UPSERT.
+        -- Replaces the dashboard's localStorage binding so policy assignment
+        -- survives across devices and is queryable by the evaluator.
+        CREATE TABLE IF NOT EXISTS agent_policy_bindings (
+            tenant_id  TEXT    NOT NULL DEFAULT 'default',
+            agent_id   TEXT    NOT NULL,
+            policy_id  TEXT    NOT NULL,
+            bound_at   INTEGER NOT NULL,
+            PRIMARY KEY (tenant_id, agent_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_policy_bindings_policy
+            ON agent_policy_bindings(tenant_id, policy_id);
+
+        -- S12: security audit log. Tenant-scoped append-only trail of
+        -- auth failures, signature mismatches, cross-tenant attempts,
+        -- policy violations, admin-key rotations, and rate-limit trips.
+        -- Surfaced via GET /v1/admin/audit (admin-gated, tenant-scoped).
+        CREATE TABLE IF NOT EXISTS security_audit_log (
+            audit_id    TEXT PRIMARY KEY,
+            tenant_id   TEXT NOT NULL DEFAULT 'default',
+            event_type  TEXT NOT NULL,
+            event_json  TEXT NOT NULL,
+            timestamp   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_audit_tenant_ts
+            ON security_audit_log(tenant_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_security_audit_type_ts
+            ON security_audit_log(event_type, timestamp);
+
+        -- Sprint 19-20: periodic ZK audit reports. One row per generated
+        -- report; signature column carries the operator HMAC over the
+        -- canonical-form JSON (see `audit::report::sign_report`).
+        CREATE TABLE IF NOT EXISTS audit_reports (
+            report_id      TEXT PRIMARY KEY,
+            tenant_id      TEXT NOT NULL DEFAULT 'default',
+            agent_ids_json TEXT NOT NULL,
+            period_start   INTEGER NOT NULL,
+            period_end     INTEGER NOT NULL,
+            generated_at   INTEGER NOT NULL,
+            report_json    TEXT NOT NULL,
+            signature      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_reports_tenant
+            ON audit_reports(tenant_id, generated_at);
         "#,
     )
     .expect("DB schema init failed");
@@ -466,6 +649,23 @@ pub fn init_schema(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE agents ADD COLUMN pop_public_key_b64u TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+
+    // S8 extension: ε ledger cycle defaults on cohort_definitions. All
+    // optional; existing rows keep working untouched. cycle_seconds = NULL
+    // → defaults to 90 days; epsilon_cap_per_cycle = NULL → epsilon_per_metric * 4;
+    // delta_cap_per_cycle = NULL → delta * 4.
+    let _ = conn.execute(
+        "ALTER TABLE cohort_definitions ADD COLUMN cycle_seconds INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE cohort_definitions ADD COLUMN epsilon_cap_per_cycle REAL",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE cohort_definitions ADD COLUMN delta_cap_per_cycle REAL",
         [],
     );
 
@@ -551,4 +751,72 @@ pub fn init_schema(conn: &Connection) {
          WHERE s.key_image_hex IS NULL",
         [],
     );
+
+    // ─────────────────────────────────────────────────────────────────
+    // Sprint 11 — multi-tenancy: add `tenant_id TEXT NOT NULL DEFAULT
+    // 'default'` to every SCOPE'd table. Existing rows backfill to the
+    // default tenant via the column DEFAULT, preserving backwards
+    // compatibility for the 412-test suite + the live dashboard demo.
+    //
+    // The `ALTER TABLE … ADD COLUMN` statements are wrapped in `let _ =`
+    // so a re-run on an already-migrated database is a no-op (SQLite
+    // returns a duplicate-column error which we deliberately swallow).
+    //
+    // Tables intentionally NOT scoped here (see core/src/tenancy/mod.rs
+    // for the audit rationale): users, clients, bank_kyc_links,
+    // bank_attestation_nonces, agent_pop_challenges, agent_call_nonces,
+    // ajwt_used_jtis, agent_action_nonces, agent_vcs, device_tokens,
+    // api_usage, requests_log, company_data, agent_checksum_inputs,
+    // agent_checksum_audit, payment_smt_leaves,
+    // user_compliance_screening, lightning_l402_invoices.
+    let tenant_scoped_tables: &[&str] = &[
+        "agents",
+        "policies",
+        "agent_action_receipts",
+        "agent_action_anchors",
+        "bitcoin_merkle_anchors",
+        "solana_merkle_anchors",
+        "agent_egress_log",
+        "consent_log",
+        "agent_payment_authorizations",
+        "credential_codes",
+        "user_credentials",
+        "user_registrations",
+        "merkle_leaves",
+        "risk_rate_counters",
+        "spend_ledger",
+        "spend_log",
+    ];
+    for tbl in tenant_scoped_tables {
+        let _ = conn.execute(
+            &format!(
+                "ALTER TABLE {tbl} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
+            ),
+            [],
+        );
+    }
+
+    // Composite indexes that make every tenant-scoped query hit a single
+    // partition. Idempotent via `IF NOT EXISTS`.
+    let tenant_indexes: &[&str] = &[
+        "CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id, human_key_image)",
+        "CREATE INDEX IF NOT EXISTS idx_policies_tenant ON policies(tenant_id, policy_id)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_action_receipts_tenant ON agent_action_receipts(tenant_id, agent_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_tenant ON agent_action_anchors(tenant_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_bitcoin_merkle_anchors_tenant ON bitcoin_merkle_anchors(tenant_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_solana_merkle_anchors_tenant ON solana_merkle_anchors(tenant_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_egress_log_tenant ON agent_egress_log(tenant_id, agent_id, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_consent_log_tenant ON consent_log(tenant_id, request_id)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_payment_auth_tenant ON agent_payment_authorizations(tenant_id, agent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_credential_codes_tenant ON credential_codes(tenant_id, key_image_hex)",
+        "CREATE INDEX IF NOT EXISTS idx_user_credentials_tenant ON user_credentials(tenant_id, key_image_hex)",
+        "CREATE INDEX IF NOT EXISTS idx_user_registrations_tenant ON user_registrations(tenant_id, client_name)",
+        "CREATE INDEX IF NOT EXISTS idx_merkle_leaves_tenant ON merkle_leaves(tenant_id, registered_at)",
+        "CREATE INDEX IF NOT EXISTS idx_risk_rate_counters_tenant ON risk_rate_counters(tenant_id, bucket, window_id)",
+        "CREATE INDEX IF NOT EXISTS idx_spend_ledger_tenant ON spend_ledger(tenant_id, policy_id, agent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_spend_log_tenant ON spend_log(tenant_id, policy_id, agent_id, recorded_at)",
+    ];
+    for sql in tenant_indexes {
+        let _ = conn.execute(sql, []);
+    }
 }

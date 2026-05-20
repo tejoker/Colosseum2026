@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.6
+#
+# Builds the enclave-side `nitro-enclave` binary inside a minimal Amazon Linux
+# 2023 image. The result is a single static-ish ELF the operator passes to
+# `nitro-cli build-enclave --docker-uri ... --output-file sauronid-enclave.eif`
+# (see deploy/nitro/run.sh).
+#
+# Build context: this Dockerfile expects the SauronID repository root as
+# context (the COPY ../../core layout below resolves relative to the build
+# context, so invoke with `docker build -f deploy/nitro/Dockerfile.enclave .`
+# from the repo root — see deploy/nitro/run.sh which handles this for you).
+
+FROM amazonlinux:2023 AS builder
+
+# Toolchain. We pin rustc/cargo to whatever Amazon Linux 2023 ships rather
+# than dragging in rustup — keeps the EIF image lean.
+RUN dnf install -y rustc cargo openssl-devel \
+    && dnf clean all
+
+WORKDIR /build
+COPY core ./core
+
+# The enclave binary intentionally has zero new dependencies (see
+# core/src/bin/nitro-enclave.rs). Building with --bin lets us skip the rest
+# of the workspace.
+RUN cargo build \
+    --release \
+    --manifest-path core/Cargo.toml \
+    --bin nitro-enclave
+
+# ── Runtime stage ────────────────────────────────────────────────────────────
+#
+# Amazon Linux 2023 base again — `nitro-cli build-enclave` runs the entrypoint
+# inside the enclave's init system, so we keep the libc / dynamic-loader env
+# identical to the build host.
+
+FROM amazonlinux:2023
+COPY --from=builder /build/core/target/release/nitro-enclave /usr/local/bin/
+
+# Default port = 5005. Override via `SAURON_ENCLAVE_PORT` if your operator
+# tooling needs a different one. The vsock listener inside the enclave maps
+# to this TCP port via the operator-host helper (see deploy/nitro/run.sh).
+ENV SAURON_ENCLAVE_PORT=5005
+
+ENTRYPOINT ["/usr/local/bin/nitro-enclave"]

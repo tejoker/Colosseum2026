@@ -1,0 +1,161 @@
+name: SBOM (CycloneDX)
+
+# Generates a Software Bill of Materials for every language ecosystem in the
+# repo. Runs on every GitHub release (so the SBOM gets attached to the
+# release artifact) and weekly so a freshly published transitive dep is
+# captured before the next release.
+
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: "23 5 * * 1" # Mondays 05:23 UTC
+  workflow_dispatch:
+
+# `permissions: contents: write` is needed only for the release-upload step.
+# All other steps are read-only.
+permissions:
+  contents: write
+
+jobs:
+  rust-sbom:
+    name: Rust SBOM (cargo-cyclonedx)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-sbom-${{ runner.os }}-${{ hashFiles('core/Cargo.lock') }}
+
+      # cargo-cyclonedx is intentionally NOT a Cargo.toml dependency — it is
+      # a CLI tool installed via `cargo install` for SBOM generation only.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate Rust SBOM
+        working-directory: core
+        run: cargo cyclonedx -f json --override-filename sbom-rust
+
+      - name: Move SBOM to repo root
+        run: |
+          mkdir -p sbom-artifacts
+          # cargo-cyclonedx may emit multiple files (one per crate) — gather all.
+          find core -maxdepth 3 -name 'sbom-rust*.json' -exec cp {} sbom-artifacts/ \;
+
+      - name: Upload Rust SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-rust
+          path: sbom-artifacts/*.json
+          retention-days: 90
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sbom-artifacts/*.json
+
+  typescript-sbom:
+    name: TypeScript SBOM (CycloneDX npm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Adjust to match the actual subdirs that ship `package.json`.
+        # zkp/sdk and zkp/issuer both ship one; clients/python is a Python
+        # package and is handled by the python-sbom job.
+        subdir:
+          - dashboard
+          - agentic
+          - redteam
+          - zkp/sdk
+          - zkp/issuer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check subdir has package.json
+        id: check
+        run: |
+          if [ -f "${{ matrix.subdir }}/package.json" ]; then
+            echo "present=1" >> $GITHUB_OUTPUT
+          else
+            echo "present=0" >> $GITHUB_OUTPUT
+            echo "::notice::No package.json in ${{ matrix.subdir }} — skipping."
+          fi
+
+      - name: Install deps
+        if: steps.check.outputs.present == '1'
+        working-directory: ${{ matrix.subdir }}
+        run: npm install --no-audit --no-fund --ignore-scripts
+
+      - name: Generate TS SBOM
+        if: steps.check.outputs.present == '1'
+        working-directory: ${{ matrix.subdir }}
+        run: |
+          # Slash characters in subdir paths confuse the artifact filename;
+          # flatten with a dash so the upload step picks a valid name.
+          OUT="sbom-ts-$(echo '${{ matrix.subdir }}' | tr '/' '-').json"
+          npx --yes @cyclonedx/cyclonedx-npm --output-format JSON --output-file "$OUT"
+
+      - name: Upload TS SBOM artifact
+        if: steps.check.outputs.present == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-ts-${{ matrix.subdir }}
+          path: ${{ matrix.subdir }}/sbom-ts-*.json
+          retention-days: 90
+
+      - name: Attach to release
+        if: steps.check.outputs.present == '1' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.subdir }}/sbom-ts-*.json
+
+  python-sbom:
+    name: Python SBOM (pip-licenses)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install client + pip-licenses
+        run: |
+          python -m pip install --upgrade pip
+          # `clients/python` ships a pyproject; install it (plus its deps) so
+          # pip-licenses sees the full transitive closure.
+          pip install ./clients/python pip-licenses
+
+      - name: Generate Python SBOM
+        run: |
+          pip-licenses --format=json --with-urls --with-license-file --with-system > sbom-python.json
+          ls -lh sbom-python.json
+
+      - name: Upload Python SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-python
+          path: sbom-python.json
+          retention-days: 90
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sbom-python.json

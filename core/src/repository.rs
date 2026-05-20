@@ -70,6 +70,7 @@
 use std::sync::Arc;
 
 use crate::db::DbHandle;
+use crate::tenancy::DEFAULT_TENANT;
 
 #[derive(Clone)]
 pub enum Repo {
@@ -1586,7 +1587,507 @@ impl Repo {
             }
         }
     }
+
+    // ─── Sprint 3+: spend ledger ───────────────────────────────────────────
+    //
+    // Server-authoritative spend total per (policy_id, agent_id, period_start).
+    // Closes redteam A3 ("Local budget can be tampered"): the SDK keeps an
+    // in-memory `BudgetTracker` for local pre-checks, but every recorded spend
+    // is flushed to `spend_log` and atomically aggregated into `spend_ledger`.
+    // POST /v1/policy/evaluate looks up the authoritative total here when
+    // the caller supplies an `agent_id`.
+    //
+    // Both backends run the INSERT + UPSERT under a serializable wrapper so a
+    // concurrent flush from a parallel SDK instance cannot tear the running
+    // total.
+
+    /// Record a single spend event: append to `spend_log` and atomically add
+    /// `amount_usd` to the matching `spend_ledger` row (lifetime period =
+    /// `period_start = 0` by default — pass an explicit value to track a
+    /// daily/weekly/etc. window).
+    ///
+    /// Returns the freshly assigned `log_id`. `source` is one of
+    /// `"sdk_flush"` (default for client-driven flushes) or
+    /// `"server_recompute"` (reserved for future reconciliation jobs).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_spend(
+        &self,
+        policy_id: &str,
+        agent_id: &str,
+        action_id_opt: Option<&str>,
+        amount_usd: f64,
+        source: &str,
+        now: i64,
+    ) -> Result<String, RepoError> {
+        Self::record_spend_with_period(
+            self,
+            policy_id,
+            agent_id,
+            action_id_opt,
+            amount_usd,
+            source,
+            0, // lifetime period
+            now,
+        )
+        .await
+    }
+
+    /// Tenant-scoped variant of [`record_spend`]. Multi-tenant call sites
+    /// (Sprint 11) pass the resolved tenant id; legacy call sites continue
+    /// to use [`record_spend`] which defaults to the `"default"` tenant.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_spend_tenant(
+        &self,
+        tenant_id: &str,
+        policy_id: &str,
+        agent_id: &str,
+        action_id_opt: Option<&str>,
+        amount_usd: f64,
+        source: &str,
+        now: i64,
+    ) -> Result<String, RepoError> {
+        self.record_spend_with_period_tenant(
+            tenant_id,
+            policy_id,
+            agent_id,
+            action_id_opt,
+            amount_usd,
+            source,
+            0,
+            now,
+        )
+        .await
+    }
+
+    /// Same as [`record_spend`] but with an explicit `period_start`. Useful
+    /// for daily/weekly accounting windows.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_spend_with_period(
+        &self,
+        policy_id: &str,
+        agent_id: &str,
+        action_id_opt: Option<&str>,
+        amount_usd: f64,
+        source: &str,
+        period_start: i64,
+        now: i64,
+    ) -> Result<String, RepoError> {
+        self.record_spend_with_period_tenant(
+            DEFAULT_TENANT,
+            policy_id,
+            agent_id,
+            action_id_opt,
+            amount_usd,
+            source,
+            period_start,
+            now,
+        )
+        .await
+    }
+
+    /// Tenant-scoped variant of [`record_spend_with_period`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_spend_with_period_tenant(
+        &self,
+        tenant_id: &str,
+        policy_id: &str,
+        agent_id: &str,
+        action_id_opt: Option<&str>,
+        amount_usd: f64,
+        source: &str,
+        period_start: i64,
+        now: i64,
+    ) -> Result<String, RepoError> {
+        if policy_id.is_empty() || agent_id.is_empty() {
+            return Err(RepoError::Backend(
+                "missing policy_id or agent_id".into(),
+            ));
+        }
+        if !amount_usd.is_finite() {
+            return Err(RepoError::Backend("amount_usd must be finite".into()));
+        }
+        if source != "sdk_flush" && source != "server_recompute" {
+            return Err(RepoError::Backend(format!(
+                "unknown spend source '{source}'"
+            )));
+        }
+        let log_id = format!("splog_{}", uuid_like_hex());
+        let tenant_id_owned = tenant_id.to_string();
+        match self {
+            Repo::Sqlite(_) => {
+                let policy_id = policy_id.to_string();
+                let agent_id = agent_id.to_string();
+                let action_id = action_id_opt.map(|s| s.to_string());
+                let source = source.to_string();
+                let log_id_cloned = log_id.clone();
+                let tenant_inner = tenant_id_owned.clone();
+                self.txn_immediate_sqlite(move |conn| {
+                    conn.execute(
+                        "INSERT INTO spend_log (log_id, policy_id, agent_id, action_id, \
+                         amount_usd, recorded_at, source, tenant_id) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        rusqlite::params![
+                            log_id_cloned,
+                            policy_id,
+                            agent_id,
+                            action_id,
+                            amount_usd,
+                            now,
+                            source,
+                            tenant_inner,
+                        ],
+                    )
+                    .map_err(|e| RepoError::Backend(format!("spend_log insert: {e}")))?;
+                    conn.execute(
+                        "INSERT INTO spend_ledger \
+                         (policy_id, agent_id, period_start, total_usd, last_updated, tenant_id) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                         ON CONFLICT(policy_id, agent_id, period_start) DO UPDATE SET \
+                           total_usd = total_usd + ?4, \
+                           last_updated = ?5",
+                        rusqlite::params![
+                            policy_id,
+                            agent_id,
+                            period_start,
+                            amount_usd,
+                            now,
+                            tenant_inner,
+                        ],
+                    )
+                    .map_err(|e| RepoError::Backend(format!("spend_ledger upsert: {e}")))?;
+                    Ok(())
+                })?;
+                Ok(log_id)
+            }
+            Repo::Postgres(_) => {
+                let policy_id = policy_id.to_string();
+                let agent_id = agent_id.to_string();
+                let action_id = action_id_opt.map(|s| s.to_string());
+                let source = source.to_string();
+                let log_id_cloned = log_id.clone();
+                let tenant_inner = tenant_id_owned.clone();
+                self.txn_serializable_pg(move |tx| {
+                    let policy_id = policy_id.clone();
+                    let agent_id = agent_id.clone();
+                    let action_id = action_id.clone();
+                    let source = source.clone();
+                    let log_id_inner = log_id_cloned.clone();
+                    let tenant_inner = tenant_inner.clone();
+                    Box::pin(async move {
+                        sqlx::query(
+                            "INSERT INTO spend_log (log_id, policy_id, agent_id, action_id, \
+                             amount_usd, recorded_at, source, tenant_id) \
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                        )
+                        .bind(&log_id_inner)
+                        .bind(&policy_id)
+                        .bind(&agent_id)
+                        .bind(action_id.as_deref())
+                        .bind(amount_usd)
+                        .bind(now)
+                        .bind(&source)
+                        .bind(&tenant_inner)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(|e| match e {
+                            sqlx::Error::Database(ref db_err)
+                                if db_err.code().as_deref() == Some("40001") =>
+                            {
+                                RepoError::Backend("40001 serialization_failure".into())
+                            }
+                            _ => RepoError::Backend(format!("pg spend_log insert: {e}")),
+                        })?;
+                        sqlx::query(
+                            "INSERT INTO spend_ledger \
+                             (policy_id, agent_id, period_start, total_usd, last_updated, tenant_id) \
+                             VALUES ($1, $2, $3, $4, $5, $6) \
+                             ON CONFLICT (policy_id, agent_id, period_start) DO UPDATE SET \
+                               total_usd = spend_ledger.total_usd + EXCLUDED.total_usd, \
+                               last_updated = EXCLUDED.last_updated",
+                        )
+                        .bind(&policy_id)
+                        .bind(&agent_id)
+                        .bind(period_start)
+                        .bind(amount_usd)
+                        .bind(now)
+                        .bind(&tenant_inner)
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(|e| match e {
+                            sqlx::Error::Database(ref db_err)
+                                if db_err.code().as_deref() == Some("40001") =>
+                            {
+                                RepoError::Backend("40001 serialization_failure".into())
+                            }
+                            _ => RepoError::Backend(format!("pg spend_ledger upsert: {e}")),
+                        })?;
+                        Ok(())
+                    })
+                })
+                .await?;
+                Ok(log_id)
+            }
+        }
+    }
+
+    /// Return the authoritative spend total for one period (default lifetime
+    /// when `period_start == 0`). Missing row returns `Ok(0.0)`.
+    ///
+    /// Back-compat shim: uses the `"default"` tenant. New callers should
+    /// prefer [`Self::get_spend_total_tenant`].
+    pub async fn get_spend_total(
+        &self,
+        policy_id: &str,
+        agent_id: &str,
+        period_start: i64,
+    ) -> Result<f64, RepoError> {
+        self.get_spend_total_tenant(DEFAULT_TENANT, policy_id, agent_id, period_start)
+            .await
+    }
+
+    /// Tenant-scoped variant of [`get_spend_total`].
+    pub async fn get_spend_total_tenant(
+        &self,
+        tenant_id: &str,
+        policy_id: &str,
+        agent_id: &str,
+        period_start: i64,
+    ) -> Result<f64, RepoError> {
+        match self {
+            Repo::Sqlite(db) => {
+                let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
+                let row: Option<f64> = conn
+                    .query_row(
+                        "SELECT total_usd FROM spend_ledger \
+                         WHERE policy_id = ?1 AND agent_id = ?2 AND period_start = ?3 \
+                           AND tenant_id = ?4",
+                        rusqlite::params![policy_id, agent_id, period_start, tenant_id],
+                        |r| r.get::<_, f64>(0),
+                    )
+                    .ok();
+                Ok(row.unwrap_or(0.0))
+            }
+            Repo::Postgres(pool) => {
+                let row: Option<(f64,)> = sqlx::query_as(
+                    "SELECT total_usd FROM spend_ledger \
+                     WHERE policy_id = $1 AND agent_id = $2 AND period_start = $3 \
+                       AND tenant_id = $4",
+                )
+                .bind(policy_id)
+                .bind(agent_id)
+                .bind(period_start)
+                .bind(tenant_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| RepoError::Backend(format!("pg spend total: {e}")))?;
+                Ok(row.map(|t| t.0).unwrap_or(0.0))
+            }
+        }
+    }
+
+    /// Return the (last_updated, log_count) sidecar pair for a ledger row.
+    /// Used by `GET /v1/agents/:agent_id/spend` to enrich the response.
+    /// Back-compat shim — defaults to the `"default"` tenant.
+    pub async fn get_spend_meta(
+        &self,
+        policy_id: &str,
+        agent_id: &str,
+        period_start: i64,
+    ) -> Result<(i64, i64), RepoError> {
+        self.get_spend_meta_tenant(DEFAULT_TENANT, policy_id, agent_id, period_start)
+            .await
+    }
+
+    /// Tenant-scoped variant of [`get_spend_meta`].
+    pub async fn get_spend_meta_tenant(
+        &self,
+        tenant_id: &str,
+        policy_id: &str,
+        agent_id: &str,
+        period_start: i64,
+    ) -> Result<(i64, i64), RepoError> {
+        match self {
+            Repo::Sqlite(db) => {
+                let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
+                let last_updated: i64 = conn
+                    .query_row(
+                        "SELECT last_updated FROM spend_ledger \
+                         WHERE policy_id = ?1 AND agent_id = ?2 AND period_start = ?3 \
+                           AND tenant_id = ?4",
+                        rusqlite::params![policy_id, agent_id, period_start, tenant_id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0);
+                let log_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM spend_log \
+                         WHERE policy_id = ?1 AND agent_id = ?2 AND tenant_id = ?3",
+                        rusqlite::params![policy_id, agent_id, tenant_id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0);
+                Ok((last_updated, log_count))
+            }
+            Repo::Postgres(pool) => {
+                let lu: Option<(i64,)> = sqlx::query_as(
+                    "SELECT last_updated FROM spend_ledger \
+                     WHERE policy_id = $1 AND agent_id = $2 AND period_start = $3 \
+                       AND tenant_id = $4",
+                )
+                .bind(policy_id)
+                .bind(agent_id)
+                .bind(period_start)
+                .bind(tenant_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| RepoError::Backend(format!("pg ledger meta: {e}")))?;
+                let cnt: (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*)::BIGINT FROM spend_log \
+                     WHERE policy_id = $1 AND agent_id = $2 AND tenant_id = $3",
+                )
+                .bind(policy_id)
+                .bind(agent_id)
+                .bind(tenant_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| RepoError::Backend(format!("pg log count: {e}")))?;
+                Ok((lu.map(|t| t.0).unwrap_or(0), cnt.0))
+            }
+        }
+    }
+
+    /// Recent rows of `spend_log` for the given (policy_id, agent_id), newest
+    /// first. `limit` is clamped to 1000. Back-compat shim — defaults to
+    /// the `"default"` tenant.
+    pub async fn list_spend_log(
+        &self,
+        policy_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> Result<Vec<SpendLogEntry>, RepoError> {
+        self.list_spend_log_tenant(DEFAULT_TENANT, policy_id, agent_id, limit)
+            .await
+    }
+
+    /// Tenant-scoped variant of [`list_spend_log`].
+    pub async fn list_spend_log_tenant(
+        &self,
+        tenant_id: &str,
+        policy_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> Result<Vec<SpendLogEntry>, RepoError> {
+        let limit = limit.clamp(1, 1000);
+        match self {
+            Repo::Sqlite(db) => {
+                let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT log_id, policy_id, agent_id, action_id, amount_usd, \
+                         recorded_at, source FROM spend_log \
+                         WHERE policy_id = ?1 AND agent_id = ?2 AND tenant_id = ?3 \
+                         ORDER BY recorded_at DESC LIMIT ?4",
+                    )
+                    .map_err(|e| RepoError::Backend(e.to_string()))?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![policy_id, agent_id, tenant_id, limit],
+                        |r| {
+                            Ok(SpendLogEntry {
+                                log_id: r.get(0)?,
+                                policy_id: r.get(1)?,
+                                agent_id: r.get(2)?,
+                                action_id: r.get(3)?,
+                                amount_usd: r.get(4)?,
+                                recorded_at: r.get(5)?,
+                                source: r.get(6)?,
+                            })
+                        },
+                    )
+                    .map_err(|e| RepoError::Backend(e.to_string()))?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(|e| RepoError::Backend(e.to_string()))?);
+                }
+                Ok(out)
+            }
+            Repo::Postgres(pool) => {
+                let rows: Vec<(String, String, String, Option<String>, f64, i64, String)> =
+                    sqlx::query_as(
+                        "SELECT log_id, policy_id, agent_id, action_id, amount_usd, \
+                         recorded_at, source FROM spend_log \
+                         WHERE policy_id = $1 AND agent_id = $2 AND tenant_id = $3 \
+                         ORDER BY recorded_at DESC LIMIT $4",
+                    )
+                    .bind(policy_id)
+                    .bind(agent_id)
+                    .bind(tenant_id)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|e| RepoError::Backend(format!("pg spend log list: {e}")))?;
+                Ok(rows
+                    .into_iter()
+                    .map(|(log_id, policy_id, agent_id, action_id, amount_usd, recorded_at, source)| {
+                        SpendLogEntry {
+                            log_id,
+                            policy_id,
+                            agent_id,
+                            action_id,
+                            amount_usd,
+                            recorded_at,
+                            source,
+                        }
+                    })
+                    .collect())
+            }
+        }
+    }
 }
+
+/// One row of `spend_log` returned by [`Repo::list_spend_log`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpendLogEntry {
+    /// `splog_<hex>` identifier.
+    pub log_id: String,
+    /// Policy this spend was charged against.
+    pub policy_id: String,
+    /// Agent that recorded the spend.
+    pub agent_id: String,
+    /// Optional action id from the SDK side (free-form).
+    pub action_id: Option<String>,
+    /// USD amount (positive for spend, zero/negative tolerated for corrections
+    /// via `record_spend_with_period`; the public HTTP route rejects negatives
+    /// outright).
+    pub amount_usd: f64,
+    /// Unix-epoch seconds at which the spend was recorded.
+    pub recorded_at: i64,
+    /// `sdk_flush` or `server_recompute`.
+    pub source: String,
+}
+
+/// Generate a 32-hex-char id without pulling in the `uuid` crate.
+///
+/// Combines high-resolution wall time with a per-call PID + nanosecond
+/// scramble. Collision probability is negligible at the spend-ledger
+/// volume we expect (<1 row/ms even under aggressive flushes).
+fn uuid_like_hex() -> String {
+    use sha2::{Digest, Sha256};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id() as u128;
+    let counter = SPEND_LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128;
+    let mut h = Sha256::new();
+    h.update(nanos.to_be_bytes());
+    h.update(pid.to_be_bytes());
+    h.update(counter.to_be_bytes());
+    let hash = h.finalize();
+    hex::encode(&hash[..16])
+}
+
+static SPEND_LOG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -2150,6 +2651,164 @@ mod tests {
             }
             assert!(repo.agent_action_receipt_exists("rcp_X", "ah_X").await.unwrap());
             assert!(!repo.agent_action_receipt_exists("rcp_X", "wrong_hash").await.unwrap());
+        });
+    }
+
+    // ─── Sprint 3+: spend ledger ──────────────────────────────────────────
+
+    #[test]
+    fn test_repo_spend_record_increments_ledger() {
+        let repo = build_test_repo("spend_record_inc");
+        rt().block_on(async {
+            let id = repo
+                .record_spend("pol_A", "agent-1", Some("act-1"), 10.0, "sdk_flush", 100)
+                .await
+                .expect("record ok");
+            assert!(id.starts_with("splog_"), "log id prefix: {id}");
+            let total = repo.get_spend_total("pol_A", "agent-1", 0).await.unwrap();
+            assert!((total - 10.0).abs() < 1e-9, "total = {total}");
+
+            repo.record_spend("pol_A", "agent-1", None, 2.5, "sdk_flush", 101)
+                .await
+                .unwrap();
+            let total2 = repo.get_spend_total("pol_A", "agent-1", 0).await.unwrap();
+            assert!((total2 - 12.5).abs() < 1e-9, "total2 = {total2}");
+
+            let log = repo.list_spend_log("pol_A", "agent-1", 100).await.unwrap();
+            assert_eq!(log.len(), 2, "two log rows present");
+            // Newest first by recorded_at DESC.
+            assert!(log[0].recorded_at >= log[1].recorded_at);
+        });
+    }
+
+    #[test]
+    fn test_repo_spend_record_isolates_by_policy_agent_period() {
+        let repo = build_test_repo("spend_iso");
+        rt().block_on(async {
+            repo.record_spend("pol_A", "agent-1", None, 5.0, "sdk_flush", 100)
+                .await
+                .unwrap();
+            repo.record_spend("pol_A", "agent-2", None, 7.0, "sdk_flush", 100)
+                .await
+                .unwrap();
+            repo.record_spend("pol_B", "agent-1", None, 11.0, "sdk_flush", 100)
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.get_spend_total("pol_A", "agent-1", 0).await.unwrap(),
+                5.0
+            );
+            assert_eq!(
+                repo.get_spend_total("pol_A", "agent-2", 0).await.unwrap(),
+                7.0
+            );
+            assert_eq!(
+                repo.get_spend_total("pol_B", "agent-1", 0).await.unwrap(),
+                11.0
+            );
+            // Unknown lookup -> 0.
+            assert_eq!(
+                repo.get_spend_total("pol_X", "agent-X", 0).await.unwrap(),
+                0.0
+            );
+        });
+    }
+
+    #[test]
+    fn test_repo_spend_get_total_aggregates_periods_separately() {
+        let repo = build_test_repo("spend_periods");
+        rt().block_on(async {
+            // Lifetime + per-day periods are independent rows under the PK.
+            repo.record_spend_with_period(
+                "pol_A", "agent-1", None, 4.0, "sdk_flush", 0, 100,
+            )
+            .await
+            .unwrap();
+            repo.record_spend_with_period(
+                "pol_A", "agent-1", None, 9.0, "sdk_flush", 1_700_000_000, 1_700_000_500,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                repo.get_spend_total("pol_A", "agent-1", 0).await.unwrap(),
+                4.0
+            );
+            assert_eq!(
+                repo.get_spend_total("pol_A", "agent-1", 1_700_000_000)
+                    .await
+                    .unwrap(),
+                9.0
+            );
+        });
+    }
+
+    #[test]
+    fn test_repo_spend_rejects_non_finite_amount() {
+        let repo = build_test_repo("spend_nan");
+        rt().block_on(async {
+            match repo
+                .record_spend("pol_A", "agent-1", None, f64::NAN, "sdk_flush", 100)
+                .await
+            {
+                Err(RepoError::Backend(s)) => assert!(s.contains("finite")),
+                other => panic!("expected finite-amount error, got: {other:?}"),
+            }
+            match repo
+                .record_spend(
+                    "pol_A",
+                    "agent-1",
+                    None,
+                    f64::INFINITY,
+                    "sdk_flush",
+                    100,
+                )
+                .await
+            {
+                Err(RepoError::Backend(s)) => assert!(s.contains("finite")),
+                other => panic!("expected finite-amount error, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_repo_spend_rejects_unknown_source() {
+        let repo = build_test_repo("spend_bad_source");
+        rt().block_on(async {
+            match repo
+                .record_spend("pol_A", "agent-1", None, 1.0, "bogus", 100)
+                .await
+            {
+                Err(RepoError::Backend(s)) => assert!(s.contains("source")),
+                other => panic!("expected unknown-source error, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_repo_spend_list_clamps_limit() {
+        let repo = build_test_repo("spend_list_limit");
+        rt().block_on(async {
+            for i in 0..5 {
+                repo.record_spend(
+                    "pol_A",
+                    "agent-1",
+                    None,
+                    1.0,
+                    "sdk_flush",
+                    100 + i,
+                )
+                .await
+                .unwrap();
+            }
+            let rows = repo.list_spend_log("pol_A", "agent-1", 2).await.unwrap();
+            assert_eq!(rows.len(), 2, "limit honoured");
+
+            // Over-cap limit clamps to 1000 (we only have 5 rows; just assert it doesn't error).
+            let rows = repo
+                .list_spend_log("pol_A", "agent-1", 1_000_000)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 5);
         });
     }
 }

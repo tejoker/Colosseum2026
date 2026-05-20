@@ -85,13 +85,8 @@ run_case "5" "OID4VCI pre-authorized code replay protection" "cd zkp/issuer && n
 run_case "6" "CAMARA strict silent-auth IP to SIM check" "cd zkp/camara && npm run build && npm test && npm run test:card-login"
 run_group_case "7,8,9" "Agent checksum integrity|Delegation chain traceability|PoP anti-replay binding" "cd agentic && npm run build && npm test"
 record_result "10" "Anomaly engine detects synthetic anomalies" "SKIP" "anomaly-engine removed from active surface; see archive/banking-2025/"
-run_case "11" "Revocation smart contract ACL and privacy" "cd contracts/revocation && HARDHAT_DISABLE_TELEMETRY_PROMPT=1 HARDHAT_DISABLE_TELEMETRY_PROMPTS=1 npm test -- --grep 'RevocationRegistry|AgentDelegationRegistry'"
-
-if [[ -n "${SUBGRAPH_URL:-}" ]]; then
-  run_case "12" "Subgraph indexing latency SLA" "cd contracts/revocation && HARDHAT_DISABLE_TELEMETRY_PROMPT=1 HARDHAT_DISABLE_TELEMETRY_PROMPTS=1 SUBGRAPH_URL='${SUBGRAPH_URL}' npm test -- --grep 'Subgraph latency SLA'"
-else
-  record_result "12" "Subgraph indexing latency SLA" "FAIL" "SUBGRAPH_URL not set; latency check requires a live GraphQL subgraph endpoint"
-fi
+record_result "11" "Revocation smart contract ACL and privacy" "SKIP" "contracts/revocation removed in Sprint 0; Ethereum delegation registry moved out-of-scope"
+record_result "12" "Subgraph indexing latency SLA" "SKIP" "contracts/revocation removed in Sprint 0; Ethereum delegation registry moved out-of-scope"
 
 echo ""
 echo "================ Rule Compliance Summary ================"

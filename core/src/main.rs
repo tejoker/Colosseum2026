@@ -11,11 +11,18 @@ use curve25519_dalek::{RistrettoPoint, Scalar};
 use hmac::{Hmac, Mac};
 use rusqlite::params;
 use sauron_core::compliance;
-use sauron_core::compliance_screening;
 use sauron_core::issuer_runtime::IssuerVerifyError;
 use sauron_core::policy::{self, AssuranceLevel};
 use sauron_core::risk;
-use sauron_core::routes::admin_router;
+use sauron_core::middleware::{
+    audit_log_middleware, global_rate_limit_middleware, init_audit_sink, GlobalRateLimitConfig,
+    GlobalRateLimiter,
+};
+use sauron_core::routes::{
+    admin_router, agent_spend_router, attestation_router, audit_reports_router, audit_router,
+    cohort_router, policy_router, proofs_router, stats_router,
+};
+use sauron_core::tenancy as sauron_tenancy;
 use sauron_core::{
     agent, db,
     identity::{Identity, UserData},
@@ -211,6 +218,17 @@ async fn main() {
     // Background GC for time-bounded tables (JTIs, PoP challenges, risk counters, audit log).
     sauron_core::state::spawn_background_gc(Arc::clone(&db_arc));
 
+    // S12: wire the security audit sinks (tracing target + optional file
+    // sink via SAURON_AUDIT_LOG_PATH + the DB sink for in-DB queries).
+    // Schema is created by db::init_schema, this call just stitches the
+    // process-global sinks together.
+    init_audit_sink(Arc::clone(&db_arc));
+
+    // S12: global pre-auth ingress rate limiter. Token bucket per remote
+    // IP. Disabled by setting SAURON_GLOBAL_RATE_LIMIT_RPS=0 (or burst=0).
+    let global_limiter = Arc::new(GlobalRateLimiter::new(GlobalRateLimitConfig::from_env()));
+    global_limiter.spawn_pruner();
+
     // Background OTS proof upgrader: promotes calendar-pending anchors to full
     // Bitcoin block attestations once the block is mined and the calendar batches up.
     sauron_core::bitcoin_anchor::spawn_ots_upgrader(Arc::clone(&db_arc));
@@ -284,21 +302,6 @@ async fn main() {
             )),
         )
         .route(
-            "/agent/payment/nonexistence/material",
-            post(payment_nonexistence_material).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
-        )
-        .route(
-            "/agent/payment/nonexistence/verify",
-            post(payment_nonexistence_verify).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
-        )
-        .route("/merchant/payment/consume", post(merchant_payment_consume))
-        .route(
             "/policy/authorize",
             post(policy_authorize).route_layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -362,6 +365,40 @@ async fn main() {
         .route("/", get(landing_page))
         // Admin
         .nest("/admin", admin_router())
+        // Sprint 2: policy DSL CRUD + evaluate (admin-gated).
+        .nest("/v1/policy", policy_router())
+        // Sprint 3 follow-up: server-authoritative spend ledger (admin-gated).
+        // Closes redteam A3 — local BudgetTracker is no longer the source of truth.
+        .nest("/v1/agents", agent_spend_router())
+        // Sprint 4: ZK action-log proof verification (admin-gated, DEV vkeys).
+        .nest("/v1/proofs", proofs_router())
+        // Sprint 7: customer stat aggregation + ZK integrity (admin-gated).
+        // Stores per-tenant claimed metric values bound to a Merkle root via
+        // the StatsHonestComputation circuit. DP publish lives in Sprint 8.
+        .nest("/v1/stats", stats_router())
+        // Sprint 8: DP-published cohort surface (admin-gated, operator-global).
+        // Aggregates raw stats per cohort, applies Laplace noise per quartile
+        // under the cohort's ε budget, suppresses metrics below k-anonymity.
+        .nest("/v1/cohort", cohort_router())
+        // S12: security audit log query (admin-gated, tenant-scoped).
+        .nest("/v1/admin/audit", audit_router())
+        // Sprint 19-20: periodic ZK audit report module.
+        // Bundles receipts + stats proofs + anchors + policy events
+        // into a signed report a compliance officer can hand to an
+        // external auditor.
+        .nest("/v1/audit", audit_reports_router())
+        // S6: dedicated attestation surface — operators POST raw Nitro
+        // COSE_Sign1 blobs at `/v1/attestation/nitro/verify` to validate
+        // the document, surface the parsed module_id + PCRs, and confirm
+        // the measurement matches their registered expected hash.
+        .nest("/v1/attestation", attestation_router())
+        // Sprint 11 multi-tenancy: extract `TenantId` from
+        // `x-sauron-tenant-id` header / admin JWT `tnt` claim and attach
+        // to request extensions. Falls back to the `"default"` tenant for
+        // any legacy caller, preserving the 412-test baseline and the
+        // live demo flow. Layered globally so every `/v1/*`, `/admin/*`,
+        // and `/agent/*` handler has access via `Extension<TenantId>`.
+        .layer(middleware::from_fn(sauron_tenancy::extract_tenant))
         .layer(middleware::from_fn(http_metrics_middleware))
         .layer(
             TraceLayer::new_for_http()
@@ -419,6 +456,17 @@ async fn main() {
                     .allow_headers(allowed_headers)
             }
         })
+        // S12: security audit log middleware. Runs AFTER handlers so the
+        // response status is visible (records 401/403/407 failures). Must
+        // be outer than the route-level auth layers it observes.
+        .layer(middleware::from_fn(audit_log_middleware))
+        // S12: global ingress rate limiter. Outermost of the security
+        // stack so an unauthenticated brute-force flood never reaches
+        // auth, tenant resolution, or any handler.
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&global_limiter),
+            global_rate_limit_middleware,
+        ))
         .with_state(state);
 
     // Metrics endpoint reads from the global prometheus Registry — no router state needed.
@@ -431,7 +479,15 @@ async fn main() {
 
     tracing::info!(target: "sauron::startup", %addr, "Sauron Server started");
 
-    axum::serve(listener, app).await.unwrap();
+    // `into_make_service_with_connect_info::<SocketAddr>` so the S12 global
+    // rate limiter can pull the peer IP from `ConnectInfo` when neither
+    // X-Forwarded-For nor X-Real-IP is set by an upstream proxy.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 // ─────────────────────────────────────────────────────
@@ -750,9 +806,6 @@ async fn bank_register_user(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        compliance_screening::upsert_bank_cleared_row(&db, &payload.key_image_hex, now)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
         if let Some(bank_customer_id) = payload
             .bank_customer_id
             .as_ref()
@@ -850,11 +903,6 @@ async fn handle_register(
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
             params![hex_ki, hex_pk, p.first_name, p.last_name, p.email, p.date_of_birth, p.nationality],
         ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let _ = compliance_screening::upsert_default_row(&db, &hex_ki, ts);
     }
 
     // Mettre à jour le groupe en mémoire + insérer le commitment Merkle.
@@ -2386,14 +2434,6 @@ async fn kyc_retrieve(
             .map_err(|e| (StatusCode::FORBIDDEN, e))?
     };
 
-    let screening_row = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        st.screening
-            .enforce_for_user(&db, &user_ki)
-            .map_err(|e| (StatusCode::FORBIDDEN, e))?
-    };
-
     // ZKP-only identity disclosure is mandatory.
     let proof = payload
         .zkp_proof
@@ -2731,13 +2771,8 @@ async fn kyc_retrieve(
         let st = state.read().unwrap();
         st.issuer_runtime.circuit_snapshots_json(&st.issuer_urls)
     };
-    let screening_api = {
-        let st = state.read().unwrap();
-        st.screening.for_agent_api(&screening_row)
-    };
     let controls = serde_json::json!({
         "compliance": jurisdiction_decision.for_agent_api(),
-        "screening": screening_api,
         "issuer": issuer_controls,
         "risk": { "window_secs": risk::window_secs() },
     });
@@ -3359,14 +3394,6 @@ async fn agent_payment_authorize(
             .map_err(|e| (StatusCode::FORBIDDEN, e))?
     };
 
-    let payment_screening_row = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        st.screening
-            .enforce_for_user(&db, &human_key_image)
-            .map_err(|e| (StatusCode::FORBIDDEN, e))?
-    };
-
     let (assurance_level, pop_jkt) = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
@@ -3486,11 +3513,6 @@ async fn agent_payment_authorize(
         let st = state.read().unwrap();
         st.issuer_runtime.circuit_snapshots_json(&st.issuer_urls)
     };
-    let screening_api = {
-        let st = state.read().unwrap();
-        st.screening.for_agent_api(&payment_screening_row)
-    };
-
     Ok(Json(serde_json::json!({
         "authorized": true,
         "authorization_id": auth_id,
@@ -3505,386 +3527,9 @@ async fn agent_payment_authorize(
         "expires_at": expires_at,
         "controls": {
             "compliance": payment_jurisdiction.for_agent_api(),
-            "screening": screening_api,
             "issuer": issuer_snap,
             "risk": { "window_secs": risk::window_secs() },
         },
-    })))
-}
-
-// ─────────────────────────────────────────────────────
-//  Merchant: consume a payment authorization + update SMT
-// ─────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct MerchantPaymentConsumeBody {
-    authorization_id: String,
-    merchant_id: String,
-    ajwt: String,
-    authorization_receipt: agent_action::ActionReceipt,
-    agent_action: agent_action::AgentActionProof,
-}
-
-/// POST /merchant/payment/consume
-///
-/// Merchant marks an authorization as consumed. On success, the payment SMT is
-/// updated (key = SHA256(agent_id|window_start), value = 1) so that subsequent
-/// non-payment proofs for the same window will correctly fail.
-async fn merchant_payment_consume(
-    State(state): State<Arc<RwLock<ServerState>>>,
-    Json(payload): Json<MerchantPaymentConsumeBody>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if payload.authorization_id.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "authorization_id required".into()));
-    }
-    if payload.merchant_id.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "merchant_id required".into()));
-    }
-    if payload.ajwt.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "ajwt required".into()));
-    }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let now_i64 = now as i64;
-    let authorization_id = payload.authorization_id.trim().to_string();
-    let merchant_id = payload.merchant_id.trim().to_string();
-
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let claims = agent::verify_ajwt(&jwt_secret, &payload.ajwt)
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired A-JWT".into()))?;
-    let human_key_image = claims
-        .get("sub")
-        .and_then(|v| v.as_str())
-        .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing sub".into()))?
-        .to_string();
-    let claim_agent_id = claims
-        .get("agent_id")
-        .and_then(|v| v.as_str())
-        .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing agent_id".into()))?
-        .to_string();
-    let jti = claims
-        .get("jti")
-        .and_then(|v| v.as_str())
-        .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing jti".into()))?
-        .to_string();
-    let exp = claims
-        .get("exp")
-        .and_then(|v| v.as_i64())
-        .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing exp".into()))?;
-    let intent = parse_ajwt_intent_claim(&claims)?;
-
-    let (agent_id, auth_jti, amount_minor, currency) = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        let row: (String, String, i64, String, String, i64, i64) = db
-            .query_row(
-                "SELECT agent_id, jti, amount_minor, currency, merchant_id, expires_at, consumed
-                 FROM agent_payment_authorizations
-                 WHERE auth_id = ?1",
-                params![authorization_id],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ))
-                },
-            )
-            .map_err(|_| (StatusCode::NOT_FOUND, "Authorization not found".into()))?;
-        let (agent_id, auth_jti, amount_minor, currency, db_merchant, expires_at, consumed) = row;
-        if db_merchant != merchant_id {
-            return Err((StatusCode::FORBIDDEN, "merchant_id mismatch".into()));
-        }
-        if expires_at < now_i64 {
-            return Err((StatusCode::GONE, "Authorization expired".into()));
-        }
-        if consumed != 0 {
-            return Err((
-                StatusCode::CONFLICT,
-                "Authorization already consumed".into(),
-            ));
-        }
-        (agent_id, auth_jti, amount_minor, currency)
-    };
-    if claim_agent_id != agent_id {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "A-JWT agent_id does not match authorization".into(),
-        ));
-    }
-
-    if payload.authorization_receipt.agent_id != agent_id
-        || payload.authorization_receipt.ajwt_jti != auth_jti
-        || payload.authorization_receipt.status != "accepted"
-    {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "authorization receipt does not match payment authorization".into(),
-        ));
-    }
-    let receipt_ok = {
-        let st = state.read().unwrap();
-        let sig_ok =
-            agent_action::verify_receipt_signature(&st.jwt_secret, &payload.authorization_receipt);
-        let db_seen = {
-            let db = st.db.lock().unwrap();
-            db.query_row(
-                "SELECT COUNT(*) FROM agent_action_receipts WHERE receipt_id = ?1 AND action_hash = ?2 AND signature = ?3",
-                params![
-                    payload.authorization_receipt.receipt_id,
-                    payload.authorization_receipt.action_hash,
-                    payload.authorization_receipt.signature
-                ],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-                > 0
-        };
-        sig_ok && db_seen
-    };
-    if !receipt_ok {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "authorization receipt is missing or invalid".into(),
-        ));
-    }
-
-    let pop_jkt: String = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.query_row(
-            "SELECT IFNULL(pop_jkt, '') FROM agents WHERE agent_id = ?1",
-            params![agent_id],
-            |r| r.get(0),
-        )
-        .map_err(|_| (StatusCode::NOT_FOUND, "Agent not found".into()))?
-    };
-    let validated = agent_action::validate_agent_action(
-        &state,
-        &payload.agent_action,
-        agent_action::ValidateAgentActionOptions {
-            agent_id: &agent_id,
-            human_key_image: &human_key_image,
-            ajwt_jti: &jti,
-            intent: Some(&intent),
-            expected_action: "payment_consume",
-            expected_resource: Some(&authorization_id),
-            expected_merchant_id: Some(&merchant_id),
-            expected_amount_minor: Some(amount_minor),
-            expected_currency: Some(&currency),
-            pop_jkt: Some(&pop_jkt),
-            status: "accepted",
-        },
-    )?;
-    {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        sauron_core::ajwt_support::consume_ajwt_jti(&db, &jti, exp)
-            .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
-    }
-
-    // M2 port: atomic consume of the single-use payment authorization via
-    // the dual-backend repo helper. Postgres uses FOR UPDATE + UPDATE …
-    // RETURNING under SERIALIZABLE; SQLite uses BEGIN IMMEDIATE.
-    {
-        let repo = {
-            let st = state.read().unwrap();
-            st.repo.clone()
-        };
-        repo.consume_payment_authorization(&authorization_id, now_i64)
-            .await
-            .map_err(|e| match e {
-                sauron_core::repository::RepoError::Replay(s) => (StatusCode::CONFLICT, s),
-                sauron_core::repository::RepoError::Backend(s) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {s}"))
-                }
-            })?;
-    }
-
-    // Update payment SMT: set key(agent_id, current window) = 1.
-    let win_start = sauron_core::payment_smt::window_start(now);
-    let key_hex = sauron_core::payment_smt::payment_smt_key(&agent_id, win_start);
-    {
-        let st = state.read().unwrap();
-        let mut smt = st.payment_smt.lock().unwrap();
-        smt.set_leaf(&st.db, &key_hex, 1);
-        // Invalidate cached root so stale proofs can't be generated until issuer recomputes.
-        smt.root = "pending".to_string();
-    }
-
-    Ok(Json(serde_json::json!({
-        "consumed": true,
-        "authorization_id": authorization_id,
-        "agent_id": agent_id,
-        "amount_minor": amount_minor,
-        "currency": currency,
-        "window_start": win_start,
-        "smt_key_hex": key_hex,
-        "action_receipt": validated.receipt,
-        "note": "SMT leaf set to 1 — non-payment proofs for this agent in this window will now fail.",
-    })))
-}
-
-// ─────────────────────────────────────────────────────
-//  Proof of Non-Payment endpoints
-// ─────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct PaymentNonexistenceMaterialBody {
-    agent_id: String,
-    /// Unix timestamp inside the window to prove (defaults to now).
-    #[serde(default)]
-    timestamp: Option<u64>,
-}
-
-/// POST /agent/payment/nonexistence/material
-///
-/// Returns the SMT path material needed for a client to generate a ZKP showing
-/// that the agent has no consumed payment in the current 30-day window.
-async fn payment_nonexistence_material(
-    State(state): State<Arc<RwLock<ServerState>>>,
-    Json(payload): Json<PaymentNonexistenceMaterialBody>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if payload.agent_id.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
-    }
-
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let ts = payload.timestamp.unwrap_or(now_unix);
-    let win_start = sauron_core::payment_smt::window_start(ts);
-    let key_hex = sauron_core::payment_smt::payment_smt_key(&payload.agent_id, win_start);
-
-    let (path_request, current_root, is_non_member) = {
-        let st = state.read().unwrap();
-        let smt = st.payment_smt.lock().unwrap();
-        let is_nm = smt.is_non_member(&key_hex);
-        let req = smt.build_path_request(&key_hex);
-        let root = smt.root.clone();
-        (req, root, is_nm)
-    };
-
-    // Delegate Poseidon path computation to the issuer service.
-    let issuer_url = {
-        let st = state.read().unwrap();
-        st.issuer_url.clone()
-    };
-    let client = reqwest::Client::new();
-    let issuer_resp = client
-        .post(format!("{}/payment-smt/path", issuer_url))
-        .json(&path_request)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Issuer unreachable: {e}")))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Issuer bad JSON: {e}")))?;
-
-    Ok(Json(serde_json::json!({
-        "agent_id": payload.agent_id,
-        "window_start": win_start,
-        "key_hex": key_hex,
-        "is_non_member": is_non_member,
-        "smt_levels": sauron_core::payment_smt::SMT_LEVELS,
-        "current_root": current_root,
-        "path": issuer_resp.get("path").cloned().unwrap_or(serde_json::Value::Null),
-        "public_inputs": {
-            "root": issuer_resp.get("root").and_then(|v| v.as_str()).unwrap_or(&current_root),
-            "key_hex": key_hex,
-            "window_start": win_start,
-            "agent_id": payload.agent_id,
-        },
-    })))
-}
-
-#[derive(serde::Deserialize)]
-struct PaymentNonexistenceVerifyBody {
-    agent_id: String,
-    window_start: u64,
-    /// Groth16 proof object from the client.
-    proof: serde_json::Value,
-    /// Public signals emitted by the circuit.
-    public_signals: Vec<String>,
-}
-
-/// POST /agent/payment/nonexistence/verify
-///
-/// Verifies a client-generated ZKP proving non-payment in a 30-day window.
-/// Delegates Groth16 verification to the issuer service.
-async fn payment_nonexistence_verify(
-    State(state): State<Arc<RwLock<ServerState>>>,
-    Json(payload): Json<PaymentNonexistenceVerifyBody>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if payload.agent_id.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
-    }
-
-    let key_hex =
-        sauron_core::payment_smt::payment_smt_key(&payload.agent_id, payload.window_start);
-
-    let current_root = {
-        let st = state.read().unwrap();
-        let smt = st.payment_smt.lock().unwrap();
-        smt.root.clone()
-    };
-
-    // Forward proof to issuer for Groth16 verification.
-    let issuer_url = {
-        let st = state.read().unwrap();
-        st.issuer_url.clone()
-    };
-    let verify_body = serde_json::json!({
-        "circuit": "PaymentNonMembershipSMT",
-        "proof": payload.proof,
-        "publicSignals": payload.public_signals,
-        "expectedRoot": current_root,
-        "expectedKeyHex": key_hex,
-    });
-    let client = reqwest::Client::new();
-    let issuer_resp = client
-        .post(format!("{}/verify-proof", issuer_url))
-        .json(&verify_body)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Issuer unreachable: {e}")))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Issuer bad JSON: {e}")))?;
-
-    let verified = issuer_resp
-        .get("verified")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if !verified {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "ZKP verification failed: {}",
-                issuer_resp
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-            ),
-        ));
-    }
-
-    Ok(Json(serde_json::json!({
-        "verified": true,
-        "agent_id": payload.agent_id,
-        "window_start": payload.window_start,
-        "key_hex": key_hex,
-        "root_checked": current_root,
-        "smt_levels": sauron_core::payment_smt::SMT_LEVELS,
     })))
 }
 
@@ -4371,9 +4016,6 @@ async fn agent_kyc_consent(
             .unwrap_or_default();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?;
-        st.screening
-            .enforce_for_user(&db, &human_key_image)
-            .map_err(|e| (StatusCode::FORBIDDEN, e))?;
     }
 
     // 2. Verify agent status + mandatory delegated-ring membership + KYA policy
@@ -4797,9 +4439,6 @@ async fn agent_vc_issue(
             )
             .unwrap_or_default();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
-            .map_err(|e| (StatusCode::FORBIDDEN, e))?;
-        st.screening
-            .enforce_for_user(&db, &human_key_image)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?;
     }
 

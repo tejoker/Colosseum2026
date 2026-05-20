@@ -4,12 +4,16 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { SystemStatus } from "./SystemStatus";
+import { TenantSwitcher } from "./TenantSwitcher";
 import { ThemeToggle } from "./ThemeToggle";
 
 const NAV_LINKS = [
   { key: "home",      href: "/" },
   { key: "protected", href: "/protected" },
   { key: "activity",  href: "/activity" },
+  { key: "policies",  href: "/policies" },
+  { key: "cohorts",   href: "/cohorts" },
+  { key: "compliance", href: "/compliance" },
   { key: "proofs",    href: "/proofs" },
   { key: "try",       href: "/try" },
   { key: "settings",  href: "/settings" },
@@ -62,6 +66,7 @@ export function TopNav() {
       {/* Right side */}
       <div className="flex items-center gap-4 ml-auto flex-shrink-0">
         <SystemStatus />
+        <TenantSwitcher />
         <ThemeToggle />
       </div>
     </header>

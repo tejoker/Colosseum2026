@@ -1,6 +1,15 @@
 // All public fetchers hit the SAME-ORIGIN Next.js /api/* surface. The dashboard's
 // /api routes proxy to the SauronID core /admin/* surface server-side. The
 // browser never knows the core URL — no CORS, no env leakage.
+//
+// Tenant context (S11.6): every browser-originated fetch attaches the
+// `X-Sauron-Tenant-Id` header so the proxy can forward it to the core. The
+// header is sourced from `currentTenant()` which reads the cookie set by the
+// in-page tenant switcher. Server-side calls (Server Components, route
+// handlers) rely on the middleware to copy the cookie onto the request
+// header, so we only stamp the header here when running in the browser.
+
+import { currentTenant, TENANT_HEADER } from "./tenant";
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 
@@ -110,9 +119,25 @@ function absolutize(path: string): string {
   return `http://127.0.0.1:${port}${path}`;
 }
 
+/**
+ * Build the per-request header set. Browser-only — server-side calls let
+ * Next.js middleware add the tenant header from the cookie. Returns an
+ * empty object when running on the server so the existing call sites keep
+ * working without forcing every fetcher to thread a Request through.
+ */
+function tenantHeaders(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const id = currentTenant();
+  if (!id) return {};
+  return { [TENANT_HEADER]: id };
+}
+
 async function get<T>(url: string): Promise<ApiResult<T>> {
   try {
-    const res = await fetch(absolutize(url), { next: { revalidate: 10 } });
+    const res = await fetch(absolutize(url), {
+      next: { revalidate: 10 },
+      headers: { ...tenantHeaders() },
+    });
     if (!res.ok) {
       return { ok: false, error: `HTTP ${res.status}` };
     }
@@ -198,12 +223,458 @@ export async function revokeAgent(id: string): Promise<ApiResult<{ revoked: true
   try {
     const res = await fetch(absolutize(`/api/agents/${id}/revoke`), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...tenantHeaders() },
     });
     if (!res.ok) {
       return { ok: false, error: `HTTP ${res.status}` };
     }
     return { ok: true, data: { revoked: true } };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+/* ── Policy DSL (Sprint 10) ────────────────────────────────────────── */
+
+// PolicySummary matches `core::policy::store::PolicySummary`. NOTE: the server
+// returns `updated_at` as a Unix-epoch SECOND count (i64), not an ISO string.
+export interface PolicySummary {
+  policy_id: string;
+  agent: string;
+  version: string;
+  /** Unix epoch seconds (i64) — convert with `new Date(updated_at * 1000)`. */
+  updated_at: number;
+}
+
+export interface PolicyBinding {
+  allowed_tools?: string[];
+  max_budget_usd?: number;
+  data_scope?: { allow?: string[]; deny?: string[] };
+  rate_limit?: { requests_per_minute: number };
+  time_window?: { start: string; end: string; timezone: string };
+  required_signatures?: Array<{ role: string; threshold: number }>;
+  delegation?: { max_depth: number; allowed_subagents?: string[] };
+}
+
+export interface PolicyFull {
+  version: string;
+  agent: string;
+  description?: string;
+  binding: PolicyBinding;
+  invariants: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface PolicyUploadResponse {
+  policy_id: string;
+  agent: string;
+  checks: string[];
+}
+
+export type PolicyVerdict =
+  | { kind: "allow" }
+  | { kind: "deny"; check: string; reason: string };
+
+export interface EvaluateTraceEntry {
+  check: string;
+  verdict: PolicyVerdict;
+}
+
+export interface EvaluateResult {
+  verdict: PolicyVerdict;
+  trace: EvaluateTraceEntry[];
+  spend_total_usd: number;
+  simulator: boolean;
+  simulator_warning?: string;
+}
+
+export interface EvaluateBody {
+  action: Record<string, unknown>;
+  context_overrides?: Record<string, unknown>;
+  agent_id?: string;
+}
+
+export async function fetchPolicies(): Promise<ApiResult<PolicySummary[]>> {
+  return get<PolicySummary[]>(`/api/policies`);
+}
+
+export async function fetchPolicy(id: string): Promise<ApiResult<PolicyFull>> {
+  return get<PolicyFull>(`/api/policies/${encodeURIComponent(id)}`);
+}
+
+export async function uploadPolicy(
+  yamlOrJson: string,
+  contentType: "application/yaml" | "application/json"
+): Promise<ApiResult<PolicyUploadResponse>> {
+  try {
+    const body =
+      contentType === "application/json"
+        ? JSON.stringify({ raw_yaml: yamlOrJson })
+        : yamlOrJson;
+    const res = await fetch(absolutize(`/api/policies`), {
+      method: "POST",
+      headers: { "Content-Type": contentType, ...tenantHeaders() },
+      body,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: text || `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as PolicyUploadResponse;
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+export async function deletePolicy(
+  id: string
+): Promise<ApiResult<{ deleted: true }>> {
+  try {
+    const res = await fetch(absolutize(`/api/policies/${encodeURIComponent(id)}`), {
+      method: "DELETE",
+      headers: { ...tenantHeaders() },
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    return { ok: true, data: { deleted: true } };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+/* ── S10: server-side agent → policy binding ────────────────────────── */
+
+/** Wire shape of the `/v1/agents/:id/policy_binding` core route. */
+export interface AgentPolicyBindingRecord {
+  agent_id: string;
+  policy_id: string;
+  /** Unix-epoch seconds (i64) — convert with `new Date(bound_at * 1000)`. */
+  bound_at: number;
+}
+
+/**
+ * GET the server-side binding for `agentId`. Returns `ok:false` with a
+ * `"404"`-shaped error when no binding exists (callers can treat that as
+ * "unbound").
+ */
+export async function fetchAgentBinding(
+  agentId: string
+): Promise<ApiResult<AgentPolicyBindingRecord>> {
+  try {
+    const res = await fetch(
+      absolutize(`/api/agents/${encodeURIComponent(agentId)}/policy_binding`),
+      { cache: "no-store", headers: { ...tenantHeaders() } }
+    );
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as AgentPolicyBindingRecord;
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+/**
+ * POST a new (or replacement) binding. Idempotent — re-binding the same
+ * agent to a different policy is a last-write-wins update on the core.
+ */
+export async function bindAgentPolicy(
+  agentId: string,
+  policyId: string
+): Promise<ApiResult<AgentPolicyBindingRecord>> {
+  try {
+    const res = await fetch(
+      absolutize(`/api/agents/${encodeURIComponent(agentId)}/policy_binding`),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...tenantHeaders() },
+        body: JSON.stringify({ policy_id: policyId }),
+      }
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: text || `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as AgentPolicyBindingRecord;
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+/** DELETE the server-side binding for `agentId`. */
+export async function unbindAgentPolicy(
+  agentId: string
+): Promise<ApiResult<{ unbound: true }>> {
+  try {
+    const res = await fetch(
+      absolutize(`/api/agents/${encodeURIComponent(agentId)}/policy_binding`),
+      { method: "DELETE", headers: { ...tenantHeaders() } }
+    );
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    return { ok: true, data: { unbound: true } };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+/* ── S9: cohort & differential-privacy view ────────────────────────── */
+
+export interface CohortSummary {
+  cohort_id: string;
+  label: string;
+  vendor: string;
+  sector: string;
+  n_tenants: number;
+  /** Unix epoch seconds — convert with `new Date(period_start * 1000)`. */
+  period_start: number;
+  /** Unix epoch seconds — convert with `new Date(period_end * 1000)`. */
+  period_end: number;
+}
+
+export interface CohortMetric {
+  metric_id: string;
+  value_p25: number;
+  value_p50: number;
+  value_p75: number;
+  value_p95: number;
+  /** Privacy budget (ε) spent on this metric. */
+  noise_eps: number;
+  /** True when the underlying bucket failed the k-anonymity threshold. */
+  suppressed: boolean;
+}
+
+export interface CohortDetail extends CohortSummary {
+  metrics: CohortMetric[];
+  privacy_notice: string;
+}
+
+export interface CohortRank {
+  cohort_id: string;
+  /** Integer in 0..100 inclusive. */
+  tenant_rank_percentile: number;
+  metric: string;
+}
+
+/**
+ * Server envelope used by every `/api/cohorts/*` route until the real
+ * `/v1/cohort/published` endpoint lands. `mock: true` flags that the data
+ * was synthesised by `_mock.ts`; the cohorts page surfaces a banner so the
+ * caller knows the figures are not DP-released yet.
+ *
+ * Once `publish.rs` ships, drop the envelope and have the proxy return the
+ * raw payload (or strip `mock` in the proxy and have callers ignore it).
+ */
+interface CohortEnvelope<T> {
+  mock?: boolean;
+  notice?: string;
+  data: T;
+  error?: string;
+}
+
+async function unwrapEnvelope<T>(url: string): Promise<ApiResult<T>> {
+  try {
+    const res = await fetch(absolutize(url), {
+      next: { revalidate: 10 },
+      headers: { ...tenantHeaders() },
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const body = (await res.json()) as CohortEnvelope<T>;
+    if (body.error) {
+      return { ok: false, error: body.error };
+    }
+    return { ok: true, data: body.data };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Network error",
+    };
+  }
+}
+
+export async function fetchCohorts(): Promise<ApiResult<CohortSummary[]>> {
+  return unwrapEnvelope<CohortSummary[]>(`/api/cohorts?mode=published`);
+}
+
+export async function fetchCohort(
+  id: string
+): Promise<ApiResult<CohortDetail>> {
+  return unwrapEnvelope<CohortDetail>(
+    `/api/cohorts/${encodeURIComponent(id)}?mode=published`
+  );
+}
+
+export async function fetchTenantRank(
+  metric: string
+): Promise<ApiResult<CohortRank | null>> {
+  return unwrapEnvelope<CohortRank | null>(
+    `/api/cohorts?mode=tenant_rank&metric=${encodeURIComponent(metric)}`
+  );
+}
+
+/* ── Sprint 19-20: ZK audit reports ────────────────────────────────── */
+
+/** Typed evidence enum mirroring `core::audit::types::SectionEvidence`. */
+export type AuditSectionEvidence =
+  | {
+      kind: "SpendBound";
+      circuit: string;
+      public_inputs: string[];
+      claim: string;
+    }
+  | {
+      kind: "ToolAllowlist";
+      allowlist: string[];
+      attempted_violations: number;
+    }
+  | {
+      kind: "TimeWindow";
+      window_start: string;
+      window_end: string;
+      violations: number;
+    }
+  | {
+      kind: "AnchorChain";
+      btc_root: string | null;
+      btc_block: number | null;
+      solana_sig: string | null;
+      solana_slot: number | null;
+    }
+  | {
+      kind: "StatsCommitment";
+      metric_id: string;
+      value: number;
+      n_records: number;
+      vk_id: string;
+    }
+  | {
+      kind: "PolicyEvaluations";
+      allowed: number;
+      denied: number;
+      denial_breakdown: Record<string, number>;
+    };
+
+/** Mirror of `core::audit::types::SectionVerdict`. */
+export type AuditSectionVerdict =
+  | { state: "Confirmed" }
+  | { state: "Partial"; gaps: string[] }
+  | { state: "Insufficient"; reason: string };
+
+/** Mirror of `core::audit::report::AuditSection`. */
+export interface AuditSection {
+  heading: string;
+  statement: string;
+  evidence: AuditSectionEvidence;
+  verdict: AuditSectionVerdict;
+}
+
+/** Mirror of `core::audit::report::AttachedProof`. */
+export interface AuditAttachedProof {
+  circuit: string;
+  public_inputs: string[];
+  proof_b64: string;
+  vk_id: string;
+}
+
+/** Mirror of `core::audit::types::AnchorEvidence`. */
+export interface AuditAnchorEvidence {
+  merkle_root: string;
+  bitcoin_ots_receipt_b64: string | null;
+  bitcoin_block_height: number | null;
+  solana_signature: string | null;
+  solana_slot: number | null;
+}
+
+/** Mirror of `core::audit::types::ComplianceSummary`. */
+export interface AuditComplianceSummary {
+  policy_ids_evaluated: string[];
+  total_actions: number;
+  allowed: number;
+  denied: number;
+  policy_violation_rate: number;
+}
+
+/** Mirror of `core::audit::report::AuditReport`. */
+export interface AuditReport {
+  report_id: string;
+  tenant_id: string;
+  agent_ids: string[];
+  period_start: number;
+  period_end: number;
+  generated_at: number;
+  merkle_root: string;
+  sections: AuditSection[];
+  anchors: AuditAnchorEvidence;
+  zk_proofs: AuditAttachedProof[];
+  raw_receipts_count: number;
+  policy_compliance_summary: AuditComplianceSummary;
+}
+
+export interface CreateAuditReportBody {
+  agent_ids?: string[];
+  period_start: number;
+  period_end: number;
+}
+
+export async function fetchAuditReports(): Promise<ApiResult<AuditReport[]>> {
+  return get<AuditReport[]>(`/api/audit/reports`);
+}
+
+export async function fetchAuditReport(
+  id: string
+): Promise<ApiResult<AuditReport>> {
+  return get<AuditReport>(`/api/audit/reports/${encodeURIComponent(id)}`);
+}
+
+export async function createAuditReport(
+  body: CreateAuditReportBody
+): Promise<ApiResult<{ report: AuditReport; signature: string }>> {
+  try {
+    const res = await fetch(absolutize(`/api/audit/reports`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...tenantHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: text || `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as {
+      report: AuditReport;
+      signature: string;
+    };
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+export async function evaluatePolicy(
+  policyId: string,
+  body: EvaluateBody
+): Promise<ApiResult<EvaluateResult>> {
+  try {
+    const res = await fetch(
+      absolutize(`/api/policies/${encodeURIComponent(policyId)}/evaluate`),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...tenantHeaders() },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, error: text || `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as EvaluateResult;
+    return { ok: true, data };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error" };
   }

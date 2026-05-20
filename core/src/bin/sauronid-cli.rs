@@ -9,6 +9,7 @@
 //!   attest           build an Ed25519Self attestation blob for a runtime measurement
 //!   measurement      compute the canonical measurement hash for a config bundle
 //!   health           pretty-print the /health endpoint
+//!   policy           policy DSL helpers (subcommand: `validate <file>`)
 //!
 //! Usage:
 //!   sauronid-cli keypair                            # writes ./agent.priv + agent.pub
@@ -43,6 +44,7 @@ fn main() -> ExitCode {
         "attest" => cmd_attest(&args[2..]),
         "measurement" => cmd_measurement(&args[2..]),
         "health" => cmd_health(),
+        "policy" => cmd_policy(&args[2..]),
         "help" | "-h" | "--help" => {
             print_usage();
             Ok(())
@@ -77,6 +79,7 @@ SUBCOMMANDS:
     attest            build an Ed25519Self attestation blob
     measurement       compute canonical measurement hash for a config bundle
     health            GET $SAURON_CORE_URL/health and pretty-print
+    policy validate <file>   parse a policy YAML/JSON file and report errors
 
 ENV:
     SAURON_CORE_URL   default http://127.0.0.1:3001
@@ -394,6 +397,33 @@ fn cmd_measurement(args: &[String]) -> Result<(), String> {
     }
     println!("{}", hex::encode(h.finalize()));
     Ok(())
+}
+
+// ─── policy ───────────────────────────────────────────────────────────────
+
+fn cmd_policy(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("usage: sauronid-cli policy validate <file>".into());
+    }
+    match args[0].as_str() {
+        "validate" => cmd_policy_validate(&args[1..]),
+        other => Err(format!("unknown policy subcommand: {other}")),
+    }
+}
+
+fn cmd_policy_validate(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("usage: sauronid-cli policy validate <file>".into());
+    }
+    let path = &args[0];
+    let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    match sauron_core::policy::parse(&src) {
+        Ok(p) => {
+            println!("OK  agent={} version={}", p.agent, p.version);
+            Ok(())
+        }
+        Err(e) => Err(format!("policy {path}: {e}")),
+    }
 }
 
 // ─── health ───────────────────────────────────────────────────────────────
