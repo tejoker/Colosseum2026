@@ -3,10 +3,24 @@
  *
  * Creates, signs, and manages credentials compatible with the Circom circuits.
  * The credential hash is computed with Poseidon for ZK-friendliness.
+ *
+ * @deprecated The credential proofs are being repurposed for action-log
+ * proofs. New code should import from `./action-log` instead. This module is
+ * kept as a thin shim because existing tests + clients still import it
+ * (the W3C VC creation utilities themselves are still useful).
  */
 
 import { sign as eddsaSign, EdDSAKeyPair, EdDSASignature } from "./eddsa";
 import { poseidonHashN, poseidonHash1 } from "./smt";
+
+// Re-export action-log types so legacy callers can migrate incrementally.
+export {
+    ActionLogEntry,
+    ActionLogProof,
+    ActionLogProver,
+    ActionLogVerifier,
+    proveCompliance,
+} from "./action-log";
 
 /**
  * Raw credential claims (before signing).

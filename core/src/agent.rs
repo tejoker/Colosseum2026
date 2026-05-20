@@ -18,8 +18,9 @@ use crate::ajwt_support;
 use crate::policy;
 use crate::risk;
 use crate::state::ServerState;
+use crate::tenancy::TenantId;
 use axum::{
-    extract::{Json, Path, State},
+    extract::{Extension, Json, Path, State},
     http::{HeaderMap, StatusCode},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -366,11 +367,22 @@ fn has_bank_kyc_link(db: &rusqlite::Connection, human_key_image: &str) -> bool {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 /// POST /agent/register — authenticated user registers an agent bound to their session.
+///
+/// S11.5: each row stamps `tenant_id` from the request-scoped
+/// `Extension<TenantId>` (header `x-sauron-tenant-id`, admin-JWT `tnt` claim,
+/// or the `"default"` fallback). Uniqueness checks (`public_key_hex`,
+/// `ring_key_image_hex`), parent-agent lookups, and the persisted INSERT all
+/// filter / write within that tenant so cross-tenant rows are invisible.
 pub async fn register_agent(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     headers: HeaderMap,
     Json(mut payload): Json<RegisterAgentRequest>,
 ) -> Result<Json<RegisterAgentResponse>, (StatusCode, String)> {
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     // ── Server-side checksum (Gap 4 fix) ──────────────────────────────────
     //
     // If the caller supplies typed `agent_type` + `checksum_inputs`, we
@@ -626,8 +638,8 @@ pub async fn register_agent(
         let db = st.db.lock().unwrap();
         let in_use: bool = db
             .query_row(
-                "SELECT COUNT(*) FROM agents WHERE public_key_hex = ?1 AND revoked = 0",
-                params![payload.public_key_hex],
+                "SELECT COUNT(*) FROM agents WHERE public_key_hex = ?1 AND revoked = 0 AND tenant_id = ?2",
+                params![payload.public_key_hex, tenant_id],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0)
@@ -640,8 +652,8 @@ pub async fn register_agent(
         }
         let key_image_in_use: bool = db
             .query_row(
-                "SELECT COUNT(*) FROM agents WHERE ring_key_image_hex = ?1 AND revoked = 0",
-                params![payload.ring_key_image_hex],
+                "SELECT COUNT(*) FROM agents WHERE ring_key_image_hex = ?1 AND revoked = 0 AND tenant_id = ?2",
+                params![payload.ring_key_image_hex, tenant_id],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0)
@@ -695,8 +707,8 @@ pub async fn register_agent(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         let row: Result<(String, String, i64, i64), rusqlite::Error> = db.query_row(
-            "SELECT intent_json, human_key_image, COALESCE(delegation_depth, 0), revoked FROM agents WHERE agent_id = ?1",
-            params![&payload.parent_agent_id],
+            "SELECT intent_json, human_key_image, COALESCE(delegation_depth, 0), revoked FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
+            params![&payload.parent_agent_id, tenant_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         );
         let (p_intent, p_human, p_depth, p_rev) = row.map_err(|_| {
@@ -798,8 +810,8 @@ pub async fn register_agent(
             .filter(|s| !s.is_empty());
         db.execute(
             "INSERT OR REPLACE INTO agents
-             (agent_id, human_key_image, agent_checksum, intent_json, assurance_level, public_key_hex, ring_key_image_hex, issued_at, expires_at, revoked, parent_agent_id, delegation_depth, pop_jkt, pop_public_key_b64u, attestation_blob, attestation_kind, attestation_pubkey_b64u, attestation_pcr_set, attestation_ek_cert_chain_pem)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+             (agent_id, human_key_image, agent_checksum, intent_json, assurance_level, public_key_hex, ring_key_image_hex, issued_at, expires_at, revoked, parent_agent_id, delegation_depth, pop_jkt, pop_public_key_b64u, attestation_blob, attestation_kind, attestation_pubkey_b64u, attestation_pcr_set, attestation_ek_cert_chain_pem, tenant_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             params![
                 agent_id,
                 human_key_image,
@@ -819,6 +831,7 @@ pub async fn register_agent(
                 attestation_pubkey_b64u,
                 attestation_pcr_set,
                 attestation_ek_cert_chain_pem,
+                tenant_id,
             ],
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -864,12 +877,17 @@ pub async fn register_agent(
 /// replaying the token returned by `/agent/register`.
 pub async fn issue_agent_token(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     headers: HeaderMap,
     Json(payload): Json<IssueAgentTokenRequest>,
 ) -> Result<Json<IssueAgentTokenResponse>, (StatusCode, String)> {
     if payload.agent_id.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
     }
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let session_human = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -889,8 +907,8 @@ pub async fn issue_agent_token(
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT human_key_image, agent_checksum, intent_json, revoked, expires_at, IFNULL(pop_jkt, '')
-             FROM agents WHERE agent_id = ?1",
-            params![payload.agent_id],
+             FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
+            params![payload.agent_id, tenant_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .map_err(|_| (StatusCode::NOT_FOUND, "Agent not found".to_string()))?
@@ -960,10 +978,15 @@ pub struct ChecksumUpdateResponse {
 
 pub async fn update_agent_checksum(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<ChecksumUpdateRequest>,
 ) -> Result<Json<ChecksumUpdateResponse>, (StatusCode, String)> {
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let actor_human_ki = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -979,8 +1002,8 @@ pub async fn update_agent_checksum(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.query_row(
-            "SELECT human_key_image FROM agents WHERE agent_id = ?1 AND revoked = 0",
-            params![agent_id],
+            "SELECT human_key_image FROM agents WHERE agent_id = ?1 AND revoked = 0 AND tenant_id = ?2",
+            params![agent_id, tenant_id],
             |r| r.get::<_, String>(0),
         )
         .map_err(|_| (StatusCode::NOT_FOUND, "agent not found or revoked".into()))?
@@ -996,8 +1019,8 @@ pub async fn update_agent_checksum(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.query_row(
-            "SELECT agent_checksum FROM agents WHERE agent_id = ?1",
-            params![agent_id],
+            "SELECT agent_checksum FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
+            params![agent_id, tenant_id],
             |r| r.get::<_, String>(0),
         )
         .unwrap_or_default()
@@ -1040,14 +1063,19 @@ pub async fn update_agent_checksum(
 /// GET /agent/{agent_id} — retrieve agent info.
 pub async fn get_agent(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentRecord>, StatusCode> {
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     db.query_row(
         "SELECT agent_id, human_key_image, agent_checksum, intent_json, assurance_level, IFNULL(ring_key_image_hex, ''), issued_at, expires_at, revoked
-         FROM agents WHERE agent_id = ?1",
-        params![agent_id],
+         FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
+        params![agent_id, tenant_id],
         |row| Ok(AgentRecord {
             agent_id:        row.get(0)?,
             human_key_image: row.get(1)?,
@@ -1065,9 +1093,14 @@ pub async fn get_agent(
 /// DELETE /agent/{agent_id} — revoke an agent owned by authenticated user.
 pub async fn revoke_agent(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let human_ki = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1078,8 +1111,8 @@ pub async fn revoke_agent(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.execute(
-            "UPDATE agents SET revoked = 1 WHERE agent_id = ?1 AND human_key_image = ?2",
-            params![agent_id, human_ki],
+            "UPDATE agents SET revoked = 1 WHERE agent_id = ?1 AND human_key_image = ?2 AND tenant_id = ?3",
+            params![agent_id, human_ki, tenant_id],
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
@@ -1105,8 +1138,13 @@ pub async fn revoke_agent(
 /// POST /agent/verify — validate an A-JWT token.
 pub async fn verify_agent_token(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     Json(payload): Json<VerifyAjwtRequest>,
 ) -> Json<VerifyAjwtResponse> {
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
 
     let claims = match verify_ajwt(&jwt_secret, &payload.ajwt) {
@@ -1166,8 +1204,8 @@ pub async fn verify_agent_token(
         let db = st.db.lock().unwrap();
         let row: Option<(i64, String, String)> = db
             .query_row(
-                "SELECT revoked, assurance_level, IFNULL(pop_public_key_b64u, '') FROM agents WHERE agent_id = ?1",
-                params![aid],
+                "SELECT revoked, assurance_level, IFNULL(pop_public_key_b64u, '') FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
+                params![aid, tenant_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .ok();
@@ -1289,9 +1327,14 @@ pub async fn verify_agent_token(
 /// GET /agent/list/{human_key_image} — list agents for authenticated human only.
 pub async fn list_agents(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     headers: HeaderMap,
     Path(human_ki): Path<String>,
 ) -> Result<Json<Vec<AgentRecord>>, (StatusCode, String)> {
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let session_human = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1308,10 +1351,10 @@ pub async fn list_agents(
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT agent_id, human_key_image, agent_checksum, intent_json, assurance_level, IFNULL(ring_key_image_hex, ''), issued_at, expires_at, revoked
-         FROM agents WHERE human_key_image = ?1 ORDER BY issued_at DESC"
+         FROM agents WHERE human_key_image = ?1 AND tenant_id = ?2 ORDER BY issued_at DESC"
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db prepare: {e}")))?;
     let records: Vec<AgentRecord> = stmt
-        .query_map(params![human_ki], |row| {
+        .query_map(params![human_ki, tenant_id], |row| {
             Ok(AgentRecord {
                 agent_id: row.get(0)?,
                 human_key_image: row.get(1)?,
@@ -1345,12 +1388,17 @@ pub struct AgentPopChallengeResponse {
 
 pub async fn agent_pop_challenge(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<TenantId>>,
     headers: HeaderMap,
     Json(payload): Json<AgentPopChallengeRequest>,
 ) -> Result<Json<AgentPopChallengeResponse>, (StatusCode, String)> {
     if payload.agent_id.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
     }
+    let tenant_id = tenant
+        .map(|Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let human = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1361,8 +1409,8 @@ pub async fn agent_pop_challenge(
     let db = st.db.lock().unwrap();
     let (db_human, revoked, exp_a): (String, i64, i64) = db
         .query_row(
-            "SELECT human_key_image, revoked, expires_at FROM agents WHERE agent_id = ?1",
-            params![&payload.agent_id],
+            "SELECT human_key_image, revoked, expires_at FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
+            params![&payload.agent_id, tenant_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|_| (StatusCode::NOT_FOUND, "agent not found".into()))?;
@@ -1490,14 +1538,25 @@ async fn try_verify_call_sig(
 
     let body_hash_hex = hex::encode(Sha256::digest(body_bytes));
 
+    // S11.5: pull the tenant from request extensions populated by the
+    // global `extract_tenant` middleware. Falls back to the default tenant
+    // when callers haven't set the header — keeps legacy A12 redteam +
+    // existing integration tests on the same row they wrote at register.
+    let tenant_id = parts
+        .extensions
+        .get::<TenantId>()
+        .cloned()
+        .unwrap_or_default()
+        .0;
+
     // Pull both the PoP key and the registered checksum in one shot.
     let (pop_pk_b64u, registered_checksum): (String, String) = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT IFNULL(pop_public_key_b64u, ''), agent_checksum
-             FROM agents WHERE agent_id = ?1 AND revoked = 0",
-            params![agent_id],
+             FROM agents WHERE agent_id = ?1 AND revoked = 0 AND tenant_id = ?2",
+            params![agent_id, tenant_id],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
         .map_err(|_| (StatusCode::UNAUTHORIZED, "unknown or revoked agent".into()))?

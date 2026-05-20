@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Research assistant — broad read, no write, daytime only.
+version: "1"
+agent: research_assistant
+description: >
+  Reads public sources, summarises findings, never writes anywhere. Active
+  only during business hours so reviewers are around.
+binding:
+  allowed_tools:
+    - http_get
+    - search
+    - summarize
+    - cite
+  max_budget_usd: 25
+  data_scope:
+    allow: [public]
+    deny: [pii, financial, restricted]
+  rate_limit:
+    requests_per_minute: 60
+  time_window:
+    start: "08:00"
+    end:   "20:00"
+    timezone: "Europe/Paris"
+  delegation:
+    max_depth: 1
+    allowed_subagents: [search_agent, summarize_agent]
+invariants:
+  - "spend_total <= max_budget_usd"
+  - "tool_class(tool) == 'read_only'"
+metadata:
+  created_at: "2026-02-20"
+  author: "research-lead@example.com"
+  tags: [research, read-only, daytime]

@@ -1,0 +1,6 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Minimum viable policy — version + agent + one invariant.
+version: "1"
+agent: minimal_agent
+invariants:
+  - "spend_total <= 1"

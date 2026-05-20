@@ -1,10 +1,8 @@
 use crate::bitcoin_anchor::BitcoinAnchorService;
 use crate::compliance::ComplianceConfig;
-use crate::compliance_screening::ScreeningPolicy;
 use crate::db::DbHandle;
 use crate::issuer_runtime::IssuerRuntime;
 use crate::merkle::MerkleCommitmentLedger;
-use crate::payment_smt::PaymentSmt;
 use crate::ring;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
@@ -87,16 +85,34 @@ pub struct ServerState {
     pub issuer_runtime: std::sync::Arc<IssuerRuntime>,
     /// Operator-controlled compliance (jurisdiction allowlist, etc.).
     pub compliance: ComplianceConfig,
-    /// Sanctions / PEP / risk-tier overlays.
-    pub screening: ScreeningPolicy,
     pub merkle_ledger: MerkleCommitmentLedger,
-    pub payment_smt: std::sync::Mutex<PaymentSmt>,
     pub bitcoin_anchor: Option<std::sync::Arc<BitcoinAnchorService>>,
     pub solana_anchor: Option<std::sync::Arc<crate::solana_anchor::SolanaAnchorService>>,
     /// Phase 3 dual-backend repository. Modules port to it incrementally.
     /// `Sqlite` variant proxies to `db` for backwards compat; `Postgres`
     /// variant requires `SAURON_DB_BACKEND=postgres` + `DATABASE_URL`.
     pub repo: crate::repository::Repo,
+    /// Sprint 2 policy DSL store — in-memory cache backed by the `policies`
+    /// table. Hydrated from disk on startup.
+    pub policy_store: Arc<crate::policy::PolicyStore>,
+    /// Sprint 8 cohort definition registry — operator-managed, hydrated at
+    /// startup from `cohort_definitions`. Drives `/v1/cohort/published`.
+    pub cohort_store: Arc<crate::aggregation::CohortStore>,
+    /// S8 ext — persistent per-cohort per-metric ε ledger. Closes the
+    /// "No inter-period ε budget tracking" gap. See
+    /// `core/src/dp/ledger.rs` and `docs/privacy-model.md` § "Cycle
+    /// rotation".
+    pub dp_budget_ledger: Arc<crate::dp::DpBudgetLedger>,
+    /// Sprint 13-14 Tier 2 — in-process registry of Paillier public keys
+    /// keyed by `pk_id`. Operators register a key (and retain the matching
+    /// private key out-of-band) before customers can submit ciphertexts.
+    ///
+    /// NEEDS_CRYPTO_REVIEW: in-process registry has no persistence and no
+    /// rotation policy. Production deployments must back this with HSM /
+    /// Vault and treat it as authenticated configuration, not application
+    /// state. See `docs/homomorphic-encryption.md` for the full checklist.
+    pub he_pk_registry:
+        Arc<std::sync::RwLock<std::collections::HashMap<String, crate::he::paillier::PaillierPublicKey>>>,
 }
 
 fn derive_dev_secret(name: &str) -> Vec<u8> {
@@ -182,7 +198,6 @@ impl ServerState {
                 .unwrap_or_else(|e| panic!("[FATAL] cannot build issuer HTTP client: {e}")),
         );
         let compliance = ComplianceConfig::from_env();
-        let screening = ScreeningPolicy::from_env();
 
         // ── Restore ring groups from DB ──────────────────────────────────────
         fn load_pubkeys(conn: &Connection, sql: &str) -> Vec<String> {
@@ -260,16 +275,28 @@ impl ServerState {
             Scalar::from_bytes_mod_order(h.finalize().into())
         };
 
-        // ── Restore Payment SMT from DB ──────────────────────────────────────
-        let payment_smt = {
-            let smt = PaymentSmt::from_db(&db);
-            std::sync::Mutex::new(smt)
-        };
-
         // Phase 3 dual-backend repository (built before `db` is moved into Self).
         let repo = crate::repository::Repo::from_env(Arc::clone(&db))
             .await
             .unwrap_or_else(|e| panic!("[FATAL] repository init failed: {e}"));
+
+        // Sprint 2: hydrate the policy DSL store from `policies` table.
+        let policy_store = Arc::new(crate::policy::PolicyStore::new(Arc::clone(&db)));
+        match policy_store.hydrate() {
+            Ok(n) => tracing::info!(target: "sauron::startup", policies = n, "hydrated policy store"),
+            Err(e) => tracing::warn!(target: "sauron::startup", error = %e, "policy store hydrate failed"),
+        }
+
+        // Sprint 8: hydrate the cohort definition store from `cohort_definitions`.
+        let cohort_store = Arc::new(crate::aggregation::CohortStore::new(Arc::clone(&db)));
+        match cohort_store.hydrate() {
+            Ok(n) => tracing::info!(target: "sauron::startup", cohorts = n, "hydrated cohort store"),
+            Err(e) => tracing::warn!(target: "sauron::startup", error = %e, "cohort store hydrate failed"),
+        }
+
+        // S8 ext: build the ε ledger handle. Lazy — no I/O until used.
+        let dp_budget_ledger =
+            Arc::new(crate::dp::DpBudgetLedger::new(Arc::clone(&db)));
 
         Self {
             db,
@@ -283,12 +310,16 @@ impl ServerState {
             issuer_urls,
             issuer_runtime,
             compliance,
-            screening,
             merkle_ledger,
-            payment_smt,
             bitcoin_anchor: BitcoinAnchorService::from_env().map(std::sync::Arc::new),
             solana_anchor: crate::solana_anchor::SolanaAnchorService::from_env().map(std::sync::Arc::new),
             repo,
+            policy_store,
+            cohort_store,
+            dp_budget_ledger,
+            he_pk_registry: Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 

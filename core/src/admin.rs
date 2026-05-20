@@ -1135,7 +1135,6 @@ pub async fn get_stats(State(state): State<Arc<RwLock<ServerState>>>) -> Json<St
 
     let controls = serde_json::json!({
         "compliance": st.compliance.admin_snapshot(),
-        "screening": st.screening.admin_snapshot(),
         "issuer": st.issuer_runtime.circuit_snapshots_json(&st.issuer_urls),
         "risk": { "window_secs": risk::window_secs() },
     });

@@ -141,6 +141,90 @@ If the checksum changes between calls, SauronID's downstream policy decision can
 
 The 9-scenario invariant suite includes `delegation_scope_denied` and `parent_empty_scope_denied` which exercise the `intent_json` leash. Checksum-scope correctness is **on the operator**, not on SauronID.
 
+## STRIDE per component
+
+The STRIDE matrix below decomposes the system into five components and walks each through Spoofing / Tampering / Repudiation / Information Disclosure / Denial of Service / Elevation of Privilege. Per-row: documented threat, in-code mitigation with file:line citation, residual risk that pentest should hammer.
+
+### Core service (Rust axum HTTP service, `core/src/main.rs`)
+
+| Category | Threat | Mitigation (file:line) | Residual risk |
+|---|---|---|---|
+| **Spoofing** | Caller forges admin auth | Bearer-key constant-time compare; min-32-byte production keys; multi-key list (`core/src/admin.rs::build_admin_auth_config` ~L52, ~L99-107) | Operator must protect the key; covered in `docs/key-rotation.md` §1 |
+| **Spoofing** | Caller forges agent identity | A-JWT signed under `SAURON_JWT_SECRET`; PoP-on-challenge; per-call DPoP sig over method/path/body-hash/ts/nonce (`core/src/agent.rs:1429`, `core/src/agent.rs:1587`) | Agent host compromise → PoP key leak; mitigate with hardware attestation |
+| **Tampering** | Body mutation after sig | Sig covers `sha256(body)` exact bytes; mismatch → 401 (`core/src/agent.rs:1429`) | Empirical test A5 covers; pentest should also try whitespace-only body mutations |
+| **Tampering** | Agent config drift | `x-sauron-agent-config-digest` cross-checked vs registered `agent_checksum` (constant-time compare via `subtle::ConstantTimeEq`) | Checksum scope is operator-defined; narrow scope → silent bypass (see "Agent-type agnosticism" §) |
+| **Repudiation** | Operator denies an action happened | Every action receipt anchored to Bitcoin OTS + Solana memo; external `ots verify` reproduces | Anchoring latency: receipt provable after ≈ 30 s (Solana) / ≈ 1 h (Bitcoin) |
+| **Repudiation** | Tenant denies an admin action | Sprint 12 security audit log captures `(actor, action, target, ts)` rows, anchored in next batch | Audit log retention is operator-configured; default 90 d |
+| **Information disclosure** | Cross-tenant data leak | Tenancy middleware scopes every query by `tenant_id` (`core/src/tenancy/mod.rs`, applied per-route in `core/src/main.rs`) | Pentest: try UUID enumeration; redteam `tenant-list-leak.ts` covers |
+| **Information disclosure** | Timing oracle on session HMAC | `subtle::ConstantTimeEq` everywhere on secret comparison | Confirm no string-compare snuck in during a refactor |
+| **Denial of service** | Endpoint flooding | Sliding-window rate limits via `risk::check_and_increment` on `/agent/register`, `/agent/verify`, `/kyc/retrieve`, `/agent/payment/authorize`, `/agent/kyc/consent` (`core/src/risk.rs`) | Per-tenant rate limit; one noisy tenant cannot starve others (redteam `tenant-rate-limit-cross.ts`) |
+| **Denial of service** | Cryptographic CPU exhaustion (slow proof verify) | ZK verify timeout; rate-limited on `/v1/proofs/verify` | Pentest: submit deeply-nested malformed Groth16 proofs and measure |
+| **Elevation of privilege** | Read-only admin escalates to write | Distinct `read_only_keys` vs full-write key set; scope check at route layer (`core/src/admin.rs` ~L77-85) | Operator misconfiguration risk; covered by startup validator |
+| **Elevation of privilege** | Agent escalates beyond intent_json | `assert_child_scopes_subset_of_parent` on every delegate-issue; intent JSON treated as server-evaluated leash, not metadata | Empirical test A10 + delegation-scope-denied redteam scenario |
+
+### SDK (agentic, `agentic/src/enforcement.ts`)
+
+| Category | Threat | Mitigation (file:line) | Residual risk |
+|---|---|---|---|
+| **Spoofing** | Agent forks process, never calls `bind()` | None at SDK layer — by design (see redteam `binding-direct-tool-call.ts`) | **Server-side** policy evaluation is the authoritative gate (`/v1/policy/evaluate`). SDK is a fast advisory checkpoint. |
+| **Tampering** | Agent mutates the local `BudgetTracker` counter | None at SDK layer (`agentic/src/enforcement.ts::BudgetTracker`) | Server-side spend ledger (`core/src/repository.rs::insert_spend_log` ~L1714) is authoritative |
+| **Tampering** | Agent lies in `classifyAction` | None at SDK layer | Server re-classifies on `/v1/policy/evaluate`; redteam `binding-classifier-lie.ts` documents the chain |
+| **Repudiation** | Agent claims it never called the tool | SDK does not produce receipts; receipts come from server-side acceptance | Tampered local logs are useless; the audit chain (server side, anchored) is the source of truth |
+| **Information disclosure** | SDK caches stale policy after server-side revoke | `PolicyCache::refresh` keeps last good copy on 404 (documented; redteam A4 / `binding-revoke-replay.ts`) | Window = `refreshIntervalMs`. Operator picks the trade-off. |
+| **Denial of service** | Agent stalls server with very large bind chains | Per-call signature requires a fresh nonce on every call; server rate limits per-agent | n/a — SDK runs in the agent's own process |
+| **Elevation of privilege** | Agent imports the underlying tool directly | Documented limitation; see redteam `binding-direct-tool-call.ts` | Defence-in-depth: server-side cross-check denies regardless |
+
+### Dashboard (React + TS, `dashboard/`)
+
+| Category | Threat | Mitigation | Residual risk |
+|---|---|---|---|
+| **Spoofing** | XSS / impersonation of an operator | CSP headers from the edge proxy (operator's responsibility); session cookie HttpOnly + Secure | Dashboard is operator-internal; not exposed publicly in default deploy |
+| **Tampering** | Agent-supplied JSON renders as HTML | React's default JSX escaping; explicit `dangerouslySetInnerHTML` never used for agent-supplied content | Confirm via grep on each release |
+| **Repudiation** | Operator denies a dashboard-initiated action | Every mutating call goes through `/admin/*`; audit log row written | Same as core |
+| **Information disclosure** | Dashboard shows another tenant's data | Per-session tenant scope from server; UI just renders what server returns | Server-side tenancy is the choke point, not the UI |
+| **Denial of service** | Long-poll exhaustion | Dashboard uses bounded SSE; no unbounded polls | n/a |
+| **Elevation of privilege** | Read-only user runs a write action | Server-side scope check on the admin key/JWT; UI hides buttons but does not enforce | Always server-enforced |
+
+### ZK prover (`zkp/sdk`, circuits in `zkp/circuits/`)
+
+| Category | Threat | Mitigation | Residual risk |
+|---|---|---|---|
+| **Spoofing** | Prover submits a proof under a different `vk_id` | Verifier checks `vk_id` matches the metric catalog (`core/src/zk_verifier.rs:44`, `core/src/aggregation/verify.rs`) | Redteam `proof-wrong-vk.ts` covers |
+| **Tampering** | Prover flips a public input | Public-input hash signed into the proof; Groth16 verify fails on mismatch | Redteam `proof-tampered-root.ts` |
+| **Repudiation** | Prover claims they never produced a proof | All accepted proofs are stored with their submission timestamp and anchored in the next batch | n/a |
+| **Information disclosure** | Proof leaks private inputs | Groth16 is statistically zero-knowledge under the trusted setup assumption | If trusted setup is compromised, ZK property fails — see `docs/cryptographic-assumptions.md` §8 |
+| **Denial of service** | Heavy verifier load | Per-tenant verify rate limit; verify spawns external `snarkjs` with a timeout | Pentest: measure verify-CPU per malformed-proof shape |
+| **Elevation of privilege** | Forge a proof of an arbitrary statement | Knowledge soundness of Groth16 under honest setup | **Current dev ceremony makes this possible.** Production requires multi-party ceremony per `zkp/ceremony/README.md`. Loudly flagged in `docs/cryptographic-assumptions.md` §8. |
+
+### Anchor providers (Bitcoin OTS, Solana RPC)
+
+| Category | Threat | Mitigation | Residual risk |
+|---|---|---|---|
+| **Spoofing** | Malicious calendar returns fake OTS receipts | `ots verify` against Bitcoin chain; calendar receipt alone is just a promise, the upgrade to a full Bitcoin attestation roots in PoW | Calendar downtime ≠ broken security; just delayed upgrade |
+| **Spoofing** | Malicious Solana RPC returns fake `getTransaction` | External verifier checks via a different RPC; signature recoverable from on-chain data | Operator configures multiple RPCs (`docs/disaster-recovery.md` §2) |
+| **Tampering** | Calendar drops our submission | Multiple calendars; submission retried; we tolerate calendar churn | Configure ≥ 2 calendars |
+| **Repudiation** | Bitcoin / Solana retroactively reverses | PoW reorgs beyond a few blocks are infeasible at deployed hashrate; Solana finalisation is BFT under <33% Byzantine assumption | Trust the chain's security model |
+| **Information disclosure** | Anchor leaks pre-image | Anchor is hash-only; pre-image stays operator-side | Confirm via tracing logs — anchor body should be `sauronid:v1:<root_hex>` and nothing else |
+| **Denial of service** | All calendars / RPCs simultaneously down | Bitcoin-only fallback (set `SAURON_SOLANA_ANCHOR_ENABLED=0`); Solana-only fallback acceptable for short term | DR runbooks: `docs/disaster-recovery.md` §1-2 |
+| **Elevation of privilege** | n/a (anchor providers do not authenticate to us) | n/a | n/a |
+
+## Abuse cases
+
+Non-exhaustive list of hostile scenarios pentest should specifically rehearse. Each ties to one or more redteam scripts in `redteam/src/scenarios/`.
+
+| Abuse case | Description | Mitigation | Redteam scenario |
+|---|---|---|---|
+| **Policy bypass via tampered SDK** | Attacker patches the agentic SDK locally to skip the `bind()` wrapper or lie about classification / budget. | Server-side `POST /v1/policy/evaluate` re-evaluates with truthful data + authoritative spend ledger. SDK is advisory only. | `policy-bypass.ts`, `binding-*.ts` (5 scripts) |
+| **Server admin key leak** | `SAURON_ADMIN_KEY` ends up in a public git history / cloud snapshot / .env in a Docker image. | Multi-key support enables zero-downtime rotation (`core/src/admin.rs::build_admin_auth_config`); production startup rejects keys < 32 B. Procedure: `docs/key-rotation.md` §1. | n/a (key-management process, not a runtime attack) |
+| **Ceremony coordinator collusion** | The party running the ZK trusted setup keeps the toxic waste secretly. | Multi-party ceremony per `zkp/ceremony/README.md`. As long as ≥ 1 honest party deletes their share, soundness holds. Until that ceremony runs, dev vk is unsound — loudly flagged. | `proof-*.ts` (5 scripts, including `proof-wrong-vk.ts`) |
+| **Anchor provider downtime** | Bitcoin calendars + Solana RPCs all return errors simultaneously. | Backlog tolerated; queued anchors drain on recovery. Bitcoin-only or Solana-only mode acceptable for short outages. Runbooks: `docs/disaster-recovery.md` §1-2. | n/a (infrastructure attack, not a runtime attack) |
+| **Solana RPC censorship** | RPC silently drops our memo writes. | Multi-RPC failover (`SAURON_SOLANA_RPC_FALLBACK_URLS`); Bitcoin-only fallback. We detect by comparing in-flight queue depth against expected drain rate. | n/a |
+| **Stale-policy replay window** | Server-side revoke happens; SDK cache still has the old policy until refresh interval. | Documented window. Future sprint: server-pushed revocation feed. | `binding-revoke-replay.ts` |
+| **Cross-tenant existence probe** | Attacker enumerates UUIDs hoping to learn which `(tenant, policy_id)` pairs exist. | `404 Not Found` returned uniformly for misses, no `403 Forbidden` that would leak existence. | `tenant-list-leak.ts`, `tenant-spend-leak.ts` |
+| **DP cohort de-anonymisation** | Attacker pulls cohort numbers across N snapshots hoping to average out the noise. | Per-period ε budget caps total privacy loss; k-anonymity suppresses small cohorts | `dp-cohort-deanonymize.ts` |
+| **Egress voluntary-log gap** | Attacker compromises agent host; emits an `agent_egress_log` entry claiming an action that never happened, or omits one that did. | Log entries are signed under PoP + bound to `agent_id` + anchored; pentest scenario documents the trust model. **Voluntary by design today** — forward-proxy enforcement deferred. | `egress-leak-claim.ts` |
+| **TEE revocation cascade** | Agent registered with `Tpm2Quote` / `NitroEnclave`; agent then revoked; attacker reuses the attestation blob for a new agent registration. | Revoke cascades on the agent record; attestation hash + agent_id uniqueness check prevents reuse. | `tee-revoke.ts` |
+
 ## Out of scope: what SauronID does NOT protect against
 
 | Threat | Why out of scope | Operator mitigation |
@@ -154,6 +238,10 @@ The 9-scenario invariant suite includes `delegation_scope_denied` and `parent_em
 | **Quantum adversary** | Ed25519, ristretto255, secp256k1 signatures are not post-quantum. | Out of scope; revisit when NIST PQC standards stabilize for signing schemes. |
 | **End-user identity verification (KYC/AML)** | SauronID is **agent identity**, not human identity. The bank-KYC, sanctions-screening and PEP modules are optional, opt-in features for legacy deployments and are NOT part of the core agent-binding product surface. | If you need OFAC/PEP screening, set `SAURON_DISABLE_BANK_KYC=0` and wire your own provider into `compliance_screening.rs`. SauronID does not replace your existing IdP. |
 | **Application-layer authorization** | SauronID verifies the agent is who it claims to be and has scope X. It does NOT decide whether the agent's specific request is allowed by your business rules. | Implement application-level RBAC/ABAC on top of `VerifiedCallSig` + `intent_json` extracted from request extensions. |
+| **Physical security of operator host** | If an attacker has physical access to the SauronID host, they can dump RAM, copy disk, install firmware implants. Game over for that host. | Standard datacenter / cloud-region physical security; HSM-backed key storage so even disk dump does not yield raw secrets; consider TEE-resident execution for the most sensitive paths. |
+| **Social engineering of operators** | Phishing / pretexting the human operator into sharing the admin key, approving a malicious config push, signing a malicious DKG share rotation. | Out of scope for code. Operator-level controls: dual-control admin actions (`SAURON_ADMIN_DUAL_CONTROL=1`), hardware MFA on all admin login paths, phishing-resistant FIDO2 keys for the operator's IdP, security awareness training. |
+| **Supply-chain compromise of upstream crates** | A malicious version of a Rust crate (or an npm package in the SDK) ships through cargo / npm, executing during build. | `Cargo.lock` / `package-lock.json` committed; CI verifies; consider `cargo-vet` / `cargo-deny` / `npm audit`. SBOM tooling is a separate sub-task. |
+| **Operator builds and ships a malicious binary** | If the operator themselves is hostile or compromised at the build step, downstream tenants cannot defend against a backdoored binary. | Reproducible builds; binary attestation; out-of-band signed release notes. Independent verifiers should be able to rebuild from source and diff the binary. |
 
 ## Assumptions
 

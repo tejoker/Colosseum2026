@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Data analyst agent — PII deny, aggregate queries only.
+version: "1"
+agent: data_analyst_agent
+description: >
+  Runs analytics over the warehouse. Must operate on aggregates only and
+  must never read PII columns directly.
+binding:
+  allowed_tools:
+    - warehouse_query
+    - chart_render
+    - export_csv
+  max_budget_usd: 100
+  data_scope:
+    allow: [customer_owned, public]
+    deny: [pii, restricted]
+  rate_limit:
+    requests_per_minute: 90
+  time_window:
+    start: "06:00"
+    end:   "22:00"
+    timezone: "Europe/Paris"
+  delegation:
+    max_depth: 0
+    allowed_subagents: []
+invariants:
+  - "query_is_aggregate"
+  - "row_count_returned >= 100 or aggregate_only"
+  - "data_classification != 'restricted'"
+metadata:
+  created_at: "2026-04-04"
+  author: "data-platform@example.com"
+  tags: [analytics, aggregate-only, pii-deny]

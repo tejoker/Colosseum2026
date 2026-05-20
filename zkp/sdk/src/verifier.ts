@@ -24,15 +24,38 @@ export interface VerificationResult {
 
 /**
  * Load a verification key from disk.
+ *
+ * Tries the legacy `${name}_verification_key.json` first (Age / Credential /
+ * MerkleInclusion), then falls back to the action-log DEV layout
+ * `${name}.dev.vkey.json`. The fallback is DEV-only — a production deployment
+ * MUST replace these with keys from a real trusted-setup ceremony.
  */
 function loadVerificationKey(circuitName: string): any {
-    const vkeyPath = path.join(KEYS_DIR, `${circuitName}_verification_key.json`);
-    if (!fs.existsSync(vkeyPath)) {
-        throw new Error(
-            `Verification key not found: ${vkeyPath}. Run trusted_setup.sh first.`
-        );
+    const legacyPath = path.join(KEYS_DIR, `${circuitName}_verification_key.json`);
+    if (fs.existsSync(legacyPath)) {
+        return JSON.parse(fs.readFileSync(legacyPath, "utf-8"));
     }
-    return JSON.parse(fs.readFileSync(vkeyPath, "utf-8"));
+    const devPath = path.join(KEYS_DIR, `${circuitName}.dev.vkey.json`);
+    if (fs.existsSync(devPath)) {
+        return JSON.parse(fs.readFileSync(devPath, "utf-8"));
+    }
+    throw new Error(
+        `Verification key not found: tried ${legacyPath} and ${devPath}. ` +
+            `Run trusted_setup.sh (legacy circuits) or zkp/ceremony/dev_setup.sh (DEV action-log keys).`
+    );
+}
+
+/**
+ * Verify an action-log proof envelope by circuit name. Used by the
+ * ActionLogVerifier and by the server `/v1/proofs/action-log/verify` route.
+ */
+export async function verifyActionLogProof(
+    circuitName: string,
+    proof: any,
+    publicInputs: string[]
+): Promise<boolean> {
+    const vKey = loadVerificationKey(circuitName);
+    return await snarkjs.groth16.verify(vKey, publicInputs, proof);
 }
 
 /**

@@ -9,6 +9,7 @@ import { StatusDot } from "@/components/ui/StatusDot";
 import { Table, Thead, Tbody, Th, Td, Tr } from "@/components/ui/Table";
 import { truncateHash, fmtTimestamp, fmtRelativeTime } from "@/lib/format";
 import { RevokeButton } from "@/components/agents/RevokeButton";
+import { AgentPolicyBindingSection } from "@/components/agents/AgentPolicyBindingSection";
 
 export const dynamic = "force-dynamic";
 
@@ -95,6 +96,13 @@ export default async function AgentDetailPage({
               ))}
             </ul>
           )}
+        </CardBody>
+      </Card>
+
+      {/* Policy binding */}
+      <Card className="mb-6">
+        <CardBody>
+          <AgentPolicyBindingSection agentId={id} agentName={agent.name} />
         </CardBody>
       </Card>
 

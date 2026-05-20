@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Legal review agent — 1-of-2 partner signature, no external counsel calls.
+version: "1"
+agent: legal_review_agent
+description: >
+  Assists with internal legal review of contracts. Any outbound action
+  requires at least one partner signature; the agent must never contact
+  external counsel directly.
+binding:
+  allowed_tools:
+    - contract_read
+    - redline
+    - clause_lookup
+  max_budget_usd: 300
+  data_scope:
+    allow: [customer_owned]
+    deny: [pii, restricted]
+  rate_limit:
+    requests_per_minute: 15
+  required_signatures:
+    - role: partner
+      threshold: 1
+  delegation:
+    max_depth: 1
+    allowed_subagents: [clause_search_agent]
+invariants:
+  - "no_external_call_to(domain: '*.law')"
+  - "outbound_requires_partner_signature"
+  - "spend_total <= max_budget_usd"
+metadata:
+  created_at: "2026-05-01"
+  author: "legal-ops@example.com"
+  tags: [legal, partner-sig, internal-only]

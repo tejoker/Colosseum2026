@@ -39,6 +39,36 @@ from .adapters import (
     wrap_openai_tool_call,
     wrap_anthropic_tool_use,
 )
+from .enforcement import (
+    PolicyCache,
+    BudgetTracker,
+    PolicyDeniedError,
+    PolicyNotLoadedError,
+    Verdict,
+    Allow,
+    Deny,
+    Action,
+    EvaluationContext,
+    CompiledPolicy,
+    Enforcer,
+    evaluate,
+    bind,
+    create_enforcer,
+)
+# LLM-runtime adapters (Sprint 11 follow-up). Additive — existing
+# ``adapters`` re-exports above are unchanged.
+from .langchain import (
+    bind_tools,
+    SauronLangChainAgent,
+)
+from .openai_adapter import (
+    SauronOpenAIAssistant,
+    dispatch_tool_calls,
+)
+from .anthropic_adapter import (
+    SauronAnthropicAgent,
+    dispatch_tool_use_blocks,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -51,4 +81,26 @@ __all__ = [
     "LangChainTool",
     "wrap_openai_tool_call",
     "wrap_anthropic_tool_use",
+    # Sprint 3 enforcement layer
+    "PolicyCache",
+    "BudgetTracker",
+    "PolicyDeniedError",
+    "PolicyNotLoadedError",
+    "Verdict",
+    "Allow",
+    "Deny",
+    "Action",
+    "EvaluationContext",
+    "CompiledPolicy",
+    "Enforcer",
+    "evaluate",
+    "bind",
+    "create_enforcer",
+    # LLM-runtime adapters
+    "bind_tools",
+    "SauronLangChainAgent",
+    "SauronOpenAIAssistant",
+    "dispatch_tool_calls",
+    "SauronAnthropicAgent",
+    "dispatch_tool_use_blocks",
 ]

@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Devtools codegen agent — sandboxed tools only, no external network calls.
+version: "1"
+agent: codegen_assistant
+description: >
+  Generates patches and runs the test suite inside an isolated sandbox.
+  Must never reach external networks or escalate privileges.
+binding:
+  allowed_tools:
+    - file_read
+    - file_write
+    - cargo_test
+    - run_sandboxed
+  max_budget_usd: 50
+  rate_limit:
+    requests_per_minute: 120
+  delegation:
+    max_depth: 0
+    allowed_subagents: []
+  # Sprint 3 additions — explicit denylist of common danger tools, cap
+  # patch size at 1 MiB, prevent runaway agent loops, block known-bad
+  # domains.
+  tool_denylist:
+    - shell_exec
+    - eval
+  max_payload_bytes: 1048576
+  max_chain_depth: 8
+  domain_denylist:
+    - "raw.githubusercontent.com"
+    - "pastebin.com"
+invariants:
+  - "no_external_call_to(domain: '*')"
+  - "sandbox_required(tool: 'run_sandboxed')"
+  - "spend_total <= max_budget_usd"
+metadata:
+  created_at: "2026-03-01"
+  author: "platform@example.com"
+  tags: [devtools, codegen, sandbox]

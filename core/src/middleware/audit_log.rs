@@ -1,0 +1,611 @@
+//! Security-event audit trail.
+//!
+//! A dedicated channel for "what happened on the security boundary"
+//! that an operator can ship to a SIEM without scraping the chatty
+//! `sauron::*` info logs. Records:
+//!
+//! - `AuthFailed` — invalid admin key / JWT / call signature.
+//! - `SignatureMismatch` — agent call-sig verification failed.
+//! - `CrossTenantAttempt` — a request tagged with tenant X tried to
+//!   touch tenant Y data.
+//! - `PolicyViolation` — DSL evaluation rejected an action.
+//! - `AdminKeyRotated` — operator rotated `SAURON_ADMIN_KEY{,S}`.
+//! - `RateLimitTripped` — global pre-auth rate limiter fired.
+//!
+//! ## Sinks
+//!
+//! - Tracing target `sauron::audit::security`. Operator points
+//!   `tracing-subscriber` (or any tracing exporter) at this target to
+//!   ship to a SIEM.
+//! - Optional file sink: when `SAURON_AUDIT_LOG_PATH` is set the
+//!   process appends one JSON object per line to that file. Rotation is
+//!   the operator's responsibility (logrotate, ECS sidecar, etc).
+//! - In-DB table `security_audit_log` (tenant-scoped). Surfaced via
+//!   `GET /v1/admin/audit` for operator-side querying without leaving
+//!   the SauronID stack.
+//!
+//! ## Tenant scoping
+//!
+//! Every record carries a `tenant_id`. The DB index supports
+//! `(tenant_id, timestamp)` so an operator query is cheap. The admin
+//! query endpoint enforces tenant isolation: a request resolved to
+//! tenant `X` can ONLY see records where `tenant_id = X` (unless the
+//! special `*` tenant is used, which is reserved for super-admin
+//! tooling and is NOT exposed to the HTTP surface).
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::{
+    extract::{Request, State},
+    middleware::Next,
+    response::Response,
+};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
+
+use crate::db::DbHandle;
+use crate::state::ServerState;
+use crate::tenancy::TenantId;
+
+/// Structured security event. Variants intentionally narrow — adding a
+/// new event requires schema audit + SIEM-rule update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuditEvent {
+    /// Caller failed auth (admin key, JWT, or call signature).
+    AuthFailed {
+        ip: String,
+        path: String,
+        reason: String,
+    },
+    /// Agent call-signature header set was present but did not verify.
+    SignatureMismatch { agent_id: String, path: String },
+    /// A request scoped to `tenant_id` reached for resources owned by
+    /// `target_tenant`. The default tenant is treated as out-of-band
+    /// for legacy traffic; this fires only when both ids are explicitly
+    /// set AND differ.
+    CrossTenantAttempt {
+        tenant_id: String,
+        target_tenant: String,
+        path: String,
+    },
+    /// Policy DSL evaluation rejected an action.
+    PolicyViolation {
+        tenant_id: String,
+        agent_id: String,
+        policy_id: String,
+        check: String,
+        reason: String,
+    },
+    /// Operator rotated the admin key. `key_fingerprint` is the first
+    /// 12 hex chars of SHA-256 over the new key bytes — enough to
+    /// correlate across rotations without revealing the secret.
+    AdminKeyRotated { key_fingerprint: String },
+    /// Global ingress rate limiter rejected a request.
+    RateLimitTripped { ip: String, path: String },
+}
+
+impl AuditEvent {
+    /// Stable string tag for the `event_type` SQL column. Mirrors
+    /// the serde `tag` discriminator above so a SIEM query can match
+    /// without re-parsing the JSON payload.
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            AuditEvent::AuthFailed { .. } => "auth_failed",
+            AuditEvent::SignatureMismatch { .. } => "signature_mismatch",
+            AuditEvent::CrossTenantAttempt { .. } => "cross_tenant_attempt",
+            AuditEvent::PolicyViolation { .. } => "policy_violation",
+            AuditEvent::AdminKeyRotated { .. } => "admin_key_rotated",
+            AuditEvent::RateLimitTripped { .. } => "rate_limit_tripped",
+        }
+    }
+
+    /// The tenant this event belongs to. Best-effort — events that have
+    /// no tenant context (rate-limit trip on unauthenticated traffic)
+    /// fall back to the default tenant. Operators querying per-tenant
+    /// see those records under `default`.
+    pub fn tenant_id(&self) -> String {
+        match self {
+            AuditEvent::CrossTenantAttempt { tenant_id, .. }
+            | AuditEvent::PolicyViolation { tenant_id, .. } => tenant_id.clone(),
+            _ => "default".to_string(),
+        }
+    }
+}
+
+/// One audit-log row as returned from the in-DB store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditRecord {
+    pub audit_id: String,
+    pub tenant_id: String,
+    pub event_type: String,
+    pub event: AuditEvent,
+    pub timestamp: i64,
+}
+
+/// Query parameters for `GET /v1/admin/audit`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditQuery {
+    /// Inclusive lower bound on `timestamp` (unix epoch seconds).
+    pub since: Option<i64>,
+    /// Inclusive upper bound on `timestamp` (unix epoch seconds).
+    pub until: Option<i64>,
+    /// Filter by event-type tag (one of [`AuditEvent::event_type`]).
+    pub event_type: Option<String>,
+    /// Page size cap. Default 200, max 1000.
+    pub limit: Option<u32>,
+}
+
+/// Optional file-sink handle. Lazy-initialized from `init_audit_sink`.
+static FILE_SINK: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+
+/// Optional DB handle for audit persistence. When `None`, the record
+/// helper still emits to tracing + the file sink — handy for unit
+/// tests that don't spin up a SQLite DB.
+static DB_SINK: OnceLock<Mutex<Option<Arc<DbHandle>>>> = OnceLock::new();
+
+/// Initialize file + DB sinks. Idempotent — calling twice is safe; the
+/// second call replaces the previous sinks under their mutex.
+///
+/// `SAURON_AUDIT_LOG_PATH` controls the file sink. Absent / empty
+/// disables the file sink.
+pub fn init_audit_sink(db: Arc<DbHandle>) {
+    let _ = ensure_security_audit_schema(&db);
+    let cell = DB_SINK.get_or_init(|| Mutex::new(None));
+    if let Ok(mut g) = cell.lock() {
+        *g = Some(db);
+    }
+    let path = std::env::var("SAURON_AUDIT_LOG_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let cell = FILE_SINK.get_or_init(|| Mutex::new(None));
+    if let Ok(mut g) = cell.lock() {
+        *g = path.and_then(|p| {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&p)
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "sauron::audit::security",
+                        path = %p.display(),
+                        err = %e,
+                        "failed to open audit log file sink — continuing without it"
+                    );
+                    None
+                }
+            }
+        });
+    }
+}
+
+/// Create the `security_audit_log` table if missing. Idempotent — safe
+/// to call on every process start.
+pub fn ensure_security_audit_schema(db: &DbHandle) -> Result<(), rusqlite::Error> {
+    let conn = db
+        .lock()
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))))?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS security_audit_log (
+            audit_id    TEXT PRIMARY KEY,
+            tenant_id   TEXT NOT NULL DEFAULT 'default',
+            event_type  TEXT NOT NULL,
+            event_json  TEXT NOT NULL,
+            timestamp   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_audit_tenant_ts
+            ON security_audit_log(tenant_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_security_audit_type_ts
+            ON security_audit_log(event_type, timestamp);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn new_audit_id() -> String {
+    // 16 bytes of OS randomness → 32-char hex. Avoids a uuid dep.
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut b);
+    hex::encode(b)
+}
+
+/// Persist an event to the file sink. Best-effort; failures are logged
+/// and swallowed so a full disk never bubbles up as a 5xx to the caller.
+fn write_file_sink(line: &str) {
+    let cell = FILE_SINK.get_or_init(|| Mutex::new(None));
+    if let Ok(mut g) = cell.lock() {
+        if let Some(file) = g.as_mut() {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+    }
+}
+
+/// Persist an event to the DB sink (when one was wired up).
+fn write_db_sink(record: &AuditRecord) {
+    let cell = DB_SINK.get_or_init(|| Mutex::new(None));
+    let db = match cell.lock() {
+        Ok(g) => match g.as_ref() {
+            Some(d) => Arc::clone(d),
+            None => return,
+        },
+        Err(_) => return,
+    };
+    let conn = match db.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let event_json = match serde_json::to_string(&record.event) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = conn.execute(
+        "INSERT INTO security_audit_log (audit_id, tenant_id, event_type, event_json, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            record.audit_id,
+            record.tenant_id,
+            record.event_type,
+            event_json,
+            record.timestamp
+        ],
+    );
+}
+
+/// Record one audit event to all configured sinks.
+///
+/// Always emits to the `sauron::audit::security` tracing target. Also
+/// writes to the file + DB sinks when [`init_audit_sink`] has wired
+/// them. Failures in any sink are logged-and-swallowed: the caller MUST
+/// be able to record an event without blocking the request path.
+pub fn record(event: AuditEvent) {
+    let record = AuditRecord {
+        audit_id: new_audit_id(),
+        tenant_id: event.tenant_id(),
+        event_type: event.event_type().to_string(),
+        event,
+        timestamp: unix_now(),
+    };
+    let json = serde_json::to_string(&record).unwrap_or_else(|_| {
+        // Best-effort fallback if a future variant has a non-serializable field.
+        format!(
+            "{{\"audit_id\":\"{}\",\"event_type\":\"{}\",\"timestamp\":{}}}",
+            record.audit_id, record.event_type, record.timestamp
+        )
+    });
+    tracing::info!(
+        target: "sauron::audit::security",
+        audit_id = %record.audit_id,
+        tenant_id = %record.tenant_id,
+        event_type = %record.event_type,
+        timestamp = record.timestamp,
+        event_json = %json,
+        "audit event"
+    );
+    write_file_sink(&json);
+    write_db_sink(&record);
+}
+
+/// Query the in-DB store with tenant isolation.
+///
+/// Tenant `*` is special-cased to mean "no tenant filter" — but the
+/// HTTP surface does NOT expose this. Only background tools (which
+/// hold operator-global trust) should pass `*`.
+pub fn query_audit_events(
+    db: &DbHandle,
+    tenant: &str,
+    q: &AuditQuery,
+) -> Result<Vec<AuditRecord>, String> {
+    let conn = db.lock().map_err(|e| format!("audit query: db lock: {e}"))?;
+    let limit = q.limit.unwrap_or(200).min(1000) as i64;
+    let since = q.since.unwrap_or(0);
+    let until = q.until.unwrap_or(i64::MAX);
+    let event_type_filter = q.event_type.clone();
+
+    let mut sql = String::from(
+        "SELECT audit_id, tenant_id, event_type, event_json, timestamp \
+         FROM security_audit_log WHERE timestamp >= ?1 AND timestamp <= ?2",
+    );
+    if tenant != "*" {
+        sql.push_str(" AND tenant_id = ?3");
+    }
+    if event_type_filter.is_some() {
+        sql.push_str(if tenant != "*" {
+            " AND event_type = ?4"
+        } else {
+            " AND event_type = ?3"
+        });
+    }
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ");
+    sql.push_str(&limit.to_string());
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("audit query: prepare: {e}"))?;
+
+    let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<AuditRecord> {
+        let audit_id: String = row.get(0)?;
+        let tenant_id: String = row.get(1)?;
+        let event_type: String = row.get(2)?;
+        let event_json: String = row.get(3)?;
+        let timestamp: i64 = row.get(4)?;
+        let event: AuditEvent = serde_json::from_str(&event_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
+        Ok(AuditRecord {
+            audit_id,
+            tenant_id,
+            event_type,
+            event,
+            timestamp,
+        })
+    };
+
+    let rows: Vec<AuditRecord> = match (tenant != "*", event_type_filter.as_deref()) {
+        (true, Some(et)) => stmt
+            .query_map(params![since, until, tenant, et], map)
+            .and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>())
+            .map_err(|e| format!("audit query: {e}"))?,
+        (true, None) => stmt
+            .query_map(params![since, until, tenant], map)
+            .and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>())
+            .map_err(|e| format!("audit query: {e}"))?,
+        (false, Some(et)) => stmt
+            .query_map(params![since, until, et], map)
+            .and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>())
+            .map_err(|e| format!("audit query: {e}"))?,
+        (false, None) => stmt
+            .query_map(params![since, until], map)
+            .and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>())
+            .map_err(|e| format!("audit query: {e}"))?,
+    };
+    Ok(rows)
+}
+
+/// Axum middleware that records auth/policy failures after the handler
+/// runs. Sits AFTER the auth layer so the tenant id is already
+/// resolved on the request extensions, and the response status reveals
+/// whether the handler accepted or rejected the call.
+///
+/// Mapping rules:
+/// - 401, 407 → `AuthFailed`
+/// - 403 → `AuthFailed` (forbidden = auth scope mismatch)
+/// - Any other status passes through unaudited (admin queries on the
+///   audit log itself are intentionally NOT logged to avoid recursion).
+pub async fn audit_log_middleware(request: Request, next: Next) -> Response {
+    // Snapshot identifying bits BEFORE the request is consumed.
+    let path = request.uri().path().to_string();
+    let ip = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+
+    // Suppress audit recursion: don't re-audit the audit-query endpoint.
+    let is_audit_path = path.starts_with("/v1/admin/audit");
+    if !is_audit_path && matches!(status, 401 | 403 | 407) {
+        record(AuditEvent::AuthFailed {
+            ip,
+            path,
+            reason: format!("http {status}"),
+        });
+    }
+    response
+}
+
+/// HTTP handler: `GET /v1/admin/audit?since=X&until=Y&event_type=Z`.
+///
+/// Tenant-scoped via `Extension<TenantId>` (set by the existing tenancy
+/// middleware). Admin-gated by being mounted under the admin router.
+pub async fn admin_audit_handler(
+    axum::Extension(tenant): axum::Extension<TenantId>,
+    State(state): State<Arc<RwLock<ServerState>>>,
+    axum::extract::Query(q): axum::extract::Query<AuditQuery>,
+) -> Result<axum::response::Json<Vec<AuditRecord>>, (axum::http::StatusCode, String)> {
+    let db = {
+        let st = state
+            .read()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("state lock: {e}")))?;
+        Arc::clone(&st.db)
+    };
+    let rows = query_audit_events(&db, tenant.as_str(), &q)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(axum::response::Json(rows))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fresh in-memory DbHandle backed by a unique temp file.
+    /// Avoids `:memory:` because our DbHandle wraps an r2d2 pool that
+    /// can't share an in-memory DB across connections.
+    fn fresh_db() -> (Arc<DbHandle>, std::path::PathBuf) {
+        // Each test gets a unique file so we never collide.
+        let dir = std::env::temp_dir().join("sauron_audit_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!(
+            "audit-{}-{}.sqlite",
+            std::process::id(),
+            new_audit_id(),
+        ));
+        let db = Arc::new(crate::db::open_db_at(path.to_str().unwrap(), 2));
+        ensure_security_audit_schema(&db).expect("schema");
+        (db, path)
+    }
+
+    // The audit sinks are OnceLock<Mutex<…>> globals because the
+    // record() helper is called from any worker without a state
+    // handle. Tests that exercise the global sinks must run
+    // serialized so the DB pointer one test installs is the same one
+    // observed by `record()` immediately after. A static mutex,
+    // grabbed via a small helper, gives us that ordering without
+    // requiring `cargo test -- --test-threads=1`.
+    static SINK_TEST_GUARD: Mutex<()> = Mutex::new(());
+    fn lock_sink_tests() -> std::sync::MutexGuard<'static, ()> {
+        match SINK_TEST_GUARD.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+    fn reset_sinks_for_test() {
+        // Clear any DB sink leftover from earlier tests in this binary.
+        let cell = DB_SINK.get_or_init(|| Mutex::new(None));
+        if let Ok(mut g) = cell.lock() {
+            *g = None;
+        }
+        let cell = FILE_SINK.get_or_init(|| Mutex::new(None));
+        if let Ok(mut g) = cell.lock() {
+            *g = None;
+        }
+    }
+
+    #[test]
+    fn record_emits_to_tracing_and_db_when_wired() {
+        let _g = lock_sink_tests();
+        reset_sinks_for_test();
+        let (db, _path) = fresh_db();
+        init_audit_sink(Arc::clone(&db));
+        record(AuditEvent::AuthFailed {
+            ip: "1.2.3.4".into(),
+            path: "/v1/policy/upload".into(),
+            reason: "missing x-admin-key".into(),
+        });
+        // The OnceLock-backed sink is process-global so the row landed
+        // in the DB we wired up.
+        let rows = query_audit_events(
+            &db,
+            "default",
+            &AuditQuery {
+                event_type: Some("auth_failed".into()),
+                ..Default::default()
+            },
+        )
+        .expect("query");
+        assert!(
+            rows.iter().any(|r| matches!(
+                &r.event,
+                AuditEvent::AuthFailed { ip, .. } if ip == "1.2.3.4"
+            )),
+            "expected auth_failed row, got {rows:?}"
+        );
+    }
+
+    #[test]
+    fn file_sink_appends_jsonl_when_path_env_set() {
+        let _g = lock_sink_tests();
+        reset_sinks_for_test();
+        let dir = std::env::temp_dir().join("sauron_audit_file_sink");
+        let _ = std::fs::create_dir_all(&dir);
+        let file_path = dir.join(format!("audit-{}.jsonl", new_audit_id()));
+        std::env::set_var("SAURON_AUDIT_LOG_PATH", file_path.to_str().unwrap());
+        let (db, _p) = fresh_db();
+        init_audit_sink(Arc::clone(&db));
+        record(AuditEvent::AdminKeyRotated {
+            key_fingerprint: "deadbeef".into(),
+        });
+        std::env::remove_var("SAURON_AUDIT_LOG_PATH");
+        let content = std::fs::read_to_string(&file_path).expect("read sink");
+        assert!(
+            content.contains("admin_key_rotated"),
+            "sink missing event tag: {content}"
+        );
+        assert!(content.contains("deadbeef"));
+    }
+
+    #[test]
+    fn db_insert_and_tenant_scoped_query_round_trip() {
+        let _g = lock_sink_tests();
+        reset_sinks_for_test();
+        let (db, _p) = fresh_db();
+        init_audit_sink(Arc::clone(&db));
+        record(AuditEvent::PolicyViolation {
+            tenant_id: "acme".into(),
+            agent_id: "agt_x".into(),
+            policy_id: "pol_y".into(),
+            check: "spend_cap".into(),
+            reason: "over budget".into(),
+        });
+        record(AuditEvent::PolicyViolation {
+            tenant_id: "globex".into(),
+            agent_id: "agt_z".into(),
+            policy_id: "pol_w".into(),
+            check: "spend_cap".into(),
+            reason: "over budget".into(),
+        });
+        let acme = query_audit_events(&db, "acme", &AuditQuery::default()).expect("acme");
+        assert_eq!(acme.len(), 1);
+        assert_eq!(acme[0].tenant_id, "acme");
+        let globex = query_audit_events(&db, "globex", &AuditQuery::default()).expect("globex");
+        assert_eq!(globex.len(), 1);
+        assert_eq!(globex[0].tenant_id, "globex");
+    }
+
+    #[test]
+    fn cross_tenant_query_isolation_blocks_leakage() {
+        let _g = lock_sink_tests();
+        reset_sinks_for_test();
+        let (db, _p) = fresh_db();
+        init_audit_sink(Arc::clone(&db));
+        record(AuditEvent::CrossTenantAttempt {
+            tenant_id: "tenant_a".into(),
+            target_tenant: "tenant_b".into(),
+            path: "/v1/policy/list".into(),
+        });
+        // Tenant A sees their own event.
+        let a = query_audit_events(&db, "tenant_a", &AuditQuery::default()).expect("a");
+        assert_eq!(a.len(), 1);
+        // Tenant B sees NOTHING — the attempt was recorded against the
+        // SOURCE tenant (the attacker), not the target.
+        let b = query_audit_events(&db, "tenant_b", &AuditQuery::default()).expect("b");
+        assert!(b.is_empty(), "tenant_b should not see tenant_a's event: {b:?}");
+        // Operator-global query (tenant=*) sees both.
+        let all = query_audit_events(&db, "*", &AuditQuery::default()).expect("*");
+        assert!(all.iter().any(|r| r.tenant_id == "tenant_a"));
+    }
+
+    #[test]
+    fn malformed_event_json_rejected_on_deserialize() {
+        // We test the boundary: a JSON blob that doesn't match any
+        // variant is rejected by serde, NOT silently accepted.
+        let bad = r#"{"type":"not_a_real_event","ip":"1.1.1.1"}"#;
+        let parsed: Result<AuditEvent, _> = serde_json::from_str(bad);
+        assert!(parsed.is_err(), "expected serde to reject unknown variant");
+
+        // And: deny_unknown_fields means an extra key is also rejected.
+        let extra = r#"{"type":"auth_failed","ip":"1.1.1.1","path":"/x","reason":"y","z":1}"#;
+        let parsed: Result<AuditEvent, _> = serde_json::from_str(extra);
+        assert!(parsed.is_err(), "expected serde to reject extra field");
+    }
+}

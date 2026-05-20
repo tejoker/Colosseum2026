@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=../policy.schema.json
+# Healthcare records agent — PII deny, 2-of-3 clinician signatures.
+version: "1"
+agent: healthcare_records_assistant
+description: >
+  Summarises EHR fragments for clinicians. Must never expose raw PII or
+  restricted records, and any export operation requires 2-of-3 clinician
+  signatures.
+binding:
+  allowed_tools:
+    - ehr_query
+    - de_identify
+    - aggregate_stats
+  data_scope:
+    allow: [customer_owned]
+    deny: [pii, restricted, financial]
+  rate_limit:
+    requests_per_minute: 20
+  required_signatures:
+    - role: clinician
+      threshold: 2
+  delegation:
+    max_depth: 1
+    allowed_subagents: [summarize_agent]
+  # Sprint 3 additions — block any PII the SDK flags, restrict outbound to
+  # a fixed clinical-data-warehouse host, deny sanctioned countries.
+  pii_block: true
+  domain_allowlist: ["ehr.internal.hospital.example"]
+  geo_deny_countries: ["KP", "IR"]
+invariants:
+  - "data_classification != 'restricted'"
+  - "exports_require_signatures(role: 'clinician', threshold: 2)"
+  - "no_raw_pii_in_output"
+metadata:
+  created_at: "2026-04-12"
+  author: "ciso@hospital.example"
+  tags: [healthcare, hipaa, pii-deny]

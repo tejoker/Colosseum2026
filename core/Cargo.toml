@@ -11,6 +11,10 @@ rand = "0.8"
 argon2 = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"
+serde_yml = "0.0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
+regex = "1"
 axum = "0.8.8"
 tokio = { version = "1.49.0", features = ["full"] }
 reqwest = { version = "0.13.2", features = ["json", "blocking"] }
@@ -38,6 +42,14 @@ ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 ring = "0.17"
 webpki = { version = "0.22", features = ["std"] }
 pem = "3"
+# Sprint 13-14: Paillier homomorphic encryption (Tier 2). Big-int arithmetic
+# for ~2048-bit modular exponentiation. `num-bigint` is NOT constant-time —
+# acceptable for a dev/demo HE module that explicitly requires cryptographer
+# review before production secret-aggregation use. See `core/src/he/` and
+# `docs/homomorphic-encryption.md` for the full NEEDS_CRYPTO_REVIEW notice.
+num-bigint = { version = "0.4", features = ["rand", "serde"] }
+num-integer = "0.1"
+num-traits = "0.2"
 
 [features]
 # Hardware-attestation features. M1 ships parsing skeletons only; full TPM2
