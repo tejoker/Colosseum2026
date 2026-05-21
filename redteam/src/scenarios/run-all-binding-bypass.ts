@@ -11,6 +11,10 @@ const SCENARIOS = [
     "binding-bumped-budget",
     "binding-classifier-lie",
     "binding-revoke-replay",
+    // Sprint 1: advisory vs enforce mode side-by-side (same agent, same
+    // policy, same action → different verdict path depending on the
+    // server's enforcement mode).
+    "advisory-vs-enforce",
 ];
 
 if (require.main === module) {

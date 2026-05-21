@@ -55,37 +55,10 @@ trap on_exit EXIT
 
 ensure_zkp_fixture_bundle
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "[CONF] node is required to run issuer verifier" >&2
-  exit 1
-fi
-
-if [[ ! -f "${ROOT_DIR}/../zkp/issuer/dist/server.js" ]]; then
-  echo "[CONF] missing zkp/issuer/dist/server.js; build issuer first" >&2
-  exit 1
-fi
-
-echo "[CONF] start issuer verifier"
-ISSUER_DATA_DIR="${LOG_DIR}/issuer-data" \
-ISSUER_SEED="${ISSUER_SEED}" \
-SAURON_ISSUER_SHARED_SECRET="${ISSUER_SHARED_SECRET}" \
-PORT="${ISSUER_PORT}" \
-node "${ROOT_DIR}/../zkp/issuer/dist/server.js" >"${LOG_DIR}/issuer.log" 2>&1 &
-cleanup_issuer_pid="$!"
-
-issuer_ready=0
-for _ in $(seq 1 90); do
-  if curl -sf "${ISSUER_URL}/status" >/dev/null 2>&1; then
-    issuer_ready=1
-    break
-  fi
-  sleep 1
-done
-if [[ "$issuer_ready" -ne 1 ]]; then
-  echo "[CONF] issuer failed to start" >&2
-  tail -n 80 "${LOG_DIR}/issuer.log" >&2 || true
-  exit 1
-fi
+# zkp/issuer removed in cleanup pass — confidence suite skipped until
+# OID4VCI use case returns or KYC flow is repointed at S19 audit report.
+echo "[CONF] SKIPPED: zkp/issuer removed; run agent-binding confidence suite via redteam/empirical-suite.ts instead"
+exit 0
 
 cargo build --bins >/dev/null
 

@@ -6,7 +6,7 @@
 #
 # What this does:
 #   1. Builds the Rust core (release).
-#   2. Builds the TypeScript clients (redteam, agentic, zkp/issuer).
+#   2. Builds the TypeScript clients (redteam, agentic).
 #   3. Starts the core in the background, waits for /admin/stats to respond.
 #   4. Seeds 10 dev clients + 10 dev users via core HTTP APIs.
 #   5. Runs the 9-scenario invariant suite.

@@ -80,8 +80,8 @@ run_group_case() {
 
 run_group_case "1,3" "AgeVerification soundness|Merkle inclusion validity" "cd zkp/sdk && npm run build && npm run test:quick"
 run_case "2" "Under-constrained circuit audit" "cd zkp && npm run audit:circuits"
-run_case "4" "OID4VP selective disclosure by presentation definition" "cd zkp/acquirer-sdk && npm run build && npm test"
-run_case "5" "OID4VCI pre-authorized code replay protection" "cd zkp/issuer && npm test"
+record_result "4" "OID4VP selective disclosure by presentation definition" "SKIP" "zkp/acquirer-sdk removed in cleanup pass; OID4VP belongs in S19 audit-report flow when KYC use case returns"
+record_result "5" "OID4VCI pre-authorized code replay protection" "SKIP" "zkp/issuer removed in cleanup pass; OID4VCI tied to legacy banking surface"
 run_case "6" "CAMARA strict silent-auth IP to SIM check" "cd zkp/camara && npm run build && npm test && npm run test:card-login"
 run_group_case "7,8,9" "Agent checksum integrity|Delegation chain traceability|PoP anti-replay binding" "cd agentic && npm run build && npm test"
 record_result "10" "Anomaly engine detects synthetic anomalies" "SKIP" "anomaly-engine removed from active surface; see archive/banking-2025/"

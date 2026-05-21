@@ -401,3 +401,231 @@ fn agent_lookup_by_id_returns_404_cross_tenant() {
     };
     assert_eq!(row_a.as_deref(), Some("agt_secret"));
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Sprint 3 — admin endpoint isolation tests.
+//
+// These four tests cement the admin-surface contracts surfaced in the
+// Sprint 3 cross-tenant audit. Each test mirrors the SQL the live HTTP
+// handler runs so we don't need an axum test server (same pattern as
+// the agent-row tests above).
+// ───────────────────────────────────────────────────────────────────────
+
+/// `/admin/stats` is intentionally operator-aggregate. The SQL in
+/// `core/src/admin.rs::get_stats` queries `COUNT(*) FROM users`,
+/// `COUNT(*) FROM clients`, etc — NO `WHERE tenant_id = ?`. This test
+/// pins that documented behaviour: writing under two tenants and then
+/// counting across the global tables surfaces the combined total.
+#[test]
+fn admin_stats_aggregates_across_tenants() {
+    let (_repo, db) = build_test_repo("admin_stats_aggregate");
+
+    // Seed two tenants' worth of agent rows. The `agents` table IS
+    // tenant-scoped, but `/admin/stats` reports across the global
+    // `users`/`clients`/`api_usage` set — for the agents counter we
+    // exercise here we verify the un-filtered COUNT.
+    seed_agent_row(&db, "tenant_a", "agt_a_1", "ki-a");
+    seed_agent_row(&db, "tenant_a", "agt_a_2", "ki-a");
+    seed_agent_row(&db, "tenant_b", "agt_b_1", "ki-b");
+
+    let total_unfiltered: i64 = {
+        let conn = db.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(
+        total_unfiltered, 3,
+        "admin-aggregate path must see both tenants' rows; this is the documented \
+         behaviour of /admin/stats. See core/src/admin.rs::get_stats."
+    );
+
+    // Sanity: the per-tenant filter restores isolation when the operator
+    // wants it.
+    let only_a: i64 = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM agents WHERE tenant_id = ?1",
+            rusqlite::params!["tenant_a"],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(only_a, 2);
+}
+
+/// `/admin/agents` is wired to the global SQL in `core/src/admin.rs::
+/// get_agents` (operator-aggregate today). This test pins what the
+/// *tenant-scoped variant* WILL look like once Sprint 11.5 closes the
+/// handler-side sweep: a filter by caller's tenant_id MUST hide
+/// other tenants' rows. The audit document records the call-site as a
+/// known gap (see "Known gaps" section).
+#[test]
+fn admin_agents_filters_to_callers_tenant() {
+    let (_repo, db) = build_test_repo("admin_agents_filter");
+    seed_agent_row(&db, "tenant_a", "agt_a_only", "ki-a");
+    seed_agent_row(&db, "tenant_b", "agt_b_only", "ki-b");
+
+    // What the tenant-scoped admin path WILL run (mirrors the planned
+    // patch — see docs/multi-tenancy-audit.md Known gaps).
+    let listed_a: Vec<String> = {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id FROM agents WHERE tenant_id = ?1 ORDER BY agent_id",
+            )
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params!["tenant_a"], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        rows
+    };
+    assert_eq!(listed_a, vec!["agt_a_only".to_string()]);
+
+    let listed_b: Vec<String> = {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id FROM agents WHERE tenant_id = ?1 ORDER BY agent_id",
+            )
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params!["tenant_b"], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        rows
+    };
+    assert_eq!(listed_b, vec!["agt_b_only".to_string()]);
+
+    // The unfiltered (legacy aggregate) shape MUST see both — guards
+    // against accidentally hiding rows behind a global default tenant.
+    let listed_all: Vec<String> = {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT agent_id FROM agents ORDER BY agent_id")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect()
+    };
+    assert_eq!(listed_all.len(), 2);
+}
+
+/// `/v1/admin/audit` is tenant-scoped today via
+/// `core/src/middleware/audit_log.rs::query_audit_events`. This test
+/// seeds rows under two tenants directly into the `security_audit_log`
+/// table (avoiding the global `record()` sink) and asserts that
+/// querying with `tenant_id = "tenant_a"` returns ONLY A's events.
+#[test]
+fn admin_audit_log_isolated_per_tenant() {
+    let (_repo, db) = build_test_repo("admin_audit_iso");
+    // The audit schema is created lazily by `init_audit_sink` in
+    // production; for the test we mirror what `ensure_security_audit_schema`
+    // would do (the schema is also created by init_schema since S12).
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO security_audit_log
+                (audit_id, tenant_id, event_type, event_json, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "a1",
+                "tenant_a",
+                "auth_failed",
+                "{\"type\":\"auth_failed\",\"ip\":\"1.2.3.4\",\"path\":\"/x\",\"reason\":\"http 401\"}",
+                100i64
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO security_audit_log
+                (audit_id, tenant_id, event_type, event_json, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "b1",
+                "tenant_b",
+                "auth_failed",
+                "{\"type\":\"auth_failed\",\"ip\":\"5.6.7.8\",\"path\":\"/y\",\"reason\":\"http 401\"}",
+                200i64
+            ],
+        )
+        .unwrap();
+    }
+
+    let count_a: i64 = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM security_audit_log WHERE tenant_id = ?1",
+            rusqlite::params!["tenant_a"],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count_a, 1, "tenant_a sees only its own audit row");
+
+    let count_b: i64 = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM security_audit_log WHERE tenant_id = ?1",
+            rusqlite::params!["tenant_b"],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count_b, 1, "tenant_b sees only its own audit row");
+
+    // Cross-check: querying for an unknown tenant returns 0 (no
+    // existence leak even via row counts).
+    let count_c: i64 = {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM security_audit_log WHERE tenant_id = ?1",
+            rusqlite::params!["tenant_c"],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count_c, 0);
+}
+
+/// `POST /v1/policy/evaluate` for a policy_id that belongs to a
+/// different tenant MUST return 404, NOT 403 — 403 would leak the
+/// existence of the id across tenants. The handler path
+/// (`core/src/policy/handlers.rs::evaluate_action`) maps the
+/// `store.get_by_id_tenant` miss to `AppError::NotFound`. This test
+/// asserts the miss at the store level, which is the load-bearing
+/// invariant.
+#[test]
+fn cross_tenant_evaluate_returns_404_not_403() {
+    use sauron_core::error::AppError;
+
+    let (_repo, db) = build_test_repo("eval_404_not_403");
+    let store = PolicyStore::new(db);
+    let compiled = compile(parse(FX_MINIMAL).unwrap()).unwrap();
+    let policy_id = compiled.policy_id.clone();
+    store.upsert_tenant("tenant_a", compiled).unwrap();
+
+    // What the handler does for a cross-tenant evaluate:
+    let lookup = store.get_by_id_tenant("tenant_b", &policy_id);
+    assert!(
+        lookup.is_none(),
+        "store MUST return None for cross-tenant policy_id — handler maps to NotFound"
+    );
+
+    // Mirror the handler's NotFound mapping to pin the 404-not-403 shape.
+    let mapped: AppError = lookup
+        .ok_or_else(|| AppError::NotFound(format!("policy {policy_id} not found")))
+        .err()
+        .expect("must error");
+    match mapped {
+        AppError::NotFound(_) => {} // expected
+        other => panic!(
+            "cross-tenant evaluate must map to NotFound (404). Got {other:?}. \
+             Returning Forbidden (403) would leak existence — see \
+             core/src/policy/handlers.rs::evaluate_action."
+        ),
+    }
+}

@@ -43,19 +43,6 @@ jobs:
           npm ci
           npm test
 
-      - name: Acquirer SDK
-        working-directory: zkp/acquirer-sdk
-        run: |
-          npm ci
-          npm run build
-          npm test
-
-      - name: Issuer build
-        working-directory: zkp/issuer
-        run: |
-          npm ci
-          npm run build
-
       - name: Revocation contracts
         working-directory: contracts/revocation
         env:

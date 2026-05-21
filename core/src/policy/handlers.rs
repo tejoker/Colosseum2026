@@ -663,3 +663,121 @@ fn compute_tz_hhmm(policy: &super::ast::Policy, now_epoch: i64) -> String {
     let local = utc.with_timezone(&tz);
     local.format("%H:%M").to_string()
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Sprint 1: server-side bound-policy enforcement on action endpoints.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Outcome of `enforce_bound_policy_for_action`.
+#[derive(Debug, Clone)]
+pub enum BoundPolicyOutcome {
+    /// No policy was bound to the agent → nothing to enforce.
+    NoBinding,
+    /// Policy was bound and evaluated to `Allow`.
+    Allow {
+        policy_id: String,
+    },
+    /// Policy was bound and evaluated to `Deny`. Caller must:
+    /// - in `Enforce` mode: short-circuit with 403 + `reason`.
+    /// - in `Advisory`/`Off` modes: log and continue.
+    Deny {
+        policy_id: String,
+        check: String,
+        reason: String,
+    },
+}
+
+/// Look up the policy bound to `(tenant_id, agent_id)`, evaluate `action`
+/// against it (consulting the spend ledger for the authoritative total),
+/// and return a [`BoundPolicyOutcome`] that callers translate into HTTP
+/// status codes.
+///
+/// `NoBinding` is the no-op path: agents without a server-side binding
+/// keep the legacy behaviour. `Deny` carries the failing check + reason
+/// so the 403 surface can echo a useful message back to the SDK.
+pub async fn enforce_bound_policy_for_action(
+    state: &Arc<RwLock<ServerState>>,
+    tenant_id: &str,
+    agent_id: &str,
+    action: &Action,
+) -> Result<BoundPolicyOutcome, AppError> {
+    let (db_handle, store, repo) = {
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
+        (
+            Arc::clone(&st.db),
+            Arc::clone(&st.policy_store),
+            st.repo.clone(),
+        )
+    };
+    enforce_bound_policy_with_handles(&db_handle, &store, &repo, tenant_id, agent_id, action).await
+}
+
+/// Low-level enforcement driven by raw handles. Sibling of
+/// [`enforce_bound_policy_for_action`] used by tests + by call sites that
+/// don't have a full `ServerState`. Production handlers go through the
+/// `..._for_action` shim; tests build their own `Repo`, `DbHandle`, and
+/// `PolicyStore` to avoid the full state-construction cost.
+pub async fn enforce_bound_policy_with_handles(
+    db_handle: &Arc<crate::db::DbHandle>,
+    store: &Arc<crate::policy::PolicyStore>,
+    repo: &Repo,
+    tenant_id: &str,
+    agent_id: &str,
+    action: &Action,
+) -> Result<BoundPolicyOutcome, AppError> {
+    let policy_id =
+        match crate::policy::binding_handlers::lookup_bound_policy_id(db_handle, tenant_id, agent_id)? {
+            Some(pid) => pid,
+            None => return Ok(BoundPolicyOutcome::NoBinding),
+        };
+    let compiled = match store.get_by_id_tenant(tenant_id, &policy_id) {
+        Some(c) => c,
+        None => {
+            tracing::warn!(
+                target: "sauron::policy::enforcement",
+                %tenant_id,
+                %agent_id,
+                %policy_id,
+                "bound policy not present in store — skipping enforcement",
+            );
+            return Ok(BoundPolicyOutcome::NoBinding);
+        }
+    };
+
+    let (spend, _simulator, _warning) = resolve_spend_for_evaluation_tenant(
+        repo,
+        tenant_id,
+        &policy_id,
+        Some(agent_id),
+        None,
+    )
+    .await
+    .map_err(map_repo_err)?;
+
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now_tz_hhmm = compute_tz_hhmm(&compiled.raw, now_epoch);
+
+    let mut ctx = EvaluationContext::with_defaults(action);
+    ctx.spend_total_usd = spend;
+    ctx.now_epoch = now_epoch;
+    ctx.now_tz_hhmm = now_tz_hhmm;
+    // Weekday/date defaults: pass a Monday at noon UTC if the policy has
+    // weekday-gated checks so the test path isn't blocked by ambient time.
+    ctx.now_weekday = 1;
+    ctx.now_date_yyyy_mm_dd = "2026-05-21".into();
+
+    match crate::policy::evaluator::evaluate(&compiled, &ctx) {
+        Verdict::Allow => Ok(BoundPolicyOutcome::Allow { policy_id }),
+        Verdict::Deny { check, reason } => Ok(BoundPolicyOutcome::Deny {
+            policy_id,
+            check,
+            reason,
+        }),
+    }
+}
+

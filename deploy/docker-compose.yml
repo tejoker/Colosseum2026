@@ -43,22 +43,6 @@ services:
       - SAURONID_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1
     restart: unless-stopped
 
-  # ── ZKP Issuer (OID4VCI — port 4000) ────────────────────────────────────────
-  zkp-issuer:
-    build: ../zkp/issuer
-    container_name: sauron-zkp-issuer
-    ports:
-      - "4000:4000"
-    environment:
-      - PORT=4000
-      - ISSUER_DID=did:sauron:issuer:1
-      - ISSUER_SEED=${ISSUER_SEED:?ISSUER_SEED is required — set to a long random string in your .env file.}
-      - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}
-    depends_on:
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
-
   # ── Hardhat Local EVM Node (port 8545) ──────────────────────────────────────
   hardhat-node:
     build: ../contracts/revocation

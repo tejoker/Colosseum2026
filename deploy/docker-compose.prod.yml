@@ -18,6 +18,26 @@ services:
       - SAURON_OPRF_SEED=${SAURON_OPRF_SEED:?SAURON_OPRF_SEED is required}
       - SAURON_ISSUER_URLS=${SAURON_ISSUER_URLS:-http://zkp-issuer:4000}
       - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:?SAURON_ISSUER_SHARED_SECRET is required}
+      # Sprint 1 — advisory → enforce flip. ENV=production already
+      # implies fail-closed defaults; the lines below pin the gates
+      # explicitly so a future env-template change can't silently
+      # downgrade a running deployment to advisory mode.
+      #
+      # SAURON_REQUIRE_CALL_SIG=1
+      #   Per-call DPoP-style signature is MANDATORY. Missing / invalid
+      #   signature → 401. Disable only behind an explicit
+      #   SAURON_UNSAFE_ALLOW_ADVISORY_IN_PROD=1 migration window.
+      - SAURON_REQUIRE_CALL_SIG=${SAURON_REQUIRE_CALL_SIG:-1}
+      # SAURON_REQUIRE_AGENT_TYPE=1
+      #   /agent/register MUST receive `agent_type` + `checksum_inputs`
+      #   so the server computes the integrity digest. Legacy
+      #   operator-supplied checksums are rejected.
+      - SAURON_REQUIRE_AGENT_TYPE=${SAURON_REQUIRE_AGENT_TYPE:-1}
+      # SAURON_POLICY_ENFORCEMENT_MODE=enforce
+      #   Bound policy denies at /agent/payment/authorize (and other
+      #   action endpoints) short-circuit with 403. `advisory` (log
+      #   only) and `off` (skip) are dev-only.
+      - SAURON_POLICY_ENFORCEMENT_MODE=${SAURON_POLICY_ENFORCEMENT_MODE:-enforce}
     restart: unless-stopped
 
   dashboard:
@@ -36,12 +56,3 @@ services:
       - backend
     restart: unless-stopped
 
-  zkp-issuer:
-    build: ../zkp/issuer
-    image: sauronid-zkp-issuer:${SAURONID_IMAGE_TAG:-latest}
-    environment:
-      - PORT=4000
-      - ISSUER_DID=${ISSUER_DID:?ISSUER_DID is required}
-      - ISSUER_SEED=${ISSUER_SEED:?ISSUER_SEED is required}
-      - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:?SAURON_ISSUER_SHARED_SECRET is required}
-    restart: unless-stopped

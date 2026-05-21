@@ -209,6 +209,13 @@ async fn main() {
 
     sauron_core::admin::init_admin_auth().expect("admin auth init failed");
 
+    // Sprint 1 (advisory → enforce): refuse to start in production when a
+    // critical enforcement gate has been explicitly disabled without the
+    // matching SAURON_UNSAFE_ALLOW_ADVISORY_IN_PROD opt-in.
+    if let Err(reason) = sauron_core::runtime_mode::assert_production_enforcement_safe() {
+        panic!("[FATAL] {reason}");
+    }
+
     // Initialise la base SQLite en mémoire.
     let db_handle = db::open_db();
     let db_arc = Arc::new(db_handle);
@@ -3319,8 +3326,13 @@ fn enforce_strict_payment_intent(
 
 async fn agent_payment_authorize(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     Json(payload): Json<AgentPaymentAuthorizeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant
+        .map(|axum::Extension(t)| t)
+        .unwrap_or_default()
+        .0;
     if payload.ajwt.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "ajwt is required".into()));
     }
@@ -3452,6 +3464,95 @@ async fn agent_payment_authorize(
             StatusCode::FORBIDDEN,
             format!("Policy denied payment_initiation: {}", decision.reason),
         ));
+    }
+
+    // Sprint 1 (advisory → enforce): consult the server-bound policy for
+    // this (tenant, agent). If the binding denies and enforcement mode is
+    // `enforce`, short-circuit with 403 before any payment authorisation
+    // is issued. `advisory` logs + continues, `off` skips entirely.
+    let enforcement_mode = sauron_core::runtime_mode::policy_enforcement_mode();
+    if !matches!(
+        enforcement_mode,
+        sauron_core::runtime_mode::PolicyEnforcementMode::Off
+    ) {
+        // Build a minimal Action describing the requested payment.
+        // - `tool` reuses the intent action name when present, defaulting
+        //   to `payment_initiation` (matches the legacy KYA matrix label).
+        // - `amount_usd` carries the minor-unit amount converted to a
+        //   floating-point USD-equivalent; bound policies that gate by
+        //   monetary amount use this directly.
+        let intent_tool = intent
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                intent
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("payment_initiation")
+                    .to_string()
+            });
+        let mut bound_action = sauron_core::policy::Action {
+            action_id: format!("payauth-{jti}"),
+            tool: intent_tool,
+            amount_usd: Some(payload.amount_minor as f64 / 100.0),
+            timestamp: now,
+            ..Default::default()
+        };
+        bound_action
+            .metadata
+            .insert("currency".into(), serde_json::json!(currency.clone()));
+        bound_action.metadata.insert(
+            "merchant_id".into(),
+            serde_json::json!(merchant_id.clone()),
+        );
+        match sauron_core::policy::handlers::enforce_bound_policy_for_action(
+            &state,
+            &tenant_id,
+            &agent_id,
+            &bound_action,
+        )
+        .await
+        {
+            Ok(sauron_core::policy::handlers::BoundPolicyOutcome::Deny {
+                policy_id,
+                check,
+                reason,
+            }) => {
+                tracing::warn!(
+                    target: "sauron::policy::enforcement",
+                    %tenant_id,
+                    %agent_id,
+                    %policy_id,
+                    %check,
+                    %reason,
+                    enforce = matches!(
+                        enforcement_mode,
+                        sauron_core::runtime_mode::PolicyEnforcementMode::Enforce
+                    ),
+                    "bound policy denied /agent/payment/authorize",
+                );
+                if matches!(
+                    enforcement_mode,
+                    sauron_core::runtime_mode::PolicyEnforcementMode::Enforce
+                ) {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "policy {policy_id} denied {check}: {reason}"
+                        ),
+                    ));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "sauron::policy::enforcement",
+                    error = %e,
+                    "bound policy enforcement failed — falling through (fail-open on infra error)",
+                );
+            }
+        }
     }
 
     enforce_strict_payment_intent(&intent, payload.amount_minor, &currency, &merchant_id)?;

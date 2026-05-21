@@ -161,9 +161,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install issuer dependencies
-        run: npm ci --prefix zkp/issuer
-
       - name: Run confidence suite
         env:
           CONF_SHARED_ITERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.shared_iters || '3' }}
