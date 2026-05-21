@@ -22,10 +22,6 @@ step "core cargo test + binaries"
 step "dev leash demo smoke"
 "$ROOT/core/tests/smoke_dev_leash_demo.sh"
 
-step "zkp issuer build + tests"
-install_if_needed "$ROOT/zkp/issuer"
-(cd "$ROOT/zkp/issuer" && npm run build && npm test)
-
 step "agentic sdk build + tests"
 install_if_needed "$ROOT/agentic"
 (cd "$ROOT/agentic" && npm run build && npm test)

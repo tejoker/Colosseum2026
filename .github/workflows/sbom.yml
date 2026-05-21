@@ -71,14 +71,12 @@ jobs:
       fail-fast: false
       matrix:
         # Adjust to match the actual subdirs that ship `package.json`.
-        # zkp/sdk and zkp/issuer both ship one; clients/python is a Python
-        # package and is handled by the python-sbom job.
+        # clients/python is a Python package and is handled by the python-sbom job.
         subdir:
           - dashboard
           - agentic
           - redteam
           - zkp/sdk
-          - zkp/issuer
     steps:
       - uses: actions/checkout@v4
 

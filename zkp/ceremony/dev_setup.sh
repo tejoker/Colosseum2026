@@ -30,12 +30,15 @@ CIRCUITS=(
     "ActionSetNonMembership"
     "ActionTimeWindow"
     "ActionCountInRange"
+    "StatsHonestComputation"
 )
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CIRC_DIR="${ROOT}/circuits"
 BUILD_DIR="${CIRC_DIR}/build"
-PTAU="${BUILD_DIR}/ptau/powersOfTau28_hez_final_15.ptau"
+# Power-17 ptau (≤ 2^17 constraints) covers every action-log circuit incl.
+# ActionSumBound and StatsHonestComputation; smaller _15 fails on those.
+PTAU="${BUILD_DIR}/ptau/powersOfTau28_hez_final_17.ptau"
 KEYS_OUT="${BUILD_DIR}/keys"
 
 mkdir -p "${KEYS_OUT}" "${BUILD_DIR}/ptau"
@@ -44,11 +47,12 @@ if [[ ! -f "${PTAU}" ]]; then
     cat <<EOF >&2
 [ERROR] Missing ptau file: ${PTAU}
 
-Download it once:
+Download it once (Hermez S3 is access-restricted; use the zkEVM mirror):
     curl -L -o "${PTAU}" \\
-        https://hermez.s3-eu-west-1.amazonaws.com/powersOfTau28_hez_final_15.ptau
+        https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_17.ptau
 
-(For larger circuits, swap _15 for _16 or _17.)
+(For tiny circuits you can swap _17 for _15, but ActionSumBound and
+StatsHonestComputation will fail with "circuit too big" at _15.)
 EOF
     exit 1
 fi
@@ -82,8 +86,21 @@ for C in "${CIRCUITS[@]}"; do
     echo "  -> export verification key"
     snarkjs zkey export verificationkey "${FINAL_ZKEY}" "${VKEY}"
 
-    cp "${FINAL_ZKEY}" "${KEYS_OUT}/${C}_final.dev.zkey"
+    # Stamp the DEV disclaimer into the verification key JSON. The Rust
+    # verifier (core/src/zk_verifier.rs) refuses to start in production when
+    # ANY vk it loads still carries this field — fail-closed on accidental
+    # ceremony rollover.
+    node -e '
+      const fs=require("fs"), p=process.argv[1];
+      const v=JSON.parse(fs.readFileSync(p,"utf8"));
+      v._disclaimer="DEV ONLY - forgeable by anyone with the matching dev zkey. Replace via real multi-party ceremony before production. See zkp/ceremony/README.md.";
+      v._dev_provenance={generator:"dev_setup.sh", circuit:"'"${C}"'"};
+      fs.writeFileSync(p, JSON.stringify(v, null, 2));
+    ' "${VKEY}"
+
     cp "${VKEY}" "${KEYS_OUT}/${C}.dev.vkey.json"
+    # zkey files are NEVER copied into the committable keys/ dir and NEVER
+    # committed — they would ship the DEV trapdoor.
 
     rm -f "${PRE_ZKEY}"
 done

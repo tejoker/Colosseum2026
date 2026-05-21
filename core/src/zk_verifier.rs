@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ════════════════════════════════════════════════════════════════════════
 // Public types
@@ -129,7 +129,121 @@ pub async fn verify_action_log_proof<L: VKeyLoader>(
     expected_root_hex: &str,
     vk_loader: &L,
 ) -> Result<(), ZkVerifyError> {
-    // 1. Basic payload sanity
+    // Sanity-validate the payload, then resolve the vkey path through the
+    // loader, then delegate to the explicit-vk variant. Tests can call the
+    // explicit variant directly when they want to point at a specific
+    // committed DEV key without going through the FS loader.
+    validate_payload_shape(payload)?;
+    let vkey_path = vk_loader.vkey_path(&payload.circuit)?;
+    verify_action_log_proof_with_vk(payload, expected_root_hex, &vkey_path).await
+}
+
+/// Verifies an action-log proof against an explicit verification-key path.
+///
+/// This is the lower-level entry point used by [`verify_action_log_proof`]
+/// (which resolves the path via a [`VKeyLoader`]) and by tests that ship
+/// pre-located DEV keys in `zkp/circuits/build/keys/`.
+///
+/// Fail-closed contract for production: when the loaded vk JSON contains the
+/// `_disclaimer` field AND the runtime environment is production (i.e.
+/// [`crate::runtime_mode::is_development_runtime`] is false), verification is
+/// refused with [`ZkVerifyError::KeyNotFound`] — the operator MUST replace the
+/// DEV key with a real-ceremony key before the verifier will accept any
+/// proof under that circuit. Development runtimes pass through with a
+/// `[WARN] using DEV verification key` log line.
+pub async fn verify_action_log_proof_with_vk(
+    payload: &ActionLogProofPayload,
+    expected_root_hex: &str,
+    vkey_path: &Path,
+) -> Result<(), ZkVerifyError> {
+    validate_payload_shape(payload)?;
+
+    // Public-root binding (decimal public_inputs[1] → 32-byte hex).
+    let claimed_root_dec = payload.public_inputs[1].trim();
+    let expected_root_hex = expected_root_hex
+        .trim()
+        .trim_start_matches("0x")
+        .to_lowercase();
+    let claimed_root_hex = decimal_to_padded_hex(claimed_root_dec)
+        .map_err(|e| ZkVerifyError::Malformed(format!("bad root encoding: {e}")))?;
+    if claimed_root_hex != expected_root_hex {
+        return Err(ZkVerifyError::Invalid(format!(
+            "proof root {claimed_root_hex} ≠ expected root {expected_root_hex}"
+        )));
+    }
+
+    // Decode proof JSON
+    use base64::Engine;
+    let proof_json_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&payload.proof_b64)
+        .map_err(|e| ZkVerifyError::Malformed(format!("proof_b64 decode: {e}")))?;
+    let proof_json: serde_json::Value = serde_json::from_slice(&proof_json_bytes)
+        .map_err(|e| ZkVerifyError::Malformed(format!("proof JSON parse: {e}")))?;
+    if !proof_json.is_object() {
+        return Err(ZkVerifyError::Malformed("proof JSON is not an object".into()));
+    }
+
+    // Read the vkey file + check the DEV-disclaimer fail-closed gate.
+    let vkey_bytes = std::fs::read(vkey_path)
+        .map_err(|e| ZkVerifyError::KeyNotFound(format!("read {}: {e}", vkey_path.display())))?;
+    enforce_dev_vkey_policy(&vkey_bytes, vkey_path, &payload.circuit)?;
+
+    // Spawn `snarkjs groth16 verify` — see the module-level doc comment for
+    // the dep-choice rationale. Public-inputs + proof go via temp files
+    // (snarkjs CLI requires file paths, not stdin).
+    let tmp = tempdir_or_err()?;
+    let pub_path = tmp.join("public.json");
+    let proof_path = tmp.join("proof.json");
+    let public_json = serde_json::to_vec(&payload.public_inputs)
+        .map_err(|e| ZkVerifyError::Malformed(format!("re-encode public: {e}")))?;
+    std::fs::write(&pub_path, &public_json)
+        .map_err(|e| ZkVerifyError::VerifierFailed(format!("write public.json: {e}")))?;
+    std::fs::write(&proof_path, &proof_json_bytes)
+        .map_err(|e| ZkVerifyError::VerifierFailed(format!("write proof.json: {e}")))?;
+
+    let output = tokio::process::Command::new("snarkjs")
+        .arg("groth16")
+        .arg("verify")
+        .arg(vkey_path)
+        .arg(&pub_path)
+        .arg(&proof_path)
+        .output()
+        .await
+        .map_err(|e| ZkVerifyError::VerifierFailed(format!("spawn snarkjs: {e}")))?;
+
+    let _ = std::fs::remove_file(&pub_path);
+    let _ = std::fs::remove_file(&proof_path);
+    let _ = std::fs::remove_dir(&tmp);
+
+    if !output.status.success() {
+        return Err(ZkVerifyError::Invalid(format!(
+            "snarkjs verify exited {} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // snarkjs 0.7 prints "[INFO] snarkJS: OK!" on stderr (not stdout) for
+    // valid proofs and "snarkJS: Invalid proof" for rejection. Accept either
+    // stream so we stay tolerant of the CLI's output-routing churn.
+    let combined = format!("{stdout}{stderr}");
+    let lower = combined.to_lowercase();
+    if lower.contains("invalid proof") {
+        Err(ZkVerifyError::Invalid(format!(
+            "snarkjs verify reported invalid proof: {combined}"
+        )))
+    } else if lower.contains("ok!") || combined.contains("Verified") {
+        Ok(())
+    } else {
+        Err(ZkVerifyError::Invalid(format!(
+            "snarkjs verify did not report OK: {combined}"
+        )))
+    }
+}
+
+// Public-payload sanity checks shared by both entry points.
+fn validate_payload_shape(payload: &ActionLogProofPayload) -> Result<(), ZkVerifyError> {
     if payload.circuit.is_empty() {
         return Err(ZkVerifyError::Malformed("circuit field is empty".into()));
     }
@@ -155,87 +269,67 @@ pub async fn verify_action_log_proof<L: VKeyLoader>(
             payload.circuit
         )));
     }
-
-    // 2. Public-root binding: parse public_inputs[1] as decimal, render as 32-byte
-    // big-endian hex, compare against `expected_root_hex` (case-insensitive,
-    // ignores leading 0x).
     if payload.public_inputs.len() < 2 {
         return Err(ZkVerifyError::Malformed(
             "expected at least [valid, root, ...] public_inputs".into(),
         ));
     }
-    let claimed_root_dec = payload.public_inputs[1].trim();
-    let expected_root_hex = expected_root_hex
-        .trim()
-        .trim_start_matches("0x")
-        .to_lowercase();
-    let claimed_root_hex = decimal_to_padded_hex(claimed_root_dec)
-        .map_err(|e| ZkVerifyError::Malformed(format!("bad root encoding: {e}")))?;
-    if claimed_root_hex != expected_root_hex {
-        return Err(ZkVerifyError::Invalid(format!(
-            "proof root {claimed_root_hex} ≠ expected root {expected_root_hex}"
-        )));
+    Ok(())
+}
+
+/// Enforce the DEV-vs-production policy on a verification key JSON.
+///
+/// In development runtimes (`ENV=development|dev|local`) a vk carrying the
+/// `_disclaimer` field is allowed, but we log a clear `[WARN]` so it is
+/// visible in operator output. In any other runtime (i.e. production) we
+/// fail-closed: a vk with `_disclaimer` is rejected. The matching error
+/// instructs the operator to swap in a real-ceremony key.
+fn enforce_dev_vkey_policy(
+    vkey_bytes: &[u8],
+    vkey_path: &Path,
+    circuit: &str,
+) -> Result<(), ZkVerifyError> {
+    let parsed: serde_json::Value = match serde_json::from_slice(vkey_bytes) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // malformed vk — snarkjs will reject below
+    };
+    let has_disclaimer = parsed
+        .get("_disclaimer")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.to_ascii_uppercase().contains("DEV ONLY"));
+    if !has_disclaimer {
+        return Ok(());
     }
-
-    // 3. Decode the proof JSON
-    use base64::Engine;
-    let proof_json_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&payload.proof_b64)
-        .map_err(|e| ZkVerifyError::Malformed(format!("proof_b64 decode: {e}")))?;
-    let proof_json: serde_json::Value = serde_json::from_slice(&proof_json_bytes)
-        .map_err(|e| ZkVerifyError::Malformed(format!("proof JSON parse: {e}")))?;
-    if !proof_json.is_object() {
-        return Err(ZkVerifyError::Malformed("proof JSON is not an object".into()));
-    }
-
-    // 4. Locate the verification key
-    let vkey_path = vk_loader.vkey_path(&payload.circuit)?;
-    let _vkey_bytes = std::fs::read(&vkey_path)
-        .map_err(|e| ZkVerifyError::KeyNotFound(format!("read {}: {e}", vkey_path.display())))?;
-
-    // 5. Spawn `snarkjs groth16 verify <vkey> <pubInputs> <proof>` — see the
-    // doc comment at the top of this module for the dep-choice rationale.
-    // We pass the public-inputs and proof via temp files (snarkjs CLI requires
-    // file paths, not stdin).
-    let tmp = tempdir_or_err()?;
-    let pub_path = tmp.join("public.json");
-    let proof_path = tmp.join("proof.json");
-    let public_json = serde_json::to_vec(&payload.public_inputs)
-        .map_err(|e| ZkVerifyError::Malformed(format!("re-encode public: {e}")))?;
-    std::fs::write(&pub_path, &public_json)
-        .map_err(|e| ZkVerifyError::VerifierFailed(format!("write public.json: {e}")))?;
-    std::fs::write(&proof_path, &proof_json_bytes)
-        .map_err(|e| ZkVerifyError::VerifierFailed(format!("write proof.json: {e}")))?;
-
-    let output = tokio::process::Command::new("snarkjs")
-        .arg("groth16")
-        .arg("verify")
-        .arg(&vkey_path)
-        .arg(&pub_path)
-        .arg(&proof_path)
-        .output()
-        .await
-        .map_err(|e| ZkVerifyError::VerifierFailed(format!("spawn snarkjs: {e}")))?;
-
-    // Best-effort cleanup; ignore errors so we never mask the real result.
-    let _ = std::fs::remove_file(&pub_path);
-    let _ = std::fs::remove_file(&proof_path);
-    let _ = std::fs::remove_dir(&tmp);
-
-    if !output.status.success() {
-        return Err(ZkVerifyError::Invalid(format!(
-            "snarkjs verify exited {} stderr={}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.to_lowercase().contains("ok") || stdout.contains("Verified") {
+    if crate::runtime_mode::is_development_runtime() {
+        warn_dev_key_once(circuit, vkey_path);
         Ok(())
     } else {
-        Err(ZkVerifyError::Invalid(format!(
-            "snarkjs verify did not report OK: stdout={stdout}"
+        Err(ZkVerifyError::KeyNotFound(format!(
+            "refusing to use DEV verification key in production runtime: {} \
+             (circuit {circuit}). Replace with a real multi-party ceremony \
+             key — see zkp/ceremony/README.md.",
+            vkey_path.display()
         )))
+    }
+}
+
+// One log line per (circuit, path) — avoid spamming production-like staging
+// envs where ENV=development is intentional. Best-effort; if the once-cell
+// fails we still emit the line.
+fn warn_dev_key_once(circuit: &str, vkey_path: &Path) {
+    use std::sync::OnceLock;
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let key = format!("{circuit}:{}", vkey_path.display());
+    if let Ok(mut guard) = seen.lock() {
+        if guard.insert(key) {
+            tracing::warn!(
+                target: "sauron::zk_verifier",
+                circuit = circuit,
+                vkey = %vkey_path.display(),
+                "[WARN] using DEV verification key for circuit {circuit} — production must rotate after real ceremony"
+            );
+        }
     }
 }
 
@@ -363,5 +457,95 @@ mod tests {
             format!("{}ff", "00".repeat(31))
         );
         assert!(decimal_to_padded_hex("abc").is_err());
+    }
+
+    #[test]
+    fn dev_disclaimer_rejected_in_production() {
+        // Build an in-memory vk JSON with the DEV disclaimer; force ENV=production
+        // by ensuring is_development_runtime() returns false (it defaults to
+        // "production" when ENV is unset). Note: we deliberately do NOT set
+        // SAURON_ENV here, since this test relies on the default fail-closed
+        // behaviour. If a parallel test sets ENV=dev this assertion would
+        // become a no-op; the lib-level test suite does not set ENV today.
+        let vk = serde_json::json!({
+            "protocol": "groth16",
+            "_disclaimer": "DEV ONLY - forgeable by anyone with the matching dev zkey"
+        });
+        let bytes = serde_json::to_vec(&vk).unwrap();
+        // We can't safely flip ENV per-test without leaking into other tests,
+        // so we only assert the dev-runtime branch here when the harness is
+        // running in dev. The production branch is exercised by inspecting
+        // the error variant when ENV is unset (default).
+        let res =
+            enforce_dev_vkey_policy(&bytes, std::path::Path::new("/tmp/x.vkey.json"), "Test");
+        if crate::runtime_mode::is_development_runtime() {
+            assert!(res.is_ok());
+        } else {
+            assert!(matches!(res, Err(ZkVerifyError::KeyNotFound(_))));
+        }
+    }
+
+    // Path to the committed DEV verification key for ActionRangeProof. Tests
+    // below are silently skipped when the file is absent (CI without the
+    // snarkjs/circom toolchain). Run `bash zkp/ceremony/dev_setup.sh` to
+    // produce them.
+    fn dev_vkey_path(circuit: &str) -> PathBuf {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        PathBuf::from(manifest)
+            .parent()
+            .unwrap()
+            .join("zkp/circuits/build/keys")
+            .join(format!("{circuit}.dev.vkey.json"))
+    }
+
+    fn snarkjs_on_path() -> bool {
+        std::process::Command::new("snarkjs")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn dev_vkey_loads_and_signals_skip_when_absent() {
+        // Force dev runtime so the disclaimer path returns Ok. Using
+        // SAURON_ENV (lower precedence than ENV) keeps this test from
+        // colliding with `ENV=production` in CI.
+        std::env::set_var("SAURON_ENV", "dev");
+
+        let vk = dev_vkey_path("ActionRangeProof");
+        if !vk.is_file() || !snarkjs_on_path() {
+            eprintln!(
+                "TEST SKIPPED: ZK toolchain not installed; run zkp/ceremony/dev_setup.sh first \
+                 (looked at {})",
+                vk.display()
+            );
+            return;
+        }
+
+        // Tampered proof: garbage base64 still passes structural decode but
+        // snarkjs MUST reject it. We deliberately use a public_inputs vector
+        // whose root matches `expected_root_hex` so we exercise the snarkjs
+        // step (not just the cheap root-binding short-circuit).
+        let dummy_proof = serde_json::json!({
+            "pi_a": ["0", "0", "1"],
+            "pi_b": [["0", "0"], ["0", "0"], ["1", "0"]],
+            "pi_c": ["0", "0", "1"],
+            "protocol": "groth16",
+            "curve": "bn128"
+        });
+        use base64::Engine;
+        let payload = ActionLogProofPayload {
+            circuit: "ActionRangeProof".to_string(),
+            public_inputs: vec!["1".into(), "0".into(), "1".into(), "100".into(), "5".into()],
+            proof_b64: base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&dummy_proof).unwrap()),
+            vk_id: "ActionRangeProof.dev.vk@v0".into(),
+        };
+        let res = verify_action_log_proof_with_vk(&payload, &"00".repeat(32), &vk).await;
+        assert!(
+            matches!(res, Err(ZkVerifyError::Invalid(_))),
+            "expected Invalid for a hand-rolled tampered proof, got {res:?}"
+        );
     }
 }

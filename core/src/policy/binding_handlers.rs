@@ -294,6 +294,36 @@ pub async fn unbind_policy_with_handle(
     Ok(Json(UnbindResponse { unbound: true }))
 }
 
+/// Look up the policy_id currently bound to `(tenant_id, agent_id)`. Returns
+/// `Ok(None)` when no row is present (the agent has no server-side policy
+/// binding) and `Err` only on DB / lock failure.
+///
+/// Sprint 1 (advisory → enforce): the agent action endpoints
+/// (`/agent/payment/authorize`, etc.) consult this to find which policy to
+/// run `evaluate` against before issuing the authorisation.
+pub fn lookup_bound_policy_id(
+    db_handle: &Arc<DbHandle>,
+    tenant_id: &str,
+    agent_id: &str,
+) -> Result<Option<String>, AppError> {
+    if agent_id.is_empty() {
+        return Err(AppError::BadRequest("agent_id required".into()));
+    }
+    let db = db_handle
+        .lock()
+        .map_err(|_| AppError::Internal("db lock".into()))?;
+    let row: rusqlite::Result<String> = db.query_row(
+        "SELECT policy_id FROM agent_policy_bindings WHERE tenant_id = ?1 AND agent_id = ?2",
+        params![tenant_id, agent_id],
+        |r| r.get::<_, String>(0),
+    );
+    match row {
+        Ok(pid) => Ok(Some(pid)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(AppError::Internal(format!("binding lookup: {e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit tests for the low-level (db-handle driven) binding helpers.

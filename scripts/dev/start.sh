@@ -89,22 +89,8 @@ SAURONID_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1 \
 DASH_PID=$!
 PIDS+=("$DASH_PID")
 
-# ── 4. ZKP Issuer (OID4VCI + proof verification) ───────────────────────────
-log "[4/4] ZKP Issuer → :4000"
-cd "$ROOT/zkp/issuer"
-if [ ! -d "node_modules" ]; then
-  warn "Installation des dépendances npm (issuer)..."
-  npm install --silent
-fi
-if [ ! -d "dist" ]; then
-  warn "Build du service issuer..."
-  npm run build
-fi
-ISSUER_SEED="${ISSUER_SEED:-sauronid-issuer-seed-dev}" \
-SAURON_ISSUER_SHARED_SECRET="${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}" \
-  npm run start &
-ISSUER_PID=$!
-PIDS+=("$ISSUER_PID")
+# (zkp/issuer removed Sprint 3 — OID4VCI service was orphan banking-era code,
+#  no callers in active product surface, feature-flagged off in operator profile A)
 
 # ── Résumé ───────────────────────────────────────────────────────────────────
 echo ""

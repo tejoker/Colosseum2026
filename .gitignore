@@ -32,6 +32,25 @@ yarn-error.log*
 **/build/
 **/.swc/
 
+# ── ZK circuits build artifacts ───────────────────────────────────────────────
+# `**/build/` already ignores zkp/circuits/build/ recursively. We carve out
+# ONLY the committed DEV verification keys (≤10 KB JSON each) so verifier +
+# e2e tests work in CI. zkey + ptau MUST stay un-tracked: huge files and
+# shipping a zkey would publish the DEV trapdoor.
+!zkp/circuits/build/
+!zkp/circuits/build/keys/
+!zkp/circuits/build/keys/*.dev.vkey.json
+# Explicitly re-ignore per-circuit build subdirs and zkey/ptau/wasm/r1cs.
+zkp/circuits/build/*/
+zkp/circuits/build/ptau/
+zkp/circuits/build/**/*.zkey
+zkp/circuits/build/**/*.ptau
+zkp/circuits/build/**/*.r1cs
+zkp/circuits/build/**/*.wasm
+# Re-allow the keys dir + its dev vk files (Git re-evaluates negations top-down).
+!zkp/circuits/build/keys/
+!zkp/circuits/build/keys/*.dev.vkey.json
+
 # ── Python ────────────────────────────────────────────────────────────────────
 **/__pycache__/
 **/*.py[cod]

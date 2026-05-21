@@ -27,7 +27,9 @@ export SAURON_TOKEN_SECRET=$(openssl rand -hex 32)
 export SAURON_JWT_SECRET=$(openssl rand -hex 32)
 export SAURON_OPRF_SEED=$(openssl rand -hex 32)
 export SAURON_ALLOWED_ORIGINS=https://app.example.com,https://api.example.com
-export SAURON_REQUIRE_CALL_SIG=1                           # fail-closed on missing call sigs
+export SAURON_REQUIRE_CALL_SIG=1                           # MANDATORY in production — per-call DPoP signature; missing/invalid → 401
+export SAURON_REQUIRE_AGENT_TYPE=1                         # MANDATORY in production — /agent/register must carry agent_type + checksum_inputs (server-computed digest)
+export SAURON_POLICY_ENFORCEMENT_MODE=enforce              # MANDATORY in production — bound policy denies short-circuit action endpoints with 403
 export SAURON_DISABLE_BANK_KYC=1
 export SAURON_DISABLE_USER_KYC=1
 export SAURON_DISABLE_ZKP=1
@@ -71,7 +73,7 @@ export SAURON_COMPLIANCE_PEP_MODE=enforce
 
 ### Vault Transit (recommended)
 
-Wraps the four root secrets (`SAURON_TOKEN_SECRET`, `SAURON_JWT_SECRET`, `SAURON_OPRF_SEED`, `SAURON_ADMIN_KEY`) so plaintext never appears in env or on disk.
+Wraps the four root secrets (`SAURON_TOKEN_SECRET`, `SAURON_JWT_SECRET`, `SAURON_OPRF_SEED`, `SAURON_ADMIN_KEY`) so plaintext never appears in env or on disk. Implementation: `core/src/secret_provider.rs::VaultTransitClient` — blocking `reqwest` POST against `/v1/transit/decrypt/<key>`, executed on a dedicated OS thread so it is safe inside `#[tokio::main]`. Plaintext is held only in `ServerState` / `AdminAuthConfig` memory until process exit.
 
 ```bash
 # operator (one time per cluster)
@@ -98,6 +100,30 @@ export SAURON_OPRF_SEED_WRAPPED=vault:v1:…
 export SAURON_ADMIN_KEY_WRAPPED=vault:v1:…
 # do NOT set the plaintext SAURON_*_SECRET env vars
 ```
+
+`SAURON_ADMIN_KEYS` (the multi-key rotation list) also accepts `vault:v…` ciphertext entries when `SAURON_VAULT_TRANSIT_ENABLED=1`. Each comma-separated entry is decrypted in place at startup.
+
+#### Migration from plaintext
+
+A wrapping helper lives at `scripts/vault-secret-migration.sh`. Run it on a trusted host with `VAULT_ADDR` / `VAULT_TOKEN` set and the plaintext `SAURON_*_SECRET` env vars exported; it emits the four `*_WRAPPED` lines to stdout. Copy the output into your secrets manager (k8s `Secret`, Doppler, 1Password Secrets Automation, AWS Secrets Manager, …) and then scrub the plaintext from wherever it lived before.
+
+```bash
+SAURON_TOKEN_SECRET=… SAURON_JWT_SECRET=… SAURON_OPRF_SEED=… SAURON_ADMIN_KEY=… \
+  ./scripts/vault-secret-migration.sh
+```
+
+#### Vault auth methods
+
+The current implementation uses a **static token** (`SAURON_VAULT_TOKEN`). For production rollouts you should switch to a short-lived credential issued by a Vault auth method:
+
+- **AppRole** — bootstrapped via a wrapped `secret_id`; ideal for VM / VM-like deployments.
+- **Kubernetes auth** — service-account JWT exchanged for a Vault token at startup; ideal for the k8s manifests under `deploy/`.
+
+Neither is wired in this sprint. Upgrade path: implement a `VaultTokenSource` trait in `secret_provider.rs` with `Static`, `AppRole`, and `Kubernetes` variants; refresh tokens on the existing decrypt path. Tracked under "Vault token lifecycle" in `docs/roadmap.md`.
+
+#### Past states
+
+Prior to S6 the resolver shipped only the env-var fallback path with a stubbed Vault call. The stub has been removed; the live HTTP client is the only Vault code path.
 
 ### AWS KMS (planned, Phase 1B)
 

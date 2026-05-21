@@ -19,11 +19,11 @@ use sauron_core::policy::binding_handlers::{
 };
 use sauron_core::policy::compiler::compile;
 use sauron_core::policy::handlers::{
-    get_spend_inner, list_spend_log_inner, record_spend_inner, RecordSpendBody,
-    SpendLogQuery, SpendQuery,
+    enforce_bound_policy_with_handles, get_spend_inner, list_spend_log_inner, record_spend_inner,
+    BoundPolicyOutcome, RecordSpendBody, SpendLogQuery, SpendQuery,
 };
 use sauron_core::policy::parser::parse;
-use sauron_core::policy::PolicyStore;
+use sauron_core::policy::{Action, PolicyStore};
 use sauron_core::repository::Repo;
 
 fn build_test_repo(test_name: &str) -> Repo {
@@ -381,6 +381,154 @@ fn binding_post_rejects_unknown_policy_id() {
                 assert!(s.contains("policy_id"), "msg: {s}");
             }
             other => panic!("expected BadRequest, got {other:?}"),
+        }
+    });
+}
+
+// ─── Sprint 1: bound-policy enforcement at /agent/payment/authorize ───
+//
+// These tests exercise the same lookup-then-evaluate path the
+// `agent_payment_authorize` handler runs through `enforce_bound_policy_with_handles`.
+// They use the low-level handle variant so we don't need a full ServerState.
+
+const FX_DENY_TRANSFER: &str = r#"
+version: "1"
+agent: bound_deny_agent
+binding:
+  allowed_tools:
+    - search
+"#;
+
+const FX_ALLOW_SEARCH: &str = r#"
+version: "1"
+agent: bound_allow_agent
+binding:
+  allowed_tools:
+    - search
+    - payment_initiation
+"#;
+
+fn build_enforce_state(test_name: &str) -> (Arc<DbHandle>, Arc<PolicyStore>, Repo) {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "sauron-enforce-{pid}-{nanos}-{test_name}.db"
+    ));
+    let _ = std::fs::remove_file(&path);
+    let handle = Arc::new(open_db_at(path.to_str().unwrap(), 2));
+    let store = Arc::new(PolicyStore::new(Arc::clone(&handle)));
+    let repo = Repo::Sqlite(Arc::clone(&handle));
+    (handle, store, repo)
+}
+
+fn seed_policy_yaml(store: &Arc<PolicyStore>, tenant_id: &str, yaml: &str) -> String {
+    let compiled = compile(parse(yaml).unwrap()).unwrap();
+    let pid = compiled.policy_id.clone();
+    store.upsert_tenant(tenant_id, compiled).unwrap();
+    pid
+}
+
+#[test]
+fn bound_policy_denies_action_returns_deny_outcome() {
+    let (db, store, repo) = build_enforce_state("bound_policy_deny");
+    rt().block_on(async {
+        seed_agent(&db, "default", "agt-deny");
+        let policy_id = seed_policy_yaml(&store, "default", FX_DENY_TRANSFER);
+        bind_policy_with_handles(
+            &store,
+            &db,
+            "default",
+            "agt-deny",
+            BindPolicyBody {
+                policy_id: policy_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The bound policy only allows the `search` tool; a `transfer`
+        // tool call MUST be denied by the allowlist invariant.
+        let action = Action {
+            action_id: "act-deny".into(),
+            tool: "transfer".into(),
+            amount_usd: Some(10.0),
+            timestamp: 1_700_000_000,
+            ..Default::default()
+        };
+        let outcome = enforce_bound_policy_with_handles(
+            &db,
+            &store,
+            &repo,
+            "default",
+            "agt-deny",
+            &action,
+        )
+        .await
+        .expect("enforce ok");
+
+        match outcome {
+            BoundPolicyOutcome::Deny {
+                policy_id: pid,
+                check,
+                ..
+            } => {
+                assert_eq!(pid, policy_id);
+                assert!(
+                    check.contains("allowlist") || check.contains("tool"),
+                    "deny check should be the tool allowlist: {check}",
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn bound_policy_allows_action_returns_allow_outcome() {
+    let (db, store, repo) = build_enforce_state("bound_policy_allow");
+    rt().block_on(async {
+        seed_agent(&db, "default", "agt-allow");
+        let policy_id = seed_policy_yaml(&store, "default", FX_ALLOW_SEARCH);
+        bind_policy_with_handles(
+            &store,
+            &db,
+            "default",
+            "agt-allow",
+            BindPolicyBody {
+                policy_id: policy_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // `payment_initiation` IS in the allowed_tools list — verdict
+        // must resolve to Allow.
+        let action = Action {
+            action_id: "act-allow".into(),
+            tool: "payment_initiation".into(),
+            amount_usd: Some(1.0),
+            timestamp: 1_700_000_000,
+            ..Default::default()
+        };
+        let outcome = enforce_bound_policy_with_handles(
+            &db,
+            &store,
+            &repo,
+            "default",
+            "agt-allow",
+            &action,
+        )
+        .await
+        .expect("enforce ok");
+
+        match outcome {
+            BoundPolicyOutcome::Allow { policy_id: pid } => {
+                assert_eq!(pid, policy_id);
+            }
+            other => panic!("expected Allow, got {other:?}"),
         }
     });
 }

@@ -226,11 +226,70 @@ under the hood (M1 dep-choice — see the file header for the rationale).
 | Toxic-waste destruction | best-effort `head -c /dev/urandom`| audited destruction by every party |
 | Beacon                  | none                              | public beacon (e.g. BTC block hash)|
 | Filename                | `*_final.dev.zkey`, `*.dev.vkey.json` | `*_final.zkey`, `*_verification_key.json` |
+| Disclaimer field        | `_disclaimer: "DEV ONLY - ..."`  | absent                             |
 | Threat model            | local-machine attacker can forge proofs | requires collusion of all ceremony parties |
 
 The Rust + TS verifiers both look for the PROD filenames first and fall back
 to DEV. Migration to PROD = drop the PROD files in the keys dir; the verifier
 picks them up automatically and the DEV files can then be removed.
+
+### Disclaimer fail-close (Rust verifier)
+
+`core/src/zk_verifier.rs::enforce_dev_vkey_policy` inspects every loaded vk
+JSON for a top-level `_disclaimer` field. When found:
+
+- In a development runtime (`ENV=development`/`dev`/`local`), it emits a
+  one-shot `[WARN] using DEV verification key for circuit X — production
+  must rotate after real ceremony` and proceeds.
+- In any other runtime (default — `ENV` unset is treated as production),
+  verification is refused with
+  `ZkVerifyError::KeyNotFound("refusing to use DEV verification key in
+  production runtime: ...")`. The proof is rejected; no fall-through to
+  snarkjs.
+
+This is a fail-closed guard against the most likely operational mistake:
+shipping a DEV vk into a prod build because someone forgot the ceremony
+step. The proper recovery is to drop the real-ceremony vk in the same
+directory (the verifier prefers the PROD filename) and remove the DEV file.
+
+## Running the e2e test
+
+```
+cargo test --manifest-path core/Cargo.toml --test zk_e2e
+```
+
+What it does (single test, `action_log_proof_round_trip_commit_prove_verify_tamper`):
+
+1. **Customer side** — synthesises a 10-receipt action log
+   `(tool, amount_usd, timestamp, agent_id, _, _)`.
+2. **Commit** — hashes each receipt with Poseidon and builds the action-log
+   Merkle root (depth 20).
+3. **Prove** — invokes `core/tests/zk_e2e_helper.js` (a small Node helper)
+   which calls `snarkjs.groth16.fullProve` against the DEV `ActionSumBound`
+   wasm + zkey. The window is the first 4 receipts (`N=4` in the main
+   declaration); the proven statement is `Σ amount_usd ≤ 1000` (actual sum
+   = 100).
+4. **Server** — calls
+   `sauron_core::zk_verifier::verify_action_log_proof_with_vk(payload,
+   expected_root_hex, &dev_vk_path).await` and asserts `Ok(())`. The
+   FS-loader entry point `verify_action_log_proof(..., FsVKeyLoader)` is
+   exercised in the same test for parity.
+5. **Tamper** — flips `pi_a[0]` to `"1"` in the proof JSON, re-base64s,
+   re-submits, asserts `Err(ZkVerifyError::Invalid(_))`.
+
+The test sets `SAURON_ENV=dev` so the disclaimer fail-close passes through.
+In any other runtime the same test would (correctly) refuse the DEV vk.
+
+**Skip behaviour.** The test silently exits 0 with a `TEST SKIPPED` stderr
+message when any of the following is unavailable:
+- `snarkjs`, `circom`, `node` not on `$PATH`
+- `zkp/circuits/build/keys/ActionSumBound.dev.vkey.json` absent
+- `zkp/circuits/build/ActionSumBound/ActionSumBound_final.dev.zkey` absent
+- `zkp/circuits/build/ActionSumBound/ActionSumBound_js/ActionSumBound.wasm` absent
+- `zkp/sdk/node_modules` absent
+
+This keeps CI green on machines without the ZK toolchain. Run
+`bash zkp/ceremony/dev_setup.sh` once locally to populate the artifacts.
 
 ## Threat model
 

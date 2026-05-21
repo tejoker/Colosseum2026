@@ -401,13 +401,13 @@ pub async fn register_agent(
     // SAURON_REQUIRE_AGENT_TYPE=0 explicitly. In dev mode (ENV=development),
     // legacy mode is allowed with a warning so existing test scenarios keep
     // working without modification.
-    let require_agent_type = match std::env::var("SAURON_REQUIRE_AGENT_TYPE").ok() {
-        Some(v) => {
-            let low = v.to_ascii_lowercase();
-            v == "1" || low == "true" || low == "yes"
-        }
-        None => !crate::runtime_mode::is_development_runtime(),
-    };
+    // Sprint 1: defer to runtime_mode helper so dev/prod defaults are
+    // shared with the other SAURON_REQUIRE_* gates. Dev: advisory; Prod: enforce.
+    let require_agent_type = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_AGENT_TYPE",
+        /* dev_default */ false,
+        /* prod_default */ true,
+    );
 
     let computed_checksum_pair: Option<(String, String, String)> = if !payload.agent_type.is_empty() {
         let inputs = payload
@@ -1648,13 +1648,13 @@ pub async fn require_call_signature(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let enforce = match std::env::var("SAURON_REQUIRE_CALL_SIG").ok() {
-        Some(v) => {
-            let low = v.to_ascii_lowercase();
-            v == "1" || low == "true" || low == "yes"
-        }
-        None => !crate::runtime_mode::is_development_runtime(),
-    };
+    // Sprint 1: defer to runtime_mode helper so dev/prod defaults are
+    // shared. Dev: advisory (log + pass-through); Prod: enforce (401 on miss).
+    let enforce = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_CALL_SIG",
+        /* dev_default */ false,
+        /* prod_default */ true,
+    );
 
     let (parts, body) = req.into_parts();
     let body_bytes = axum::body::to_bytes(body, CALL_SIG_BODY_LIMIT)

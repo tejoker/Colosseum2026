@@ -51,20 +51,64 @@ fn admin_cfg() -> &'static AdminAuthConfig {
 
 fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
     let mut full_write_keys: Vec<Vec<u8>> = Vec::new();
-    if let Ok(k) = std::env::var("SAURON_ADMIN_KEY") {
-        let t = k.trim();
-        if !t.is_empty() {
-            full_write_keys.push(t.as_bytes().to_vec());
+
+    // Primary admin key: route through `secret_provider::resolve_secret` so a
+    // `SAURON_ADMIN_KEY_WRAPPED` Vault Transit ciphertext is honored when
+    // `SAURON_VAULT_TRANSIT_ENABLED=1`. Falls back to plaintext env otherwise.
+    match crate::secret_provider::resolve_secret("SAURON_ADMIN_KEY") {
+        Ok(b) if !b.is_empty() => full_write_keys.push(b),
+        Ok(_) => {}
+        Err(crate::secret_provider::ResolveError::NotFound(_)) => {}
+        Err(e) => {
+            return Err(format!(
+                "admin auth: SAURON_ADMIN_KEY resolver error: {e}"
+            ));
         }
     }
+
+    // Multi-key list. Each comma-separated entry is treated as either a plain
+    // key OR a `vault:v...` ciphertext when Vault Transit is enabled — the
+    // latter is decrypted in place. Plain entries pass through unchanged.
     if let Ok(list) = std::env::var("SAURON_ADMIN_KEYS") {
-        for part in list.split(',') {
+        let vault_enabled = std::env::var("SAURON_VAULT_TRANSIT_ENABLED")
+            .map(|v| {
+                let lo = v.to_ascii_lowercase();
+                v == "1" || lo == "true" || lo == "yes"
+            })
+            .unwrap_or(false);
+        for (i, part) in list.split(',').enumerate() {
             let t = part.trim();
-            if !t.is_empty() {
+            if t.is_empty() {
+                continue;
+            }
+            if vault_enabled && t.starts_with("vault:v") {
+                let client = match crate::secret_provider::VaultTransitClient::from_env() {
+                    Ok(Some(c)) => c,
+                    Ok(None) => {
+                        return Err(format!(
+                            "admin auth: SAURON_ADMIN_KEYS entry #{i} is a Vault ciphertext but Vault Transit is not enabled"
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "admin auth: cannot build Vault client for SAURON_ADMIN_KEYS entry #{i}: {e}"
+                        ));
+                    }
+                };
+                match client.decrypt_blocking(t) {
+                    Ok(pt) => full_write_keys.push(pt),
+                    Err(e) => {
+                        return Err(format!(
+                            "admin auth: failed to decrypt SAURON_ADMIN_KEYS entry #{i}: {e}"
+                        ));
+                    }
+                }
+            } else {
                 full_write_keys.push(t.as_bytes().to_vec());
             }
         }
     }
+
     if full_write_keys.is_empty() {
         if let Some(b) = crate::state::development_fallback_admin_key_material() {
             eprintln!(
@@ -432,6 +476,9 @@ pub struct HealthResponse {
     pub runtime: &'static str,
     pub call_sig_enforce: bool,
     pub require_agent_type: bool,
+    /// Sprint 1: surfaces SAURON_POLICY_ENFORCEMENT_MODE so operators
+    /// can confirm the server is fail-closed before traffic flips.
+    pub policy_enforcement_mode: &'static str,
     pub bitcoin_anchor: HealthComponent,
     pub solana_anchor: HealthComponent,
     pub database: HealthComponent,
@@ -472,20 +519,18 @@ pub async fn health(
         }
     };
 
-    let call_sig_enforce = match std::env::var("SAURON_REQUIRE_CALL_SIG").ok() {
-        Some(v) => {
-            let low = v.to_ascii_lowercase();
-            v == "1" || low == "true" || low == "yes"
-        }
-        None => !crate::runtime_mode::is_development_runtime(),
-    };
-    let require_agent_type = match std::env::var("SAURON_REQUIRE_AGENT_TYPE").ok() {
-        Some(v) => {
-            let low = v.to_ascii_lowercase();
-            v == "1" || low == "true" || low == "yes"
-        }
-        None => !crate::runtime_mode::is_development_runtime(),
-    };
+    // Sprint 1: shared runtime_mode helper. Dev defaults advisory, prod enforce.
+    let call_sig_enforce = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_CALL_SIG",
+        false,
+        true,
+    );
+    let require_agent_type = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_AGENT_TYPE",
+        false,
+        true,
+    );
+    let policy_enforcement_mode = crate::runtime_mode::policy_enforcement_mode();
 
     let mut warnings: Vec<String> = Vec::new();
 
@@ -536,6 +581,18 @@ pub async fn health(
     if runtime == "production" && !require_agent_type {
         warnings.push("Production runtime but SAURON_REQUIRE_AGENT_TYPE is off — operators can supply unverified checksums".into());
     }
+    if runtime == "production"
+        && matches!(
+            policy_enforcement_mode,
+            crate::runtime_mode::PolicyEnforcementMode::Advisory
+                | crate::runtime_mode::PolicyEnforcementMode::Off
+        )
+    {
+        warnings.push(format!(
+            "Production runtime but SAURON_POLICY_ENFORCEMENT_MODE is '{}' — bound policy denies do not block action endpoints",
+            policy_enforcement_mode.as_str()
+        ));
+    }
     if flag("SAURON_VAULT_TRANSIT_ENABLED") == false && runtime == "production" {
         warnings.push("Production runtime but Vault Transit is not enabled — root secrets in plain env".into());
     }
@@ -547,6 +604,7 @@ pub async fn health(
         runtime,
         call_sig_enforce,
         require_agent_type,
+        policy_enforcement_mode: policy_enforcement_mode.as_str(),
         bitcoin_anchor,
         solana_anchor,
         database,
