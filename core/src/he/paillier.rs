@@ -133,6 +133,12 @@ pub struct Ciphertext {
 impl PaillierPublicKey {
     /// Encrypt a message m ∈ [0, n).
     ///
+    /// # RNG requirement
+    ///
+    /// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`).
+    /// `r` becomes part of the ciphertext; predictable `r` makes the
+    /// scheme deterministic and breaks IND-CPA.
+    ///
     /// NEEDS_CRYPTO_REVIEW: r is sampled uniformly from Z_n* via rejection
     /// sampling. Not constant-time. Side-channel resistance is out of scope.
     pub fn encrypt(
@@ -179,6 +185,13 @@ impl PaillierPublicKey {
     /// same plaintext. Adds zero homomorphically by multiplying by Enc(0)
     /// with new randomness.
     ///
+    /// # RNG requirement
+    ///
+    /// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`).
+    /// Predictable randomness defeats unlinkability — the whole point of
+    /// re-randomisation is that a third party cannot tell two ciphertexts
+    /// of the same plaintext apart.
+    ///
     /// NEEDS_CRYPTO_REVIEW: rejection sampling over r, not constant-time.
     pub fn rerandomize(
         &self,
@@ -202,6 +215,12 @@ impl PaillierPublicKey {
 
 impl PaillierPrivateKey {
     /// Generate a fresh keypair with the requested modulus bit length.
+    ///
+    /// # RNG requirement
+    ///
+    /// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`).
+    /// A predictable RNG here exposes the private key directly — every
+    /// candidate prime is derivable from the seed.
     ///
     /// NEEDS_CRYPTO_REVIEW: prime generation uses Miller-Rabin with
     /// [`MILLER_RABIN_ROUNDS`] rounds (default 40). Witness distribution

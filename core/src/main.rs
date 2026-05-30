@@ -15,8 +15,8 @@ use sauron_core::issuer_runtime::IssuerVerifyError;
 use sauron_core::policy::{self, AssuranceLevel};
 use sauron_core::risk;
 use sauron_core::middleware::{
-    audit_log_middleware, global_rate_limit_middleware, init_audit_sink, GlobalRateLimitConfig,
-    GlobalRateLimiter,
+    audit_log_middleware, global_rate_limit_middleware, init_audit_sink, security_headers_middleware,
+    GlobalRateLimitConfig, GlobalRateLimiter,
 };
 use sauron_core::routes::{
     admin_router, agent_spend_router, attestation_router, audit_reports_router, audit_router,
@@ -41,6 +41,15 @@ type HmacSha256 = Hmac<Sha256>;
 
 fn assert_production_sqlite_acknowledged() {
     if sauron_core::runtime_mode::is_development_runtime() {
+        return;
+    }
+    // The acknowledgement only applies to the single-node SQLite data tier.
+    // With the Postgres backend selected, all tables are ported (Plan 2
+    // M1-M4) and HA is the operator's Postgres concern, so the flag is moot.
+    if std::env::var("SAURON_DB_BACKEND")
+        .map(|v| v.eq_ignore_ascii_case("postgres"))
+        .unwrap_or(false)
+    {
         return;
     }
     let ok = std::env::var("SAURON_ACCEPT_SINGLE_NODE_SQLITE")
@@ -407,6 +416,10 @@ async fn main() {
         // and `/agent/*` handler has access via `Extension<TenantId>`.
         .layer(middleware::from_fn(sauron_tenancy::extract_tenant))
         .layer(middleware::from_fn(http_metrics_middleware))
+        // Q4: stamp response security headers (nosniff, XFO/CSP frame-ancestors,
+        // Referrer-Policy, HSTS) on every response. Complements the locked-down
+        // CORS layer below.
+        .layer(middleware::from_fn(security_headers_middleware))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
@@ -936,11 +949,12 @@ async fn handle_register(
                             params![commitment_hex, ts],
                         );
                     }
-                    println!(
-                        "[MERKLE] Feuille #{} insérée | root={} | preuves={}",
-                        receipt.leaf_index,
-                        &receipt.merkle_root[..16],
-                        receipt.merkle_proof.len()
+                    tracing::debug!(
+                        target: "sauron::merkle",
+                        leaf_index = receipt.leaf_index,
+                        root_prefix = &receipt.merkle_root[..16],
+                        proofs = receipt.merkle_proof.len(),
+                        "merkle leaf inserted"
                     );
                     merkle_root_out = Some(receipt.merkle_root);
                     merkle_proof_out = Some(receipt.merkle_proof);
@@ -949,7 +963,7 @@ async fn handle_register(
                 Err(e) => {
                     // Le commitment est invalide : on rejette la requête pour éviter
                     // d'accepter un KYC sans pouvoir émettre la preuve.
-                    eprintln!("[MERKLE][ERREUR] commitment invalide : {}", e);
+                    tracing::warn!(target: "sauron::merkle", error = %e, "invalid commitment rejected");
                     return Err(StatusCode::BAD_REQUEST);
                 }
             }
@@ -957,10 +971,11 @@ async fn handle_register(
         // ────────────────────────────────────────────────────────
 
         st.log("REGISTER", "OK", &hex_ki[..16]);
-        println!(
-            "[FLUX 1] POST /register | group_size={} merkle_leaves={}",
-            st.user_group.members.len(),
-            st.merkle_ledger.len()
+        tracing::info!(
+            target: "sauron::register",
+            group_size = st.user_group.members.len(),
+            merkle_leaves = st.merkle_ledger.len(),
+            "register accepted"
         );
     }
 
@@ -2321,9 +2336,12 @@ async fn kyc_consent(
         );
     }
 
-    println!(
-        "[CONSENT] User {} consented for site {} | request_id={}",
-        payload.email, site_name, payload.request_id
+    // Email is PII — log site + request_id only.
+    tracing::info!(
+        target: "sauron::consent",
+        site = %site_name,
+        request_id = %payload.request_id,
+        "user consented"
     );
 
     Ok(Json(KycConsentResponse {
@@ -2357,9 +2375,11 @@ struct KycRetrieveBody {
 
 async fn kyc_retrieve(
     agent_binding: Option<Extension<DelegatedAgentBinding>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<KycRetrieveBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if !sauron_core::feature_flags::user_kyc_enabled() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2425,7 +2445,7 @@ async fn kyc_retrieve(
         let db = st.db.lock().unwrap();
         risk::check_and_increment(
             &db,
-            &risk::bucket_kyc_retrieve(&payload.site_name, &user_ki),
+            &risk::bucket_kyc_retrieve(&tenant_id, &payload.site_name, &user_ki),
             now,
             risk::limit_kyc_retrieve(),
         )
@@ -2769,9 +2789,13 @@ async fn kyc_retrieve(
         None
     };
 
-    println!(
-        "[CONSENT] KYC retrieved by site {} | is_agent={} user_ring={} agent_ring={}",
-        payload.site_name, is_agent, human_in_user_ring, agent_in_agent_ring
+    tracing::info!(
+        target: "sauron::consent",
+        site = %payload.site_name,
+        is_agent,
+        user_ring = human_in_user_ring,
+        agent_ring = agent_in_agent_ring,
+        "kyc retrieved"
     );
 
     let issuer_controls = {
@@ -3390,7 +3414,7 @@ async fn agent_payment_authorize(
         let db = st.db.lock().unwrap();
         risk::check_and_increment(
             &db,
-            &risk::bucket_payment_authorize(&agent_id),
+            &risk::bucket_payment_authorize(&tenant_id, &agent_id),
             now,
             risk::limit_payment_authorize(),
         )
@@ -4065,9 +4089,11 @@ async fn agent_egress_log(
 }
 
 async fn agent_kyc_consent(
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<AgentKycConsentBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     // 1. Verify A-JWT
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let claims = agent::verify_ajwt(&jwt_secret, &payload.ajwt)
@@ -4103,7 +4129,7 @@ async fn agent_kyc_consent(
         let db = st.db.lock().unwrap();
         risk::check_and_increment(
             &db,
-            &risk::bucket_agent_kyc_consent(&payload.site_name, &human_key_image),
+            &risk::bucket_agent_kyc_consent(&tenant_id, &payload.site_name, &human_key_image),
             consent_guard_ts,
             risk::limit_agent_kyc_consent(),
         )
@@ -4327,10 +4353,11 @@ async fn agent_kyc_consent(
         );
     }
 
-    println!(
-        "[AGENT] KYC consent issued | agent={} site={}",
-        &agent_id[..16],
-        payload.site_name
+    tracing::info!(
+        target: "sauron::agent",
+        agent = &agent_id[..16],
+        site = %payload.site_name,
+        "kyc consent issued"
     );
 
     Ok(Json(serde_json::json!({
@@ -4404,9 +4431,11 @@ fn default_vc_ttl() -> i64 {
 
 async fn agent_vc_issue(
     headers: HeaderMap,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<AgentVcIssueBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if !sauron_core::feature_flags::zkp_issuer_enabled() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -4527,7 +4556,7 @@ async fn agent_vc_issue(
         let db = st.db.lock().unwrap();
         risk::check_and_increment(
             &db,
-            &risk::bucket_agent_vc_issue(&human_key_image),
+            &risk::bucket_agent_vc_issue(&tenant_id, &human_key_image),
             vc_issue_ts,
             risk::limit_agent_vc_issue(),
         )
@@ -4822,10 +4851,11 @@ async fn agent_vc_issue(
         );
     }
 
-    println!(
-        "[KYA] Self-sovereign VC issued | agent={} scope={:?}",
-        &agent_id[..16],
-        payload.scope
+    tracing::info!(
+        target: "sauron::kya",
+        agent = &agent_id[..16],
+        scope = ?payload.scope,
+        "self-sovereign VC issued"
     );
 
     Ok(Json(serde_json::json!({

@@ -33,7 +33,8 @@
 //! Only the cohort-level aggregate is decrypted, and only by an operator
 //! who has access to the cohort private key.
 
-use num_traits::Zero;
+use num_integer::Integer;
+use num_traits::{One, Zero};
 use serde::{Deserialize, Serialize};
 
 use crate::he::paillier::{Ciphertext, HeError, PaillierPrivateKey, PaillierPublicKey};
@@ -57,6 +58,11 @@ pub struct HeAggregator {
 
 impl HeAggregator {
     /// Initialise an aggregator with a fresh Enc(0) under the given key.
+    ///
+    /// # RNG requirement
+    ///
+    /// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`)
+    /// since the initial Enc(0) is the seed of the running sum.
     ///
     /// NEEDS_CRYPTO_REVIEW: the initial ciphertext IS fresh randomness, so
     /// nothing about the cohort leaks through the seed value alone.
@@ -88,12 +94,28 @@ impl HeAggregator {
     /// Homomorphically add a customer ciphertext into the running sum.
     /// Does not require the private key. Increments the contribution counter.
     ///
-    /// NEEDS_CRYPTO_REVIEW: this method does not validate that the
-    /// submitted ciphertext is well-formed beyond modulus membership.
-    /// Production systems should also bind the submission to a customer
-    /// signature / attestation to prevent griefing by malicious clients.
+    /// Membership check: rejects `c = 0`, `c ≥ n²`, and `gcd(c, n) ≠ 1`. The
+    /// last test is the cryptographic-review F-3 hardening: a ciphertext
+    /// whose value shares a factor with `n` would (a) leak the factorisation
+    /// of `n` to anyone who can run a successful gcd against it and
+    /// (b) decrypt to undefined garbage. A correctly-encrypted Paillier
+    /// ciphertext is `(1 + m·n) · r^n mod n²` with `r ∈ Z_n*`, which
+    /// satisfies `gcd(c, n) = 1` by construction; honest clients never
+    /// trip this check.
+    ///
+    /// What this check does **not** defend against: a malicious client
+    /// submitting `Enc(huge value)` to bias the aggregate. That requires a
+    /// protocol-layer range proof on the submitted plaintext (see
+    /// `docs/crypto-review-attestation.md` F-3). The gcd check is a strict
+    /// improvement but **not** the soundness-correct path on its own.
     pub fn add_encrypted(&mut self, ct: &Ciphertext) -> Result<(), HeError> {
         if ct.c.is_zero() || ct.c >= self.pk.n_squared {
+            return Err(HeError::InvalidCiphertext);
+        }
+        // F-3 hardening: reject ciphertexts that share a factor with n. We
+        // gcd against n (not n²) — gcd(c, n²) collapses to gcd(c, n) for
+        // semiprime n = p·q, and gcd against n is half the work.
+        if !ct.c.gcd(&self.pk.n).is_one() {
             return Err(HeError::InvalidCiphertext);
         }
         self.sum_ciphertext = self.pk.add(&self.sum_ciphertext, ct);
@@ -173,5 +195,30 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(22);
         let agg = HeAggregator::new(sk.public.clone(), &mut rng).unwrap();
         assert_eq!(agg.finalize(&sk).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_aggregator_rejects_ciphertext_sharing_factor_with_n() {
+        // F-3 hardening: n = 17*19 = 323. A ciphertext c = 17 shares the
+        // factor 17 with n, so gcd(c, n) = 17 ≠ 1 → reject.
+        let sk = small_keypair();
+        let mut rng = StdRng::seed_from_u64(23);
+        let mut agg = HeAggregator::new(sk.public.clone(), &mut rng).unwrap();
+        let bad_p = Ciphertext { c: BigUint::from(17u32) };
+        let bad_q = Ciphertext { c: BigUint::from(19u32) };
+        let bad_pq = Ciphertext { c: BigUint::from(17u32 * 19) };
+        assert!(matches!(
+            agg.add_encrypted(&bad_p),
+            Err(HeError::InvalidCiphertext)
+        ));
+        assert!(matches!(
+            agg.add_encrypted(&bad_q),
+            Err(HeError::InvalidCiphertext)
+        ));
+        assert!(matches!(
+            agg.add_encrypted(&bad_pq),
+            Err(HeError::InvalidCiphertext)
+        ));
+        assert_eq!(agg.n_contributions, 0);
     }
 }

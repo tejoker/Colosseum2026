@@ -125,10 +125,14 @@ impl MerkleCommitmentLedger {
         ledger.tree.commit();
 
         let count = ledger.leaves.len();
-        println!(
-            "[MERKLE] Ledger reconstruit depuis DB : {} feuille(s) | root={}",
-            count,
-            ledger.root_hex().unwrap_or_else(|| "∅".to_string())
+        // Structured + debug-level so the Merkle root is not disclosed on
+        // stdout in production logs; operators who need it opt in via
+        // RUST_LOG=sauron::merkle=debug.
+        tracing::debug!(
+            target: "sauron::merkle",
+            leaves = count,
+            root = %ledger.root_hex().unwrap_or_else(|| "∅".to_string()),
+            "ledger reconstructed from db"
         );
         Ok(ledger)
     }

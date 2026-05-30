@@ -599,7 +599,7 @@ pub async fn register_agent(
         let now = crate::ajwt_support::now_secs();
         risk::check_and_increment(
             &db,
-            &risk::bucket_agent_register(&human_key_image),
+            &risk::bucket_agent_register(&tenant_id, &human_key_image),
             now,
             risk::limit_agent_register(),
         )
@@ -856,10 +856,11 @@ pub async fn register_agent(
         let st = state.read().unwrap();
         st.log("AGENT_REGISTER", "OK", &agent_id);
     }
-    println!(
-        "[AGENT] Registered agent_id={} human={}",
-        agent_id,
-        &human_key_image[..16]
+    tracing::info!(
+        target: "sauron::agent",
+        %agent_id,
+        human = &human_key_image[..16],
+        "agent registered"
     );
 
     Ok(Json(RegisterAgentResponse {
@@ -1128,7 +1129,7 @@ pub async fn revoke_agent(
         let st = state.read().unwrap();
         st.log("AGENT_REVOKE", "OK", &agent_id);
     }
-    println!("[AGENT] Revoked agent_id={}", agent_id);
+    tracing::info!(target: "sauron::agent", %agent_id, "agent revoked");
 
     Ok(Json(
         serde_json::json!({ "revoked": true, "agent_id": agent_id }),
@@ -1179,7 +1180,7 @@ pub async fn verify_agent_token(
         let now = crate::ajwt_support::now_secs();
         if risk::check_and_increment(
             &db,
-            &risk::bucket_agent_verify(aid),
+            &risk::bucket_agent_verify(&tenant_id, aid),
             now,
             risk::limit_agent_verify(),
         )

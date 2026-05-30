@@ -262,6 +262,7 @@ class PolicyCache:
         refresh_interval_s: float = 60.0,
         http_session: Optional[requests.Session] = None,
         tenant_id: Optional[str] = None,
+        timeout_s: float = 10.0,
     ) -> None:
         """Construct a policy cache.
 
@@ -286,6 +287,7 @@ class PolicyCache:
         self._refresh_interval_s = float(refresh_interval_s)
         self._session = http_session if http_session is not None else requests.Session()
         self._tenant_id = tenant_id
+        self._timeout_s = float(timeout_s)
         self._entries: Dict[str, CompiledPolicy] = {}
         self._timers: Dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
@@ -360,7 +362,7 @@ class PolicyCache:
         # Sprint 11: forward tenant header when configured. ADDITIVE only.
         if self._tenant_id:
             headers["x-sauron-tenant-id"] = self._tenant_id
-        resp = self._session.get(url, headers=headers, timeout=10)
+        resp = self._session.get(url, headers=headers, timeout=self._timeout_s)
         if not resp.ok:
             raise RuntimeError(f"GET {url} -> {resp.status_code}")
         ast = resp.json()

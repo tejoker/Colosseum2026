@@ -52,7 +52,7 @@ pub fn open_db_at(path: &str, pool_size: u32) -> DbHandle {
         init_schema(&conn);
     }
 
-    println!("[DB] SQLite opened at '{}' with pool_size={}.", path, pool_size);
+    tracing::info!(target: "sauron::db", %path, pool_size, "SQLite opened");
 
     DbHandle { pool }
 }
@@ -737,9 +737,10 @@ pub fn init_schema(conn: &Connection) {
             )
             .unwrap_or(0);
         if revoked > 0 {
-            println!(
-                "[DB][MIGRATION] Revoked {} legacy delegated_nonbank agent(s).",
-                revoked
+            tracing::info!(
+                target: "sauron::db",
+                revoked,
+                "migration revoked legacy delegated_nonbank agents"
             );
         }
     }

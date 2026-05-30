@@ -37,7 +37,12 @@ fn prop_laplace_unbiased() {
 fn prop_gaussian_variance() {
     for seed in 0..10u64 {
         let mut rng = StdRng::seed_from_u64(seed + 100);
-        let eps = 0.5 + (seed as f64) * 0.1;
+        // The classic Gaussian mechanism's σ bound is only valid for ε ≤ 1
+        // (MAX_GAUSSIAN_EPSILON); ε > 1 needs the analytic Gaussian
+        // (Balle-Wang 2018), not yet implemented. Sweep 0.50..0.95 to stay
+        // inside the supported domain — the old 0.5 + 0.1·seed reached 1.4 and
+        // was rejected at construction.
+        let eps = 0.5 + (seed as f64) * 0.05;
         let m = GaussianMechanism::new(eps, 1e-5, 1.0).unwrap();
         let n = 20_000;
         let samples: Vec<f64> = (0..n).map(|_| m.add_noise(0.0, &mut rng)).collect();

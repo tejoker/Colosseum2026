@@ -92,6 +92,33 @@ pub fn upsert_he_aggregation(
     Ok(())
 }
 
+/// Return a cohort_id already bound to `pk_id` that differs from
+/// `expected_cohort`, if any.
+///
+/// Enforces the invariant that one Paillier public key serves exactly one
+/// cohort. Without it, a client could submit a ciphertext encrypted under
+/// cohort A's key while declaring `cohort_id = B`, folding A's value into B's
+/// aggregate (key-confusion contamination). The binding is trust-on-first-use:
+/// the first cohort observed for a `pk_id` owns it; later cross-cohort reuse
+/// is reported here so the handler can reject it.
+pub fn conflicting_cohort_for_pk(
+    db: &DbHandle,
+    pk_id: &str,
+    expected_cohort: &str,
+) -> Result<Option<String>, HeStoreError> {
+    let conn = db.lock().map_err(|e| HeStoreError::Storage(e.to_string()))?;
+    let row: Option<String> = conn
+        .query_row(
+            "SELECT cohort_id FROM he_aggregations \
+             WHERE pk_id = ?1 AND cohort_id <> ?2 LIMIT 1",
+            params![pk_id, expected_cohort],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| HeStoreError::Storage(e.to_string()))?;
+    Ok(row)
+}
+
 /// Fetch one aggregation row by id. Returns `Ok(None)` if absent.
 pub fn get_he_aggregation(
     db: &DbHandle,
@@ -161,6 +188,29 @@ mod tests {
         upsert_he_aggregation(&db, &row).unwrap();
         let got = get_he_aggregation(&db, "agg_1").unwrap().unwrap();
         assert_eq!(got, row);
+    }
+
+    #[test]
+    fn test_conflicting_cohort_detects_cross_cohort_pk_reuse() {
+        let db = temp_db();
+        // pk_demo first bound to coh_a (sample_row uses cohort coh_a, pk_demo).
+        upsert_he_aggregation(&db, &sample_row("agg_a")).unwrap();
+
+        // Same cohort, same key → no conflict.
+        assert_eq!(
+            conflicting_cohort_for_pk(&db, "pk_demo", "coh_a").unwrap(),
+            None
+        );
+        // Different cohort reusing the same key → conflict surfaces coh_a.
+        assert_eq!(
+            conflicting_cohort_for_pk(&db, "pk_demo", "coh_b").unwrap(),
+            Some("coh_a".to_string())
+        );
+        // Unseen key → no conflict.
+        assert_eq!(
+            conflicting_cohort_for_pk(&db, "pk_unseen", "coh_b").unwrap(),
+            None
+        );
     }
 
     #[test]

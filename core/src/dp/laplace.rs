@@ -2,6 +2,18 @@
 //!
 //! Source: Dwork & Roth, *The Algorithmic Foundations of Differential
 //! Privacy*, 2014, Theorem 3.6 ("The Laplace mechanism preserves (ε, 0)-DP").
+//!
+//! # Floating-point caveat (Mironov 2012)
+//!
+//! This implementation samples noise in IEEE-754 double precision. The
+//! inverse-CDF transform plus the `(1.0 - f64::EPSILON)` clamp on the
+//! interior of the unit interval makes the realised mechanism
+//! **(ε, ~2⁻⁵²)-DP rather than (ε, 0)-DP** — the δ inflation is the
+//! probability mass concentrated on the truncation cliff at one ulp from
+//! 1, ≈ 2.22e-16. This is six orders of magnitude tighter than the typical
+//! δ = 1e-6 chosen in cohort definitions, but operators publishing under
+//! a strict pure-DP claim should pick the snapping mechanism (Mironov
+//! 2012) or discrete Laplace (Canonne-Kamath-Steinke 2020) instead.
 
 use rand::RngCore;
 
@@ -39,6 +51,13 @@ impl LaplaceMechanism {
     ///
     /// Sampling via inverse CDF: `X = -b · sign(u) · ln(1 - 2|u|)` where
     /// `u` is uniform on `(-0.5, 0.5)`.
+    ///
+    /// # RNG requirement
+    ///
+    /// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`).
+    /// The (ε, 0)-DP guarantee assumes the adversary cannot predict the
+    /// noise draw. Seeded `StdRng` is acceptable for tests only — the seed
+    /// is observable from binary memory and breaks the guarantee.
     pub fn add_noise<R: RngCore>(&self, value: f64, rng: &mut R) -> f64 {
         let b = self.scale();
         let u = uniform_open(rng) - 0.5;
