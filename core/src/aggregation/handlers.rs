@@ -167,7 +167,7 @@ pub async fn submit_encrypted_handler(
 ) -> Result<Json<EncryptedStatsResponse>, AppError> {
     use crate::aggregation::he_aggregator::HeAggregator;
     use crate::aggregation::he_store::{
-        get_he_aggregation, upsert_he_aggregation, HeAggregationRow,
+        conflicting_cohort_for_pk, get_he_aggregation, upsert_he_aggregation, HeAggregationRow,
     };
     use crate::he::paillier::PaillierPublicKey;
     use crate::he::serde_impl::{ciphertext_from_b64, ciphertext_to_b64};
@@ -197,6 +197,19 @@ pub async fn submit_encrypted_handler(
 
     let incoming = ciphertext_from_b64(&body.encrypted_value_b64)
         .map_err(|e| AppError::BadRequest(format!("ciphertext decode: {e}")))?;
+
+    // Reject key-confusion: a pk_id observed under a different cohort cannot be
+    // reused here. The first cohort to use a key owns it (trust-on-first-use),
+    // so a ciphertext under cohort A's key can never land in cohort B's
+    // aggregate.
+    if let Some(other) = conflicting_cohort_for_pk(&db, &body.pk_id, &body.cohort_id)
+        .map_err(|e| AppError::Internal(format!("he store: {e}")))?
+    {
+        return Err(AppError::BadRequest(format!(
+            "pk_id '{}' is already bound to cohort '{}'; refusing to reuse it for cohort '{}'",
+            body.pk_id, other, body.cohort_id
+        )));
+    }
 
     let aggregation_id = format!(
         "agg_{}_{}_{}_{}",

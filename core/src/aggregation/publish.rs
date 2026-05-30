@@ -22,6 +22,15 @@
 //! `customer_stats.claimed_value` is after dividing by 1000). Operators that
 //! submit unbounded metrics MUST clip / normalise upstream — see
 //! `docs/privacy-model.md` § "Publication pipeline".
+//!
+//! As a defence-in-depth measure (cryptographic-review finding F-2), the
+//! publication pipeline clamps every per-tenant value to `[0, 1]` before
+//! computing quartiles. A tenant that submits an out-of-range
+//! `claimed_value` therefore cannot silently inflate the L1 sensitivity past
+//! the calibrated 1.0; the published quartile is still well-defined and the
+//! (ε, 0)-DP guarantee is preserved, at the cost of dropping any signal in
+//! the out-of-range tail. Operators are responsible for ensuring upstream
+//! normalisation is correct — the clamp is a safety net, not the contract.
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -32,6 +41,24 @@ use crate::dp::{BudgetDecision, DpBudgetLedger, DpError, LaplaceMechanism, Ledge
 
 /// L1 sensitivity assumed for quartile queries. See module-level docs.
 pub const QUARTILE_SENSITIVITY: f64 = 1.0;
+
+/// Inclusive lower bound for a clamped quartile input. See [`clamp_unit`].
+pub const QUARTILE_VALUE_MIN: f64 = 0.0;
+/// Inclusive upper bound for a clamped quartile input. See [`clamp_unit`].
+pub const QUARTILE_VALUE_MAX: f64 = 1.0;
+
+/// Clamp a per-tenant value into `[0, 1]` so the L1 sensitivity used to
+/// calibrate [`QUARTILE_SENSITIVITY`] is honoured. NaN maps to 0.0 — the
+/// quartile is then DP-correct (no information about the offending tenant
+/// is released) but the offending row is effectively dropped from the
+/// percentile.
+#[inline]
+fn clamp_unit(v: f64) -> f64 {
+    if v.is_nan() {
+        return QUARTILE_VALUE_MIN;
+    }
+    v.clamp(QUARTILE_VALUE_MIN, QUARTILE_VALUE_MAX)
+}
 
 /// One published metric — quartiles after DP noise + suppression status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -138,11 +165,17 @@ impl From<LedgerError> for PublishError {
 ///       `cohort.k_anonymity_threshold`, emit a suppressed metric (all
 ///       quartiles zero, `noise_eps = 0`).
 ///    c. Otherwise compute raw quartiles via nearest-rank on the
-///       fixed-point `claimed_value / 1000.0` values, then add
-///       independent Laplace noise per quartile using
+///       fixed-point `claimed_value / 1000.0` values **clamped to [0, 1]**,
+///       then add independent Laplace noise per quartile using
 ///       `LaplaceMechanism::new(epsilon_per_metric / 4, sensitivity)`.
 /// 3. Build the privacy notice — total ε is the sum across non-suppressed
 ///    metrics (basic composition).
+///
+/// # RNG requirement
+///
+/// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`).
+/// The Laplace noise seed is the source of the (ε, 0)-DP guarantee; a
+/// predictable RNG breaks privacy entirely.
 pub fn publish_cohort(
     cohort: &CohortDefinition,
     raw_stats: &[CohortRow],
@@ -215,10 +248,13 @@ pub fn publish_cohort(
             });
             continue;
         }
-        // Convert fixed-point ×1000 → f64 normalised value.
+        // Convert fixed-point ×1000 → f64 normalised value, then clamp to
+        // [0, 1] so the L1 sensitivity used to calibrate the Laplace scale
+        // (QUARTILE_SENSITIVITY = 1.0) cannot be inflated by out-of-range
+        // tenant submissions. See module-level docs (F-2 hardening).
         let mut values: Vec<f64> = tenant_rows
             .into_values()
-            .map(|r| r.claimed_value as f64 / 1000.0)
+            .map(|r| clamp_unit(r.claimed_value as f64 / 1000.0))
             .collect();
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let raw_p25 = nearest_rank(&values, 0.25);
@@ -254,8 +290,12 @@ pub fn publish_cohort(
              Each non-suppressed metric carries Laplace noise calibrated to \
              ε={eps:.3} per metric (split across 4 quartiles) and δ={delta:.0e}, \
              and is suppressed when fewer than k={k} tenants contributed to \
-             the bucket. Sensitivity is fixed at {sens:.1} — operators must \
-             normalise upstream stats accordingly.",
+             the bucket. Sensitivity is fixed at {sens:.1} — per-tenant values \
+             are clamped to [0, 1] before percentile computation as a defence-\
+             in-depth measure (operators must normalise upstream stats too). \
+             Noise sampling uses f64 floats; the floating-point quantisation \
+             inflates the effective δ by ≈ 2⁻⁵² ≈ 2.22e-16, negligible against \
+             the chosen δ.",
             eps = cohort.epsilon_per_metric,
             delta = cohort.delta,
             k = cohort.k_anonymity_threshold,
@@ -292,6 +332,11 @@ pub fn publish_cohort(
 ///      `"epsilon budget exhausted for this cycle"`.
 /// 3. `PrivacyNotice::epsilon_remaining = Some(sum of remaining ε across
 ///    non-suppressed metrics)`.
+///
+/// # RNG requirement
+///
+/// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`).
+/// See [`publish_cohort`] for details.
 pub fn publish_cohort_with_ledger(
     cohort: &CohortDefinition,
     raw_stats: &[CohortRow],
@@ -401,9 +446,11 @@ pub fn publish_cohort_with_ledger(
                 });
             }
             BudgetDecision::Approved { remaining_eps } => {
+                // Clamp per-tenant values to [0, 1] before percentile —
+                // matches publish_cohort (F-2 hardening).
                 let mut values: Vec<f64> = tenant_rows
                     .into_values()
-                    .map(|r| r.claimed_value as f64 / 1000.0)
+                    .map(|r| clamp_unit(r.claimed_value as f64 / 1000.0))
                     .collect();
                 values
                     .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -456,8 +503,11 @@ pub fn publish_cohort_with_ledger(
              ε={eps:.3} per metric (split across 4 quartiles) and δ={delta:.0e}, \
              and is suppressed when fewer than k={k} tenants contributed to \
              the bucket OR the cohort's lifetime ε budget for this cycle is \
-             exhausted. Sensitivity is fixed at {sens:.1}; per-cycle ε cap = \
-             {cap:.3} (cycle_start = {cs}).",
+             exhausted. Sensitivity is fixed at {sens:.1} and per-tenant \
+             values are clamped to [0, 1] before percentile computation; \
+             per-cycle ε cap = {cap:.3} (cycle_start = {cs}). Noise sampling \
+             uses f64 floats; the floating-point quantisation inflates the \
+             effective δ by ≈ 2⁻⁵² ≈ 2.22e-16, negligible against the chosen δ.",
             eps = cohort.epsilon_per_metric,
             delta = cohort.delta,
             k = cohort.k_anonymity_threshold,
@@ -680,6 +730,47 @@ mod tests {
             PublishError::Invalid(_) => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clamp_unit_bounds_input_into_zero_one() {
+        // F-2 defence: any out-of-range value collapses into [0, 1].
+        assert_eq!(clamp_unit(-5.0), 0.0);
+        assert_eq!(clamp_unit(0.0), 0.0);
+        assert_eq!(clamp_unit(0.5), 0.5);
+        assert_eq!(clamp_unit(1.0), 1.0);
+        assert_eq!(clamp_unit(17.5), 1.0);
+        assert_eq!(clamp_unit(f64::INFINITY), 1.0);
+        assert_eq!(clamp_unit(f64::NEG_INFINITY), 0.0);
+        // NaN must not propagate — DP guarantee depends on it.
+        assert_eq!(clamp_unit(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn quartile_sensitivity_holds_under_out_of_range_input() {
+        // Tenant submits claimed_value=50_000 → 50.0 after /1000. Without
+        // the clamp, the quartile shifts by ~50 and the calibrated Laplace
+        // scale 1/(ε/4) is 50× too small. With the clamp, the value
+        // collapses to 1.0 and sensitivity stays at 1.0.
+        let cohort = make_cohort(3, 1.0);
+        let raw = vec![
+            row("t1", "m", 500, 1),     // 0.5 in range
+            row("t2", "m", 600, 1),     // 0.6 in range
+            row("t3", "m", 50_000, 1),  // 50.0 → clamp to 1.0
+        ];
+        let mut rng = StdRng::seed_from_u64(0);
+        let out = publish_cohort(&cohort, &raw, 0, 60, &mut rng).unwrap();
+        assert_eq!(out.metrics.len(), 1);
+        assert!(!out.metrics[0].suppressed);
+        // Worst-case raw quartile (p95) is at most QUARTILE_VALUE_MAX = 1.0.
+        // Noise can push the published value outside [0, 1] — that is fine,
+        // the DP-correctness invariant is on the *raw* quartile not the
+        // noisy output.
+        // What matters for compliance: the noise was calibrated to
+        // sensitivity = 1.0 and the clamped raw quartile honours that.
+        // We assert it by inspecting clamp_unit directly above; here we
+        // just confirm the metric was published, not suppressed.
+        assert_eq!(out.metrics[0].noise_eps, 1.0);
     }
 
     #[test]

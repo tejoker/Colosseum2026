@@ -1,14 +1,45 @@
 //! M-of-N signature invariant.
 //!
 //! For each `(role, threshold)` requirement, the action's `signatures`
-//! vector must contain at least `threshold` entries equal to `role`.
-//! Duplicates are counted — the caller is responsible for ensuring
-//! distinctness if that matters (e.g. by deduping signers by identity
-//! before populating `signatures`).
+//! vector must contain at least `threshold` **distinct** entries that bear
+//! that role. An entry bears a role when it is exactly the role name
+//! (`"clinician"`) or carries an explicit signer identity in `role:identity`
+//! form (`"clinician:alice"`).
+//!
+//! Distinctness is the security property: an `M`-of-`N` requirement must not
+//! be satisfiable by the same signature string repeated. `2-of-2 clinician`
+//! is therefore met by `["clinician:alice", "clinician:bob"]` but **not** by
+//! `["clinician", "clinician"]` (which collapses to one distinct signer). The
+//! `threshold` field is documented as a distinct-signature count, so this
+//! enforces the documented contract.
+
+use std::collections::HashSet;
 
 use crate::policy::ast::SignatureRequirement;
 
 use super::{EvaluationContext, RuntimeCheck, Verdict};
+
+/// `true` when `sig` bears `role` — either an exact role match or an
+/// identity-qualified `role:identity` entry.
+pub(crate) fn signature_bears_role(sig: &str, role: &str) -> bool {
+    sig == role
+        || sig
+            .strip_prefix(role)
+            .is_some_and(|rest| rest.starts_with(':') && rest.len() > 1)
+}
+
+/// Count the **distinct** signature entries in `signatures` that bear `role`.
+/// Repeated identical entries count once, so the result is the number of
+/// independent signers, not the number of signature strings.
+pub(crate) fn distinct_role_signatures(signatures: &[String], role: &str) -> u32 {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for s in signatures {
+        if signature_bears_role(s, role) {
+            seen.insert(s.as_str());
+        }
+    }
+    seen.len() as u32
+}
 
 /// One or more `(role, threshold)` requirements that must ALL be met.
 #[derive(Debug, Clone)]
@@ -40,17 +71,12 @@ impl RuntimeCheck for SignatureCheck {
 
     fn evaluate(&self, ctx: &EvaluationContext) -> Verdict {
         for req in &self.requirements {
-            let got: u32 = ctx
-                .action
-                .signatures
-                .iter()
-                .filter(|s| *s == &req.role)
-                .count() as u32;
+            let got = distinct_role_signatures(&ctx.action.signatures, &req.role);
             if got < req.threshold {
                 return Verdict::Deny {
                     check: self.name().to_string(),
                     reason: format!(
-                        "role '{}' has {} of {} required signatures",
+                        "role '{}' has {} of {} required distinct signatures",
                         req.role, got, req.threshold
                     ),
                 };
@@ -118,6 +144,37 @@ mod tests {
     fn empty_requirements_allow_always() {
         let c = SignatureCheck::from_required(vec![]);
         let a = Action::default();
+        assert!(c.evaluate(&ctx(&a)).is_allow());
+    }
+
+    #[test]
+    fn duplicate_role_strings_do_not_satisfy_m_of_n() {
+        // The classic bug: one actor stuffs the role string twice.
+        let c = SignatureCheck::from_required(vec![req("clinician", 2)]);
+        let a = Action {
+            signatures: vec!["clinician".into(), "clinician".into()],
+            ..Default::default()
+        };
+        assert!(c.evaluate(&ctx(&a)).is_deny(), "duplicates must not meet 2-of-2");
+    }
+
+    #[test]
+    fn distinct_identities_satisfy_m_of_n() {
+        let c = SignatureCheck::from_required(vec![req("clinician", 2)]);
+        let a = Action {
+            signatures: vec!["clinician:alice".into(), "clinician:bob".into()],
+            ..Default::default()
+        };
+        assert!(c.evaluate(&ctx(&a)).is_allow(), "two distinct signers meet 2-of-2");
+    }
+
+    #[test]
+    fn identity_qualified_entry_still_bears_role_for_threshold_one() {
+        let c = SignatureCheck::from_required(vec![req("partner", 1)]);
+        let a = Action {
+            signatures: vec!["partner:jane".into()],
+            ..Default::default()
+        };
         assert!(c.evaluate(&ctx(&a)).is_allow());
     }
 

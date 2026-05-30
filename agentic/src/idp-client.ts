@@ -48,6 +48,12 @@ function coerceIntent(raw: unknown): AgentIntent {
 export interface IdPClientConfig {
     /** SauronID backend base URL (e.g. https://api.example.com) */
     idpUrl: string;
+    /**
+     * Per-request network timeout in milliseconds. Defaults to 30000.
+     * A slow or unresponsive server would otherwise hang the agent
+     * indefinitely (fetch has no built-in timeout).
+     */
+    timeoutMs?: number;
     /** Authenticated user session from `/user/auth` (sent as `x-sauron-session`). */
     humanSession?: string;
     /** Human `key_image_hex` (must match session when session is used). */
@@ -139,6 +145,27 @@ export class AgentShimClient {
         this.checksum = computeChecksum(config.agentConfig);
     }
 
+    /**
+     * `fetch` with an enforced timeout. Aborts via `AbortController` after
+     * `config.timeoutMs` (default 30s) so a hung server cannot stall the
+     * agent forever. Re-throws a clear timeout error on abort.
+     */
+    private async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+        const timeoutMs = this.config.timeoutMs ?? 30000;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            return await fetch(url, { ...init, signal: controller.signal });
+        } catch (e) {
+            if (e instanceof Error && e.name === "AbortError") {
+                throw new Error(`SauronID request to ${url} timed out after ${timeoutMs}ms`);
+            }
+            throw e;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
     async initialize(): Promise<{
         checksum: string;
         popThumbprint: string;
@@ -193,7 +220,7 @@ export class AgentShimClient {
             registerBody.delegation_chain_json = this.config.delegationChainJson;
         }
 
-        const response = await fetch(`${this.config.idpUrl}/agent/register`, {
+        const response = await this.fetchWithTimeout(`${this.config.idpUrl}/agent/register`, {
             method: "POST",
             headers,
             body: JSON.stringify(registerBody),
@@ -276,7 +303,7 @@ export class AgentShimClient {
             delegateBody.parent_agent_id = parentId;
         }
 
-        const response = await fetch(`${this.config.idpUrl}/agent/register`, {
+        const response = await this.fetchWithTimeout(`${this.config.idpUrl}/agent/register`, {
             method: "POST",
             headers,
             body: JSON.stringify(delegateBody),
@@ -299,7 +326,7 @@ export class AgentShimClient {
             throw new Error("agentActionSigner is required to build a cryptographic leash proof.");
         }
 
-        const response = await fetch(`${this.config.idpUrl}/agent/action/challenge`, {
+        const response = await this.fetchWithTimeout(`${this.config.idpUrl}/agent/action/challenge`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({

@@ -24,34 +24,40 @@ fn hash_bucket(prefix: &[u8], parts: &[&[u8]]) -> String {
     hex::encode(&h.finalize()[..24])
 }
 
-pub fn bucket_kyc_retrieve(site: &str, user_key_image: &str) -> String {
+// Every bucket folds `tenant_id` into the hash as its first component so
+// counters are isolated per tenant. Without it, buckets collide on
+// `human_key_image` / `agent_id` / `site` across tenants and one tenant can
+// exhaust another tenant's rate-limit budget (cross-tenant DoS). Callers pass
+// the request-scoped tenant (defaulting to `"default"` for legacy single-tenant
+// traffic), so the isolation is transparent to existing deployments.
+pub fn bucket_kyc_retrieve(tenant_id: &str, site: &str, user_key_image: &str) -> String {
     hash_bucket(
         b"kyc_retrieve",
-        &[site.as_bytes(), user_key_image.as_bytes()],
+        &[tenant_id.as_bytes(), site.as_bytes(), user_key_image.as_bytes()],
     )
 }
 
-pub fn bucket_agent_kyc_consent(site: &str, user_key_image: &str) -> String {
+pub fn bucket_agent_kyc_consent(tenant_id: &str, site: &str, user_key_image: &str) -> String {
     hash_bucket(
         b"agent_kyc_consent",
-        &[site.as_bytes(), user_key_image.as_bytes()],
+        &[tenant_id.as_bytes(), site.as_bytes(), user_key_image.as_bytes()],
     )
 }
 
-pub fn bucket_payment_authorize(agent_id: &str) -> String {
-    hash_bucket(b"payment_authorize", &[agent_id.as_bytes()])
+pub fn bucket_payment_authorize(tenant_id: &str, agent_id: &str) -> String {
+    hash_bucket(b"payment_authorize", &[tenant_id.as_bytes(), agent_id.as_bytes()])
 }
 
-pub fn bucket_agent_vc_issue(human_key_image: &str) -> String {
-    hash_bucket(b"agent_vc_issue", &[human_key_image.as_bytes()])
+pub fn bucket_agent_vc_issue(tenant_id: &str, human_key_image: &str) -> String {
+    hash_bucket(b"agent_vc_issue", &[tenant_id.as_bytes(), human_key_image.as_bytes()])
 }
 
-pub fn bucket_agent_register(human_key_image: &str) -> String {
-    hash_bucket(b"agent_register", &[human_key_image.as_bytes()])
+pub fn bucket_agent_register(tenant_id: &str, human_key_image: &str) -> String {
+    hash_bucket(b"agent_register", &[tenant_id.as_bytes(), human_key_image.as_bytes()])
 }
 
-pub fn bucket_agent_verify(agent_id: &str) -> String {
-    hash_bucket(b"agent_verify", &[agent_id.as_bytes()])
+pub fn bucket_agent_verify(tenant_id: &str, agent_id: &str) -> String {
+    hash_bucket(b"agent_verify", &[tenant_id.as_bytes(), agent_id.as_bytes()])
 }
 
 fn parse_limit(name: &str, production_default: i64) -> i64 {
@@ -178,4 +184,36 @@ pub fn limit_agent_register() -> i64 {
 
 pub fn limit_agent_verify() -> i64 {
     parse_limit("SAURON_RISK_AGENT_VERIFY_PER_WINDOW", 300)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buckets_are_isolated_per_tenant() {
+        // Same human key image under two tenants must produce different
+        // buckets — otherwise tenant A exhausting its quota starves tenant B.
+        let a = bucket_agent_register("tenant_a", "hki");
+        let b = bucket_agent_register("tenant_b", "hki");
+        assert_ne!(a, b, "cross-tenant bucket collision");
+        // Deterministic within a tenant.
+        assert_eq!(a, bucket_agent_register("tenant_a", "hki"));
+    }
+
+    #[test]
+    fn every_bucket_kind_separates_tenants() {
+        assert_ne!(
+            bucket_kyc_retrieve("t1", "site", "uki"),
+            bucket_kyc_retrieve("t2", "site", "uki")
+        );
+        assert_ne!(
+            bucket_payment_authorize("t1", "agent"),
+            bucket_payment_authorize("t2", "agent")
+        );
+        assert_ne!(
+            bucket_agent_verify("t1", "agent"),
+            bucket_agent_verify("t2", "agent")
+        );
+    }
 }

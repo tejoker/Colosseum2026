@@ -1,12 +1,30 @@
 //! Gaussian mechanism: adds N(0, σ²) noise calibrated to (ε, δ)-DP.
 //!
 //! Source: Dwork & Roth, *The Algorithmic Foundations of Differential
-//! Privacy*, 2014, Theorem 3.22 (analytic Gaussian), eq. (3.8):
+//! Privacy*, 2014, Theorem A.1 / eq. (3.8):
 //! σ ≥ sensitivity · √(2 · ln(1.25 / δ)) / ε.
+//!
+//! # Operating envelope
+//!
+//! The Dwork-Roth bound is proven for `ε ∈ (0, 1]` only. For `ε > 1`, the
+//! (ε, δ)-DP guarantee does **not** follow from this σ; callers must use
+//! the analytic Gaussian mechanism (Balle & Wang, ICML 2018) or a
+//! different calibration. This module **rejects** `ε > 1` in
+//! [`GaussianMechanism::new`] to enforce the documented envelope.
+//!
+//! Use the RDP path ([`crate::dp::composition::RdpAccountant::add_gaussian`])
+//! for compositions that need a larger effective ε — RDP composes over
+//! the per-step (α, σ²/Δ²) pair, not over (ε, δ).
 
 use rand::RngCore;
 
 use super::DpError;
+
+/// Upper bound on `ε` accepted by [`GaussianMechanism::new`]. The
+/// Dwork-Roth eq. 3.8 calibration is only proven for `ε ≤ 1`; tighter
+/// calibrations (Balle-Wang 2018 analytic Gaussian) are required for
+/// `ε > 1`.
+pub const MAX_GAUSSIAN_EPSILON: f64 = 1.0;
 
 /// `(ε, δ)`-DP additive-noise mechanism for numeric queries.
 ///
@@ -24,6 +42,13 @@ impl GaussianMechanism {
             return Err(DpError::NonFinite);
         }
         if epsilon <= 0.0 {
+            return Err(DpError::InvalidEpsilon(epsilon));
+        }
+        // Dwork-Roth eq. 3.8 σ-calibration is only valid for ε ≤ 1.
+        // Cryptographic-review finding F-1: reject larger ε so a caller cannot
+        // silently degrade the (ε, δ)-DP guarantee. Use RdpAccountant or
+        // implement the analytic Gaussian (Balle-Wang 2018) for ε > 1.
+        if epsilon > MAX_GAUSSIAN_EPSILON {
             return Err(DpError::InvalidEpsilon(epsilon));
         }
         if delta <= 0.0 || delta >= 1.0 {
@@ -48,6 +73,12 @@ impl GaussianMechanism {
     /// Add N(0, σ²) noise to `value`.
     ///
     /// Sampling via Box–Muller transform from two uniform samples.
+    ///
+    /// # RNG requirement
+    ///
+    /// **Production callers MUST pass a CSPRNG** (e.g. `rand::rngs::OsRng`).
+    /// The (ε, δ)-DP guarantee assumes the adversary cannot predict the
+    /// noise draw. Seeded `StdRng` is acceptable for tests only.
     pub fn add_noise<R: RngCore>(&self, value: f64, rng: &mut R) -> f64 {
         let sigma = self.sigma();
         let (z0, _z1) = box_muller(rng);
@@ -87,6 +118,20 @@ mod tests {
         assert!(GaussianMechanism::new(1.0, 1.0, 1.0).is_err());
         assert!(GaussianMechanism::new(1.0, 1e-5, -1.0).is_err());
         assert!(GaussianMechanism::new(f64::NAN, 1e-5, 1.0).is_err());
+    }
+
+    #[test]
+    fn rejects_epsilon_above_one() {
+        // Dwork-Roth eq. 3.8 σ calibration is only valid for ε ≤ 1.
+        // F-1 hardening: constructor must reject larger ε.
+        assert!(GaussianMechanism::new(1.0, 1e-5, 1.0).is_ok(), "ε = 1 boundary inclusive");
+        assert!(GaussianMechanism::new(1.0001, 1e-5, 1.0).is_err());
+        assert!(GaussianMechanism::new(2.0, 1e-5, 1.0).is_err());
+        assert!(GaussianMechanism::new(10.0, 1e-5, 1.0).is_err());
+        match GaussianMechanism::new(2.0, 1e-5, 1.0).unwrap_err() {
+            super::DpError::InvalidEpsilon(v) => assert!((v - 2.0).abs() < 1e-12),
+            other => panic!("expected InvalidEpsilon, got {other:?}"),
+        }
     }
 
     #[test]

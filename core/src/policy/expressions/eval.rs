@@ -7,9 +7,7 @@
 //! Identifier resolution and the function whitelist are documented on the
 //! individual helpers so future invariants can extend them in one place.
 
-use std::collections::HashSet;
 use std::fmt;
-use std::sync::{Mutex, OnceLock};
 
 use super::parser::{BinOp, Expr, UnaryOp};
 use crate::policy::ast::Binding;
@@ -252,6 +250,17 @@ fn num_cmp(op: BinOp, l: Value, r: Value) -> Result<Value, EvalError> {
             )))
         }
     };
+    // Fail closed on non-finite operands. IEEE-754 makes every comparison
+    // against NaN return `false`, so `NaN > max_budget` and
+    // `NaN <= max_budget` both evaluate to `false` — which can flip a deny
+    // into an allow (or vice-versa) depending on how the policy is phrased.
+    // A non-finite value never has a defensible ordering, so we refuse to
+    // compare it; the caller (ExpressionCheck) maps the error to a Deny.
+    if !a.is_finite() || !b.is_finite() {
+        return Err(EvalError::TypeError(format!(
+            "{op:?} on non-finite number ({a} vs {b}) — refusing to order (fail-closed)"
+        )));
+    }
     Ok(Value::Bool(match op {
         BinOp::Lt => a < b,
         BinOp::Lte => a <= b,
@@ -273,11 +282,24 @@ fn num_arith(op: BinOp, l: Value, r: Value) -> Result<Value, EvalError> {
             )))
         }
     };
-    Ok(Value::Num(match op {
+    if !a.is_finite() || !b.is_finite() {
+        return Err(EvalError::TypeError(format!(
+            "{op:?} on non-finite number ({a} vs {b}) — refusing to compute (fail-closed)"
+        )));
+    }
+    let out = match op {
         BinOp::Add => a + b,
         BinOp::Sub => a - b,
         _ => unreachable!("num_arith called with non-arith op"),
-    }))
+    };
+    // Overflow to ±inf would silently re-enter a comparison and corrupt the
+    // verdict; surface it as an error instead.
+    if !out.is_finite() {
+        return Err(EvalError::TypeError(format!(
+            "{op:?} produced non-finite result ({out}) — refusing (fail-closed)"
+        )));
+    }
+    Ok(Value::Num(out))
 }
 
 fn bool_bin(op: BinOp, l: Value, r: Value) -> Result<Value, EvalError> {
@@ -318,35 +340,63 @@ fn apply_unary(op: UnaryOp, v: Value) -> Result<Value, EvalError> {
 // Function whitelist
 // ---------------------------------------------------------------------------
 
-/// Names of fixture-compat stub functions that always return `Bool(true)`
-/// and warn once per process. These are intentionally separate from the
-/// primary whitelist to make the deferred functionality explicit.
-const STUB_FIXTURE_FUNCS: &[&str] = &[
-    // Banking + legal + devtools fixtures.
-    "no_external_call_to",
-    // Treasury fixture — M-of-N delegation gate.
-    "transfer_requires",
-    // Healthcare fixture — export signature gate.
-    "exports_require_signatures",
-    // Research fixture — tool-class lookup.
-    "tool_class",
-    // Devtools fixture — sandbox gate.
-    "sandbox_required",
-];
+/// Resolve a call argument by keyword name, falling back to positional
+/// index, then evaluate it. Keyword args (`role: 'x'`) win over positional.
+fn arg_value(
+    func: &'static str,
+    keyword: &str,
+    pos: usize,
+    args: &[(Option<String>, Expr)],
+    env: &EvalEnv,
+) -> Result<Value, EvalError> {
+    if let Some((_, e)) = args.iter().find(|(k, _)| k.as_deref() == Some(keyword)) {
+        return eval(e, env);
+    }
+    if let Some((k, e)) = args.get(pos) {
+        if k.is_none() {
+            return eval(e, env);
+        }
+    }
+    Err(EvalError::BadArgs {
+        func,
+        msg: format!("missing argument '{keyword}'"),
+    })
+}
 
-/// One-time per-process warning tracker. We surface each stub function once
-/// per binary lifetime so logs don't flood when an evaluator runs the same
-/// policy thousands of times.
-fn warn_once(name: &str) {
-    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut guard = seen.lock().expect("warn_once mutex poisoned");
-    if guard.insert(name.to_string()) {
-        tracing::warn!(
-            target: "sauron::policy::expressions",
-            function = name,
-            "function is a Sprint 3 stub — returns Bool(true); real implementation deferred"
-        );
+fn want_str(func: &'static str, v: Value) -> Result<String, EvalError> {
+    match v {
+        Value::Str(s) => Ok(s),
+        other => Err(EvalError::BadArgs {
+            func,
+            msg: format!("expected Str, got {}", other.tag()),
+        }),
+    }
+}
+
+fn want_num(func: &'static str, v: Value) -> Result<f64, EvalError> {
+    match v {
+        Value::Num(n) if n.is_finite() => Ok(n),
+        Value::Num(_) => Err(EvalError::BadArgs {
+            func,
+            msg: "expected finite Num".into(),
+        }),
+        other => Err(EvalError::BadArgs {
+            func,
+            msg: format!("expected Num, got {}", other.tag()),
+        }),
+    }
+}
+
+fn want_str_list(func: &'static str, v: Value) -> Result<Vec<String>, EvalError> {
+    match v {
+        Value::List(items) => items
+            .into_iter()
+            .map(|it| want_str(func, it))
+            .collect::<Result<Vec<_>, _>>(),
+        other => Err(EvalError::BadArgs {
+            func,
+            msg: format!("expected List, got {}", other.tag()),
+        }),
     }
 }
 
@@ -383,17 +433,107 @@ fn call(name: &str, args: &[(Option<String>, Expr)], env: &EvalEnv) -> Result<Va
             }
         }
 
-        // no_external_call_to(domain: STR) — Sprint 3 stub. Real egress
-        // tracking lands with the SDK egress hook in a later sprint.
-        _ if STUB_FIXTURE_FUNCS.contains(&name) => {
-            // Evaluate args for side-effect-free type checking (we want to
-            // surface a TypeError for clearly malformed calls even though
-            // the result is a stub).
-            for (_, a) in args {
-                let _ = eval(a, env)?;
+        // no_external_call_to(domain: STR) — true iff the action does NOT
+        // target the named domain. Reads the agent-declared `target_domain`
+        // metadata key (same key as DomainAllowlistCheck). A missing key
+        // means the action declares no external target, so the constraint
+        // is satisfied.
+        "no_external_call_to" => {
+            require_arity("no_external_call_to", args, 1)?;
+            let domain = want_str(
+                "no_external_call_to",
+                arg_value("no_external_call_to", "domain", 0, args, env)?,
+            )?;
+            let target = env
+                .action
+                .metadata
+                .get("target_domain")
+                .and_then(|v| v.as_str());
+            Ok(Value::Bool(target != Some(domain.as_str())))
+        }
+
+        // transfer_requires(roles: LIST<STR>) — every listed role must be
+        // present in the action's `signatures` before a money-moving action
+        // (amount_usd present) is allowed. Non-transfer actions are exempt.
+        "transfer_requires" => {
+            require_arity("transfer_requires", args, 1)?;
+            let roles = want_str_list(
+                "transfer_requires",
+                arg_value("transfer_requires", "roles", 0, args, env)?,
+            )?;
+            if env.action.amount_usd.is_none() {
+                return Ok(Value::Bool(true));
             }
-            warn_once(name);
-            Ok(Value::Bool(true))
+            let sigs = &env.action.signatures;
+            let satisfied = roles.iter().all(|r| sigs.iter().any(|s| s == r));
+            Ok(Value::Bool(satisfied))
+        }
+
+        // exports_require_signatures(role: STR, threshold: NUM) — the action
+        // must carry at least `threshold` signatures from `role`. Like
+        // SignatureCheck this counts role occurrences; the caller is
+        // responsible for distinct-signer deduplication upstream.
+        "exports_require_signatures" => {
+            require_arity("exports_require_signatures", args, 2)?;
+            let role = want_str(
+                "exports_require_signatures",
+                arg_value("exports_require_signatures", "role", 0, args, env)?,
+            )?;
+            let threshold = want_num(
+                "exports_require_signatures",
+                arg_value("exports_require_signatures", "threshold", 1, args, env)?,
+            )?;
+            if threshold < 0.0 {
+                return Err(EvalError::BadArgs {
+                    func: "exports_require_signatures",
+                    msg: "threshold must be >= 0".into(),
+                });
+            }
+            // Distinct-signer count — same contract as SignatureCheck, so
+            // `["clinician","clinician"]` cannot satisfy a 2-signature gate.
+            let got = crate::policy::invariants::signature::distinct_role_signatures(
+                &env.action.signatures,
+                &role,
+            );
+            Ok(Value::Bool(got as f64 >= threshold))
+        }
+
+        // tool_class(tool) — returns the agent-declared class of the tool as
+        // a Str (from the `tool_class` metadata key), defaulting to
+        // "unknown". Used as `tool_class(tool) == 'read_only'`. The argument
+        // is evaluated for type-checking but the class comes from metadata so
+        // the agent cannot launder a tool's class through the argument.
+        "tool_class" => {
+            require_arity("tool_class", args, 1)?;
+            let _ = arg_value("tool_class", "tool", 0, args, env)?;
+            let class = env
+                .action
+                .metadata
+                .get("tool_class")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Ok(Value::Str(class.to_string()))
+        }
+
+        // sandbox_required(tool: STR) — if the action invokes the named tool
+        // it must declare `sandbox_mode == true` in metadata; otherwise the
+        // constraint does not apply and the action is allowed.
+        "sandbox_required" => {
+            require_arity("sandbox_required", args, 1)?;
+            let tool = want_str(
+                "sandbox_required",
+                arg_value("sandbox_required", "tool", 0, args, env)?,
+            )?;
+            if env.action.tool != tool {
+                return Ok(Value::Bool(true));
+            }
+            let sandboxed = env
+                .action
+                .metadata
+                .get("sandbox_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Ok(Value::Bool(sandboxed))
         }
 
         _ => Err(EvalError::UnknownFunction(name.to_string())),
@@ -667,23 +807,116 @@ mod tests {
     }
 
     #[test]
-    fn no_external_call_to_is_stub_true() {
+    fn no_external_call_to_allows_when_target_absent_or_different() {
+        // mk_action() carries no target_domain metadata → constraint met.
         with_env(0.0, |env| {
             assert!(pred("no_external_call_to(domain: 'competitor.com')", env));
         });
     }
 
     #[test]
-    fn fixture_stub_functions_all_return_true() {
+    fn no_external_call_to_denies_matching_target() {
+        let mut action = mk_action();
+        action
+            .metadata
+            .insert("target_domain".into(), serde_json::json!("competitor.com"));
+        let binding = mk_binding();
+        let ctx = EvaluationContext::with_defaults(&action);
+        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        assert!(!pred("no_external_call_to(domain: 'competitor.com')", &env));
+        assert!(pred("no_external_call_to(domain: 'partner.com')", &env));
+    }
+
+    #[test]
+    fn transfer_requires_enforces_roles_on_money_moves() {
+        // mk_action() has amount_usd=Some and signatures=[human_approver, cfo].
         with_env(0.0, |env| {
-            assert!(pred("transfer_requires(roles: ['a', 'b'])", env));
-            assert!(pred(
-                "exports_require_signatures(role: 'clinician', threshold: 2)",
-                env
-            ));
-            assert!(pred("tool_class(tool) == true", env));
-            assert!(pred("sandbox_required(tool: 'run_sandboxed')", env));
+            assert!(pred("transfer_requires(roles: ['human_approver', 'cfo'])", env));
+            // Missing 'treasury_officer' signature on a money-moving action.
+            assert!(!pred("transfer_requires(roles: ['treasury_officer'])", env));
         });
+    }
+
+    #[test]
+    fn transfer_requires_exempts_non_money_actions() {
+        let mut action = mk_action();
+        action.amount_usd = None;
+        action.signatures.clear();
+        let binding = mk_binding();
+        let ctx = EvaluationContext::with_defaults(&action);
+        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        assert!(pred("transfer_requires(roles: ['cfo'])", &env));
+    }
+
+    #[test]
+    fn exports_require_signatures_counts_distinct_signers() {
+        let mut action = mk_action();
+        // Two distinct clinician identities → meets threshold 2, not 3.
+        action.signatures = vec!["clinician:alice".into(), "clinician:bob".into()];
+        let binding = mk_binding();
+        let ctx = EvaluationContext::with_defaults(&action);
+        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        assert!(pred("exports_require_signatures(role: 'clinician', threshold: 2)", &env));
+        assert!(!pred("exports_require_signatures(role: 'clinician', threshold: 3)", &env));
+    }
+
+    #[test]
+    fn exports_require_signatures_rejects_duplicate_string() {
+        let mut action = mk_action();
+        action.signatures = vec!["clinician".into(), "clinician".into()];
+        let binding = mk_binding();
+        let ctx = EvaluationContext::with_defaults(&action);
+        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        // One distinct signer → cannot meet threshold 2.
+        assert!(!pred("exports_require_signatures(role: 'clinician', threshold: 2)", &env));
+    }
+
+    #[test]
+    fn tool_class_reads_metadata_default_unknown() {
+        with_env(0.0, |env| {
+            // No tool_class metadata on mk_action() → "unknown".
+            assert!(pred("tool_class(tool) == 'unknown'", env));
+        });
+        let mut action = mk_action();
+        action
+            .metadata
+            .insert("tool_class".into(), serde_json::json!("read_only"));
+        let binding = mk_binding();
+        let ctx = EvaluationContext::with_defaults(&action);
+        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        assert!(pred("tool_class(tool) == 'read_only'", &env));
+    }
+
+    #[test]
+    fn sandbox_required_gates_named_tool() {
+        let mut action = mk_action();
+        action.tool = "run_sandboxed".into();
+        let binding = mk_binding();
+        // sandbox_mode absent → denied.
+        {
+            let ctx = EvaluationContext::with_defaults(&action);
+            let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+            assert!(!pred("sandbox_required(tool: 'run_sandboxed')", &env));
+        }
+        // sandbox_mode=true → allowed.
+        action
+            .metadata
+            .insert("sandbox_mode".into(), serde_json::json!(true));
+        let ctx = EvaluationContext::with_defaults(&action);
+        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        assert!(pred("sandbox_required(tool: 'run_sandboxed')", &env));
+    }
+
+    #[test]
+    fn nan_comparison_is_fail_closed() {
+        let action = mk_action();
+        let mut binding = mk_binding();
+        binding.max_budget_usd = Some(f64::NAN);
+        let ctx = EvaluationContext::with_defaults(&action);
+        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        // IEEE would make `100 > NaN` == false (silently allow); we error instead.
+        let err = eval_str("amount_usd > max_budget_usd", &env).unwrap_err();
+        assert!(matches!(err, EvalError::TypeError(_)), "{err:?}");
     }
 
     #[test]

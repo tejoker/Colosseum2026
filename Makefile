@@ -1,5 +1,5 @@
 # SauronID Makefile — minimal, opinionated.
-.PHONY: help build clean test verify empirical demo demo-strict bench docs python-setup
+.PHONY: help build clean test verify empirical demo demo-strict demo-real demo-real-attacks bench docs python-setup
 
 help:  ## Show this help
 	@echo "SauronID — agent-binding stack"
@@ -32,6 +32,14 @@ demo:  ## Quickstart: build + start + invariants (advisory mode)
 
 demo-strict:  ## Quickstart in fail-closed mode + 16-attack empirical
 	SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
+
+demo-real:  ## End-to-end real-agent demo: register Groq+Gemini+Anthropic, chat, attacks, anchor, forensics
+	@test -n "$$SAURON_ADMIN_KEY" || (echo "SAURON_ADMIN_KEY env required (see .dev-secrets)" && exit 2)
+	python3 scripts/demo_real_agent.py
+
+demo-real-attacks:  ## Real-agent demo, ONLY the four live attacks (fast, no LLM keys needed)
+	@test -n "$$SAURON_ADMIN_KEY" || (echo "SAURON_ADMIN_KEY env required (see .dev-secrets)" && exit 2)
+	python3 scripts/demo_real_agent.py --only-attacks
 
 empirical:  ## Run 16-attack empirical suite against an already-running server
 	SAURON_REQUIRE_CALL_SIG=1 \

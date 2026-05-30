@@ -111,8 +111,9 @@ fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
 
     if full_write_keys.is_empty() {
         if let Some(b) = crate::state::development_fallback_admin_key_material() {
-            eprintln!(
-                "[WARN] SAURON_ADMIN_KEY / SAURON_ADMIN_KEYS unset — using derived **development** admin key."
+            tracing::warn!(
+                target: "sauron::admin",
+                "SAURON_ADMIN_KEY / SAURON_ADMIN_KEYS unset — using derived development admin key"
             );
             full_write_keys.push(b);
         }
@@ -128,11 +129,42 @@ fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
         }
     }
 
-    let jwt_hs256_secret = std::env::var("SAURON_ADMIN_JWT_HS256_SECRET")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.into_bytes());
+    // Route the admin JWT secret through the same secret resolver as the
+    // other root secrets so a Vault/KMS-wrapped `..._WRAPPED` ciphertext is
+    // decrypted at startup instead of forcing the highest-value admin secret
+    // to sit in plaintext env. Falls back to plain `SAURON_ADMIN_JWT_HS256_SECRET`
+    // when no backend is enabled. A configured-but-unreachable backend is
+    // fatal (fail-closed), matching the SAURON_ADMIN_KEYS handling above.
+    let jwt_hs256_secret = match crate::secret_provider::try_resolve_secret(
+        "SAURON_ADMIN_JWT_HS256_SECRET",
+    ) {
+        Ok(Some(bytes)) => {
+            // Trim ASCII whitespace at the ends (parity with the previous
+            // env-only path, which trimmed the string). Works on raw bytes so
+            // a binary Vault plaintext is left intact in the middle.
+            let start = bytes
+                .iter()
+                .position(|b| !b.is_ascii_whitespace())
+                .unwrap_or(bytes.len());
+            let end = bytes
+                .iter()
+                .rposition(|b| !b.is_ascii_whitespace())
+                .map(|i| i + 1)
+                .unwrap_or(start);
+            let trimmed = bytes[start..end].to_vec();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Ok(None) => None,
+        Err(e) => {
+            return Err(format!(
+                "admin auth: failed to resolve SAURON_ADMIN_JWT_HS256_SECRET: {e}"
+            ))
+        }
+    };
 
     if !is_development_runtime() {
         if full_write_keys.is_empty() {
@@ -171,10 +203,10 @@ fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
         for k in &full_write_keys {
             if let Ok(s) = std::str::from_utf8(k) {
                 if KNOWN_WEAK.contains(&s) {
-                    eprintln!(
-                        "[SECURITY WARN] Admin key '{}' is a known-weak default. \
-                         Set SAURON_ADMIN_KEY to a strong random secret before exposing this service.",
-                        s
+                    tracing::warn!(
+                        target: "sauron::admin",
+                        key = %s,
+                        "admin key is a known-weak default — set SAURON_ADMIN_KEY to a strong random secret before exposing this service"
                     );
                 }
             }
@@ -346,11 +378,12 @@ pub async fn add_client(
         {
             st.client_group.add_member(pt);
         }
-        println!(
-            "[ADMIN] New client '{}' ({}) added. client_group_size={}",
-            payload.name,
-            type_str,
-            st.client_group.members.len()
+        tracing::info!(
+            target: "sauron::admin",
+            client = %payload.name,
+            client_type = %type_str,
+            client_group_size = st.client_group.members.len(),
+            "new client added"
         );
     }
 
