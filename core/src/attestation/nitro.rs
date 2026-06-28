@@ -122,9 +122,14 @@ pub fn verify_nitro_enclave(
     ctx: &AttestationContext,
 ) -> Result<(), AttestationError> {
     let first = blob.first().copied().unwrap_or(0);
-    let reject_dev = std::env::var("SAURON_NITRO_REJECT_DEV_MODE")
-        .map(|v| !v.is_empty() && v != "0" && v.to_ascii_lowercase() != "false")
-        .unwrap_or(false);
+    // H-5: fail CLOSED in production. The unsigned dev-JSON path has NO
+    // cryptographic binding, so it must be refused unless explicitly opted in.
+    // Dev runtime stays permissive; production rejects dev JSON by default.
+    let reject_dev = crate::runtime_mode::require_or_default(
+        "SAURON_NITRO_REJECT_DEV_MODE",
+        /* dev_default */ false,
+        /* prod_default */ true,
+    );
 
     if first == b'{' {
         if reject_dev {
@@ -181,11 +186,18 @@ fn verify_nitro_cose_blob(
     ctx: &AttestationContext,
 ) -> Result<super::cbor::NitroParsedDoc, AttestationError> {
     let roots = load_nitro_root_pem_path();
-    if roots.is_empty() && std::env::var("SAURON_NITRO_REQUIRE_ROOT").ok().as_deref()
-        == Some("1")
-    {
+    // H-5: fail CLOSED in production. Without a configured AWS Nitro root the
+    // COSE cert chain is NOT validated, so a self-signed COSE would pass on its
+    // signature alone. Production requires a root by default; set
+    // SAURON_NITRO_REQUIRE_ROOT=0 to explicitly accept the unrooted path.
+    let require_root = crate::runtime_mode::require_or_default(
+        "SAURON_NITRO_REQUIRE_ROOT",
+        /* dev_default */ false,
+        /* prod_default */ true,
+    );
+    if roots.is_empty() && require_root {
         return Err(AttestationError::BadCertChain(
-            "nitro_enclave: SAURON_NITRO_REQUIRE_ROOT=1 but SAURON_NITRO_ROOT_PEM is unset".into(),
+            "nitro_enclave: chain validation required (production default) but SAURON_NITRO_ROOT_PEM is unset — set SAURON_NITRO_ROOT_PEM, or SAURON_NITRO_REQUIRE_ROOT=0 to opt out".into(),
         ));
     }
     let doc = super::cbor::verify_nitro_cose_and_chain(blob, ctx, &roots)?;
@@ -207,6 +219,21 @@ pub fn parse_nitro_cose_blob(
 mod tests {
     use super::*;
     use crate::attestation::AttestationKind;
+
+    // H-5: dev-JSON acceptance is now opt-in (prod fails closed). These tests
+    // exercise the dev path, so they explicitly set SAURON_NITRO_REJECT_DEV_MODE=0.
+    // Serialise the env mutation so the two dev tests don't race.
+    static DEV_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn with_dev_mode<F: FnOnce()>(f: F) {
+        let _g = DEV_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("SAURON_NITRO_REJECT_DEV_MODE").ok();
+        std::env::set_var("SAURON_NITRO_REJECT_DEV_MODE", "0");
+        f();
+        match prev {
+            Some(p) => std::env::set_var("SAURON_NITRO_REJECT_DEV_MODE", p),
+            None => std::env::remove_var("SAURON_NITRO_REJECT_DEV_MODE"),
+        }
+    }
 
     fn nitro_dev_fixture(pcr0_hex: &str, pubkey_b64: &str, module: &str) -> Vec<u8> {
         let mut pcrs = std::collections::BTreeMap::new();
@@ -266,15 +293,17 @@ mod tests {
             expected_measurement_hex: &expected,
             trusted_pubkey_b64u: "",
         };
-        assert!(
-            verify_nitro_enclave(&blob, &ctx).is_ok(),
-            "should accept dev-mode attestation with matching measurement"
-        );
-        // Sanity: dispatcher reaches the same path.
-        assert!(
-            crate::attestation::verify_attestation(AttestationKind::NitroEnclave, &blob, &ctx)
-                .is_ok()
-        );
+        with_dev_mode(|| {
+            assert!(
+                verify_nitro_enclave(&blob, &ctx).is_ok(),
+                "should accept dev-mode attestation with matching measurement"
+            );
+            // Sanity: dispatcher reaches the same path.
+            assert!(
+                crate::attestation::verify_attestation(AttestationKind::NitroEnclave, &blob, &ctx)
+                    .is_ok()
+            );
+        });
     }
 
     #[test]
@@ -284,9 +313,9 @@ mod tests {
             expected_measurement_hex: "deadbeef",
             trusted_pubkey_b64u: "",
         };
-        match verify_nitro_enclave(&blob, &ctx) {
+        with_dev_mode(|| match verify_nitro_enclave(&blob, &ctx) {
             Err(AttestationError::MeasurementMismatch { .. }) => {}
             other => panic!("expected MeasurementMismatch, got {:?}", other),
-        }
+        });
     }
 }

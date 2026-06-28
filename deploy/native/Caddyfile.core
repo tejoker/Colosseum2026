@@ -1,0 +1,11 @@
+# Core-only reverse proxy (no dashboard). Caddy substitutes {$VARS} from its
+# process environment, supplied via the systemd drop-in EnvironmentFile that
+# vm-setup.sh installs (reads /opt/sauronid/site.env). Using Caddy's own env
+# substitution avoids shell-mangling the bcrypt hash.
+{
+	email {$ACME_EMAIL}
+}
+
+{$CORE_DOMAIN} {
+	reverse_proxy 127.0.0.1:3001
+}

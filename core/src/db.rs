@@ -316,9 +316,66 @@ pub fn init_schema(conn: &Connection) {
             pop_jkt            TEXT NOT NULL DEFAULT '',
             status             TEXT NOT NULL,
             signature          TEXT NOT NULL,
-            created_at         INTEGER NOT NULL
+            created_at         INTEGER NOT NULL,
+            -- Anonymous ring path (phase 3): agent_id is '' for anon receipts;
+            -- identity is replaced by ring_id + the per-ring key image. Both are
+            -- also committed by action_hash, so they are tamper-evident.
+            ring_id            TEXT,
+            config_digest      TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_agent_action_receipts_agent ON agent_action_receipts(agent_id, created_at);
+
+        -- Phase 2 of the anonymous ring-policy redesign
+        -- (docs/design/anonymous-ring-policy.md). A ring is a RULE; agents
+        -- subscribe to many rings. `rule_json` carries allowed_actions +
+        -- allowed_config_digests + per-ring budgets. Members are per-ring stealth
+        -- pseudonym points (ring_pseudonym.rs) — NEVER master keys — so a
+        -- DB-reader cannot link a member to an agent identity or across rings.
+        CREATE TABLE IF NOT EXISTS rings (
+            tenant_id   TEXT    NOT NULL DEFAULT 'default',
+            ring_id     TEXT    NOT NULL,
+            rule_json   TEXT    NOT NULL,
+            version     INTEGER NOT NULL DEFAULT 1,
+            created_at  INTEGER NOT NULL,
+            updated_at  INTEGER NOT NULL,
+            PRIMARY KEY (tenant_id, ring_id)
+        );
+        CREATE TABLE IF NOT EXISTS ring_members (
+            tenant_id        TEXT    NOT NULL DEFAULT 'default',
+            ring_id          TEXT    NOT NULL,
+            member_point_hex TEXT    NOT NULL,
+            created_at       INTEGER NOT NULL,
+            PRIMARY KEY (tenant_id, ring_id, member_point_hex)
+        );
+
+        -- Phase 4: multi-unit usage ledger keyed on the per-ring KEY IMAGE (the
+        -- pseudonym), never an agent identity. Tokens are authoritative; `usd` is
+        -- derived from a per-model price map at record time. `usage_ledger` holds
+        -- the running lifetime total per (ring, pseudonym); `usage_log` is the
+        -- append-only event trail (anchorable). Budgets in RingRule.budgets are
+        -- enforced per-pseudonym against the ledger.
+        CREATE TABLE IF NOT EXISTS usage_ledger (
+            tenant_id        TEXT    NOT NULL DEFAULT 'default',
+            ring_id          TEXT    NOT NULL,
+            key_image_hex    TEXT    NOT NULL,
+            input_tokens     INTEGER NOT NULL DEFAULT 0,
+            output_tokens    INTEGER NOT NULL DEFAULT 0,
+            usd              REAL    NOT NULL DEFAULT 0,
+            updated_at       INTEGER NOT NULL,
+            PRIMARY KEY (tenant_id, ring_id, key_image_hex)
+        );
+        CREATE TABLE IF NOT EXISTS usage_log (
+            log_id           TEXT    PRIMARY KEY NOT NULL,
+            tenant_id        TEXT    NOT NULL DEFAULT 'default',
+            ring_id          TEXT    NOT NULL,
+            key_image_hex    TEXT    NOT NULL,
+            model_id         TEXT    NOT NULL,
+            input_tokens     INTEGER NOT NULL DEFAULT 0,
+            output_tokens    INTEGER NOT NULL DEFAULT 0,
+            usd              REAL    NOT NULL DEFAULT 0,
+            recorded_at      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_log_ring ON usage_log(tenant_id, ring_id, key_image_hex, recorded_at);
 
         -- Strict, pre-Stripe payment authorization artifacts (single-use auth envelope).
         CREATE TABLE IF NOT EXISTS agent_payment_authorizations (
@@ -719,6 +776,14 @@ pub fn init_schema(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE agents ADD COLUMN attestation_ek_cert_chain_pem TEXT",
+        [],
+    );
+
+    // Anonymous ring path (phase 3): receipts from the anon flow carry ring_id +
+    // config_digest instead of an agent identity. Nullable; legacy rows untouched.
+    let _ = conn.execute("ALTER TABLE agent_action_receipts ADD COLUMN ring_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_receipts ADD COLUMN config_digest TEXT",
         [],
     );
 

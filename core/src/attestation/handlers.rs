@@ -329,9 +329,14 @@ mod tests {
             agent_id: Some("agt_test".into()),
         };
 
+        // H-5: chain validation is required by default now; this test exercises
+        // the signature-only path, so opt out explicitly (the only lib test that
+        // writes this flag, so no restore race).
+        std::env::set_var("SAURON_NITRO_REQUIRE_ROOT", "0");
         let resp = nitro_verify_inner(req)
             .await
             .expect("handler should not 4xx for well-formed body");
+        std::env::remove_var("SAURON_NITRO_REQUIRE_ROOT");
         let body = resp.0;
         assert!(body.valid, "valid blob should report valid=true, got error={:?}", body.error);
         assert_eq!(body.module_id, module_id);

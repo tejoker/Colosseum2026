@@ -624,8 +624,26 @@ fn verify_tpm2_quote(blob: &[u8], ctx: &AttestationContext) -> Result<(), Attest
         &roots_refs,
     )?;
 
-    let aik_pubkey = parse_trusted_pubkey(ctx.trusted_pubkey_b64u)?;
-    verify_aik_signature(&attest_bytes, &signature_bytes, &aik_pubkey)?;
+    // C-1: bind the quote-signature check to the AIK CERTIFICATE's own public
+    // key (extracted from its just-validated SPKI), NOT a separately
+    // client-supplied value. Previously a genuine vendor-rooted AIK cert paired
+    // with a quote signed by the attacker's own key passed both the chain check
+    // and the signature check — defeating the entire host-compromise defense.
+    let aik_der = pem_to_single_der(payload.aik_cert_pem.as_str(), "aik_cert_pem")?;
+    let cert_pubkey = aik_pubkey_from_cert(&aik_der)?;
+    // Defense in depth: if the operator also registered an AIK pubkey, it MUST
+    // equal the certificate's SPKI (catches misconfiguration; not a trust dep —
+    // the cert key is authoritative regardless).
+    let registered = ctx.trusted_pubkey_b64u.trim();
+    if !registered.is_empty() {
+        let claimed = parse_trusted_pubkey(registered)?;
+        if !tpm_pubkeys_equal(&claimed, &cert_pubkey) {
+            return Err(AttestationError::BadCertChain(
+                "registered AIK pubkey does not match the AIK certificate SubjectPublicKeyInfo".into(),
+            ));
+        }
+    }
+    verify_aik_signature(&attest_bytes, &signature_bytes, &cert_pubkey)?;
 
     Ok(())
 }
@@ -667,10 +685,159 @@ fn parse_trusted_pubkey(s: &str) -> Result<TpmPublicKey, AttestationError> {
     }
 }
 
+// ─── C-1 fix: extract the AIK public key from the certificate's SPKI ──────────
+//
+// The quote signature MUST be verified with the key inside the (chain-validated)
+// AIK certificate, not a value supplied alongside it. We have no x509 crate
+// (only `webpki`, which can't verify TPM's fixed-format ECDSA), so this is a
+// minimal, defensive DER walk to the SubjectPublicKeyInfo.
+
+/// Read one DER TLV: returns (tag, contents, rest).
+fn der_tlv(input: &[u8]) -> Result<(u8, &[u8], &[u8]), AttestationError> {
+    if input.len() < 2 {
+        return Err(AttestationError::Malformed("der: truncated TLV".into()));
+    }
+    let tag = input[0];
+    let b0 = input[1];
+    let (len, hdr) = if b0 & 0x80 == 0 {
+        (b0 as usize, 1usize)
+    } else {
+        let n = (b0 & 0x7f) as usize;
+        if n == 0 || n > 4 || input.len() < 2 + n {
+            return Err(AttestationError::Malformed("der: bad length".into()));
+        }
+        let mut len = 0usize;
+        for i in 0..n {
+            len = (len << 8) | input[2 + i] as usize;
+        }
+        (len, 1 + n)
+    };
+    let start = 1 + hdr;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| AttestationError::Malformed("der: length overflow".into()))?;
+    if end > input.len() {
+        return Err(AttestationError::Malformed("der: length exceeds buffer".into()));
+    }
+    Ok((tag, &input[start..end], &input[end..]))
+}
+
+/// Walk a certificate DER to its SubjectPublicKeyInfo and return
+/// (algorithm OID contents, public-key bit-string contents).
+fn extract_spki(cert_der: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AttestationError> {
+    let (tag, cert_seq, _) = der_tlv(cert_der)?;
+    if tag != 0x30 {
+        return Err(AttestationError::Malformed("cert: not a SEQUENCE".into()));
+    }
+    let (tag, tbs, _) = der_tlv(cert_seq)?;
+    if tag != 0x30 {
+        return Err(AttestationError::Malformed("tbsCertificate: not a SEQUENCE".into()));
+    }
+    // tbs fields: [0]version? , serialNumber, signature, issuer, validity,
+    // subject, subjectPublicKeyInfo, ...
+    let (t0, _v0, after_v0) = der_tlv(tbs)?;
+    let mut rest: &[u8] = if t0 == 0xA0 { after_v0 } else { tbs };
+    // Skip serialNumber, signature, issuer, validity, subject (5 fields).
+    for _ in 0..5 {
+        let (_t, _c, r) = der_tlv(rest)?;
+        rest = r;
+    }
+    let (tag, spki, _) = der_tlv(rest)?;
+    if tag != 0x30 {
+        return Err(AttestationError::Malformed("SPKI: not a SEQUENCE".into()));
+    }
+    let (tag, alg, after_alg) = der_tlv(spki)?;
+    if tag != 0x30 {
+        return Err(AttestationError::Malformed("SPKI.algorithm: not a SEQUENCE".into()));
+    }
+    let (tag, oid, _) = der_tlv(alg)?;
+    if tag != 0x06 {
+        return Err(AttestationError::Malformed("SPKI.algorithm.oid: not an OID".into()));
+    }
+    let (tag, bitstr, _) = der_tlv(after_alg)?;
+    if tag != 0x03 {
+        return Err(AttestationError::Malformed("SPKI.subjectPublicKey: not a BIT STRING".into()));
+    }
+    if bitstr.first() != Some(&0x00) {
+        return Err(AttestationError::Malformed(
+            "SPKI.subjectPublicKey: unexpected unused-bits byte".into(),
+        ));
+    }
+    Ok((oid.to_vec(), bitstr[1..].to_vec()))
+}
+
+// Algorithm OID contents (tag/len stripped).
+const OID_EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+const OID_RSA_ENCRYPTION: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
+const OID_ED25519: &[u8] = &[0x2B, 0x65, 0x70];
+
+/// Build the `TpmPublicKey` from a validated AIK certificate's SPKI.
+pub fn aik_pubkey_from_cert(cert_der: &[u8]) -> Result<TpmPublicKey, AttestationError> {
+    let (oid, key) = extract_spki(cert_der)?;
+    match oid.as_slice() {
+        OID_EC_PUBLIC_KEY => {
+            if key.len() != 65 || key[0] != 0x04 {
+                return Err(AttestationError::BadCertChain(
+                    "AIK cert EC key is not a 65-byte uncompressed P-256 point".into(),
+                ));
+            }
+            Ok(TpmPublicKey::EcdsaP256(key))
+        }
+        OID_ED25519 => {
+            let arr: [u8; 32] = key
+                .as_slice()
+                .try_into()
+                .map_err(|_| AttestationError::BadCertChain("AIK cert Ed25519 key not 32 bytes".into()))?;
+            Ok(TpmPublicKey::Ed25519(arr))
+        }
+        OID_RSA_ENCRYPTION => Ok(TpmPublicKey::RsaPkcs1Spki(key)),
+        _ => Err(AttestationError::BadCertChain(
+            "AIK cert SPKI algorithm is not P-256 / Ed25519 / RSA".into(),
+        )),
+    }
+}
+
+fn tpm_pubkeys_equal(a: &TpmPublicKey, b: &TpmPublicKey) -> bool {
+    use TpmPublicKey::*;
+    match (a, b) {
+        (Ed25519(x), Ed25519(y)) => x == y,
+        (EcdsaP256(x), EcdsaP256(y)) => x == y,
+        (RsaPkcs1Spki(x), RsaPkcs1Spki(y)) => x == y,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::attestation::{verify_attestation, AttestationKind};
+
+    // C-1 regression: extracting the SPKI from a REAL P-256 certificate must
+    // yield exactly the certificate's public key. Fixture generated with
+    // `openssl ecparam -name prime256v1 -genkey | openssl req -x509`.
+    const P256_CERT_DER_B64: &str = "MIIBbTCCAROgAwIBAgIUHNU1hYhTbAc+1FlrkySSp/mWdfgwCgYIKoZIzj0EAwIwDDEKMAgGA1UEAwwBdDAeFw0yNjA2MjcwNzU2MTNaFw0yNjA2MjgwNzU2MTNaMAwxCjAIBgNVBAMMAXQwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAR58IPFa5IVmegqn61nEI7GnQdlLbSR6Wqsg2YDGQm1r+xRIOns/gdwKlXVa6tLaO0+8KmPmYsubwrgDjePSkypo1MwUTAdBgNVHQ4EFgQUp4dU67Sw3gkj/Qo5Z3hFCxUvYmIwHwYDVR0jBBgwFoAUp4dU67Sw3gkj/Qo5Z3hFCxUvYmIwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiEApb3l3ZNmjEE73wafSVNVy7dmeK0mcJSdryweDWy08DUCIEqhPjEKq4oP5B/NCa7D/jg6iUizMluk0PRrfCoMeIyS";
+    const P256_POINT_HEX: &str = "0479f083c56b921599e82a9fad67108ec69d07652db491e96aac8366031909b5afec5120e9ecfe07702a55d56bab4b68ed3ef0a98f998b2e6f0ae00e378f4a4ca9";
+
+    #[test]
+    fn aik_pubkey_from_cert_extracts_real_p256_spki() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        let der = B64.decode(P256_CERT_DER_B64).unwrap();
+        match aik_pubkey_from_cert(&der).expect("extract SPKI") {
+            TpmPublicKey::EcdsaP256(pt) => assert_eq!(hex::encode(&pt), P256_POINT_HEX),
+            other => panic!("expected EcdsaP256, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn registered_pubkey_mismatch_is_rejected() {
+        // The cert's real key vs a different registered key → not equal.
+        use base64::engine::general_purpose::STANDARD as B64;
+        let der = B64.decode(P256_CERT_DER_B64).unwrap();
+        let cert_key = aik_pubkey_from_cert(&der).unwrap();
+        let attacker_key = TpmPublicKey::EcdsaP256(vec![0x04; 65]);
+        assert!(!tpm_pubkeys_equal(&attacker_key, &cert_key));
+        assert!(tpm_pubkeys_equal(&cert_key, &cert_key));
+    }
 
     fn well_formed_tpm2_payload() -> Vec<u8> {
         use base64::engine::general_purpose::STANDARD as B64;

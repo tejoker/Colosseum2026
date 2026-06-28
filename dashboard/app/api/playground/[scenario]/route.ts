@@ -1,43 +1,33 @@
 import { NextRequest } from "next/server";
+import { proxyCore } from "../../_proxy";
 
-// Playground demo endpoints on the core were removed alongside the dead
-// analytics path. The dashboard playground is now a client-side simulation
-// only — return a deterministic stub so the UI renders correctly.
-//
-// When real demo endpoints land in the core, swap this for a `proxyCore(...)`
-// call against the right /admin/* path.
-
-const SCENARIO_RESULTS: Record<string, { result: "allowed" | "stopped"; status_code: number; detail: Record<string, unknown> }> = {
-  normal: {
-    result: "allowed",
-    status_code: 200,
-    detail: { scenario: "happy_path", note: "simulated — core demo endpoints not yet wired" },
-  },
-  replay: {
-    result: "stopped",
-    status_code: 409,
-    detail: { scenario: "replay_attack", reason: "duplicate nonce detected (simulated)" },
-  },
-  scope: {
-    result: "stopped",
-    status_code: 403,
-    detail: { scenario: "scope_escalation", reason: "intent outside mandate (simulated)" },
-  },
-  custom: {
-    result: "stopped",
-    status_code: 400,
-    detail: { scenario: "custom", note: "custom scenarios require live core demo endpoints" },
-  },
-};
+// The "Try" page now runs REAL governance scenarios against the core:
+//   normal | replay | scope  ->  POST /admin/demo/scenario/{scenario}
+// The core returns { result: "allowed"|"stopped", status_code, detail } after
+// exercising the live replay-protection store / tool-allowlist invariant.
+const REAL = new Set(["normal", "replay", "scope"]);
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ scenario: string }> }
 ) {
   const { scenario } = await params;
-  const out = SCENARIO_RESULTS[scenario];
-  if (!out) {
-    return Response.json({ ok: false, error: "Unknown scenario" }, { status: 400 });
+
+  if (REAL.has(scenario)) {
+    return proxyCore(`demo/scenario/${encodeURIComponent(scenario)}`, req, {
+      method: "POST",
+      forwardQuery: false,
+    });
   }
-  return Response.json(out);
+
+  // "custom" (and anything else) exercises the same governance path
+  // conceptually but has no dedicated core scenario — report honestly.
+  return Response.json({
+    result: "stopped",
+    status_code: 400,
+    detail: {
+      scenario,
+      note: "custom scenarios use the same governance path; pick replay or scope for a live verdict",
+    },
+  });
 }

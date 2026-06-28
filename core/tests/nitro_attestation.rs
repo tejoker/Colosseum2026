@@ -33,6 +33,33 @@ use sauron_core::attestation_cbor::{
 use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P384_SHA384_FIXED_SIGNING};
 
+// Serialise env-var mutation across COSE-verifying tests: verification reads
+// SAURON_NITRO_REQUIRE_ROOT / SAURON_NITRO_ROOT_PEM, and cargo runs tests in
+// parallel. Holding this lock for set→verify→restore makes them deterministic
+// (and fixes the pre-existing parallel-env flake in this suite).
+static NITRO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_nitro_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+    let _g = NITRO_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev: Vec<(String, Option<String>)> = vars
+        .iter()
+        .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+        .collect();
+    for (k, v) in vars {
+        match v {
+            Some(x) => std::env::set_var(k, x),
+            None => std::env::remove_var(k),
+        }
+    }
+    f();
+    for (k, p) in prev {
+        match p {
+            Some(x) => std::env::set_var(&k, x),
+            None => std::env::remove_var(&k),
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Test-cert builder. Minimal X.509 DER: just enough for the SPKI extractor.
 //
@@ -384,10 +411,13 @@ fn verify_attestation_accepts_cbor_blob_with_valid_signature() {
         expected_measurement_hex: &expected,
         trusted_pubkey_b64u: "",
     };
-    // SAURON_NITRO_ROOT_PEM is unset → cert-chain step is skipped (dev mode),
-    // but the signature check still runs.
-    verify_attestation(AttestationKind::NitroEnclave, &blob, &ctx)
-        .expect("CBOR Nitro attestation with valid signature should verify");
+    // H-5: chain validation is now required by default. This test exercises the
+    // signature-only path, so it explicitly opts out (REQUIRE_ROOT=0) — the
+    // unrooted path the audit flagged is now opt-in, not the default.
+    with_nitro_env(&[("SAURON_NITRO_REQUIRE_ROOT", Some("0")), ("SAURON_NITRO_ROOT_PEM", None)], || {
+        verify_attestation(AttestationKind::NitroEnclave, &blob, &ctx)
+            .expect("CBOR Nitro attestation with valid signature should verify");
+    });
 }
 
 #[test]
@@ -411,17 +441,20 @@ fn verify_attestation_rejects_tampered_payload() {
         expected_measurement_hex: &expected,
         trusted_pubkey_b64u: "",
     };
-    match verify_attestation(AttestationKind::NitroEnclave, &tampered, &ctx) {
-        Err(AttestationError::BadSignature) => {}
-        other => panic!(
-            "expected BadSignature for tampered payload, got {:?}",
-            other
-        ),
-    }
+    // Opt out of the (now default) require-root gate so we reach the signature
+    // check and observe BadSignature on the tampered payload.
+    with_nitro_env(&[("SAURON_NITRO_REQUIRE_ROOT", Some("0")), ("SAURON_NITRO_ROOT_PEM", None)], || {
+        match verify_attestation(AttestationKind::NitroEnclave, &tampered, &ctx) {
+            Err(AttestationError::BadSignature) => {}
+            other => panic!("expected BadSignature for tampered payload, got {:?}", other),
+        }
+    });
 }
 
 #[test]
 fn verify_attestation_with_invalid_chain_fails_closed() {
+    // Serialise with the other env-touching COSE tests (shared NITRO_ENV_LOCK).
+    let _env_guard = NITRO_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // When SAURON_NITRO_ROOT_PEM points at a root that does not actually anchor
     // the leaf cert, the chain step must fail. We use a path that points at a
     // genuine PEM file (so the loader returns roots) but the embedded cert

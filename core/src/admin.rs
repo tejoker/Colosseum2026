@@ -463,6 +463,115 @@ pub async fn get_anchor_batches(
     }
 }
 
+// OpenTimestamps detached-file framing. We reconstruct a standards-compliant
+// `.ots` around the stored calendar receipt so the artifact verifies with the
+// stock `ots` tooling (`ots upgrade` / `ots info` / `ots verify`).
+//
+// The calendar `/digest` (and later `/timestamp/{root}`) endpoints return a
+// serialized OTS *Timestamp* whose implicit message is the 32-byte merkle root
+// we submitted (raw, no nonce — see bitcoin_anchor::publish_opentimestamps). A
+// detached `.ots` file wraps that as:
+//   HEADER_MAGIC ‖ varuint(MAJOR_VERSION=1) ‖ file_hash_op ‖ msg ‖ timestamp
+// with file_hash_op = OpSHA256 (tag 0x08) and msg = the 32-byte root. The
+// bytes below are verbatim from the OpenTimestamps spec
+// (DetachedTimestampFile.HEADER_MAGIC).
+const OTS_HEADER_MAGIC: [u8; 31] = [
+    0x00, b'O', b'p', b'e', b'n', b'T', b'i', b'm', b'e', b's', b't', b'a', b'm', b'p', b's',
+    0x00, 0x00, b'P', b'r', b'o', b'o', b'f', 0x00, 0xbf, 0x89, 0xe2, 0xe8, 0x84, 0xe8, 0x92,
+    0x94,
+];
+const OTS_MAJOR_VERSION: u8 = 0x01;
+const OTS_OP_SHA256_TAG: u8 = 0x08;
+
+/// Build the detached `.ots` byte stream from a 32-byte merkle root and the
+/// stored calendar timestamp blob. Split out so it can be unit-tested for the
+/// exact header/version/op framing the `ots` tooling expects.
+fn build_ots_detached(root: &[u8; 32], timestamp_blob: &[u8]) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(OTS_HEADER_MAGIC.len() + 2 + root.len() + timestamp_blob.len());
+    out.extend_from_slice(&OTS_HEADER_MAGIC);
+    out.push(OTS_MAJOR_VERSION);
+    out.push(OTS_OP_SHA256_TAG);
+    out.extend_from_slice(root);
+    out.extend_from_slice(timestamp_blob);
+    out
+}
+
+/// GET /admin/anchor/ots/{anchor_id} — download the OpenTimestamps `.ots`
+/// proof for a Bitcoin merkle anchor. `anchor_id` is the
+/// `bitcoin_merkle_anchors.anchor_id` (i.e. the `btc_anchor_id` reported by
+/// `/anchor/batches`). Returns the raw `.ots` bytes as an attachment so a
+/// reviewer can verify the root is committed to Bitcoin with the stock tool.
+pub async fn get_anchor_ots(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    Path(anchor_id): Path<String>,
+) -> axum::response::Response {
+    use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+
+    let row: Option<(String, Vec<u8>)> = {
+        let st = state.read().unwrap();
+        let conn = match st.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            }
+        };
+        conn.query_row(
+            "SELECT merkle_root_hex, ots_receipt_blob
+             FROM bitcoin_merkle_anchors
+             WHERE anchor_id = ?1 AND provider = 'opentimestamps'",
+            params![anchor_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+        .ok()
+    };
+
+    let (root_hex, blob) = match row {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                "no OpenTimestamps proof for this anchor (not Bitcoin-anchored, or unknown anchor_id)",
+            )
+                .into_response()
+        }
+    };
+    if blob.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            "OpenTimestamps receipt not yet available — the calendar has not returned a proof for this root",
+        )
+            .into_response();
+    }
+    let root: [u8; 32] = match hex::decode(&root_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&b);
+            a
+        }
+        _ => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "stored merkle root is not 32 bytes")
+                .into_response()
+        }
+    };
+
+    let ots = build_ots_detached(&root, &blob);
+    let short = &root_hex[..root_hex.len().min(16)];
+    let filename = format!("sauronid-{short}.ots");
+    (
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        ots,
+    )
+        .into_response()
+}
+
 /// POST /admin/anchor/agent-actions/run
 /// Force an immediate anchor batch instead of waiting for the periodic task.
 /// Useful for tests and one-shot CI verification.
@@ -688,6 +797,20 @@ pub async fn revoke_agent_admin(
     if rows == 0 {
         return Err((StatusCode::NOT_FOUND, "Agent not found".into()));
     }
+    // M-3: prune the revoked agent's point from the in-memory ring.
+    let pubkey: Option<String> = {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        db.query_row(
+            "SELECT public_key_hex FROM agents WHERE agent_id = ?1",
+            params![agent_id],
+            |r| r.get(0),
+        )
+        .ok()
+    };
+    if let Some(hex) = pubkey {
+        state.write().unwrap().drop_ring_member(&hex);
+    }
     {
         let st = state.read().unwrap();
         st.log("AGENT_REVOKE_ADMIN", "OK", &agent_id);
@@ -770,6 +893,97 @@ pub async fn get_recent_actions(
         .flatten()
         .collect();
     Ok(Json(records))
+}
+
+/// Verdict surface for the dashboard "Try" page. Each scenario exercises a
+/// REAL governance primitive (no mocks): `replay` runs the live single-use
+/// nonce store, `scope`/`normal` run the live tool-allowlist invariant.
+#[derive(Serialize)]
+pub struct DemoScenarioOut {
+    pub result: String, // "allowed" | "stopped"
+    pub status_code: u16,
+    pub detail: serde_json::Value,
+}
+
+/// POST /admin/demo/scenario/{scenario} — run a governance scenario for real
+/// and report whether the action was allowed or stopped. Admin-gated.
+pub async fn run_demo_scenario(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    Path(scenario): Path<String>,
+) -> Result<Json<DemoScenarioOut>, AppError> {
+    use crate::policy::invariants::{
+        Action, AllowlistCheck, EvaluationContext, RuntimeCheck, Verdict,
+    };
+    let allowed_tools = vec!["web_fetch".to_string(), "search".to_string()];
+
+    match scenario.as_str() {
+        // Valid, in-scope action — the real allowlist invariant permits it.
+        "normal" => {
+            let check = AllowlistCheck::tools(allowed_tools.clone());
+            let action = Action { tool: "web_fetch".into(), ..Default::default() };
+            let ctx = EvaluationContext::with_defaults(&action);
+            let allowed = matches!(check.evaluate(&ctx), Verdict::Allow);
+            Ok(Json(DemoScenarioOut {
+                result: if allowed { "allowed" } else { "stopped" }.into(),
+                status_code: if allowed { 200 } else { 403 },
+                detail: serde_json::json!({
+                    "scenario": "happy_path",
+                    "tool": "web_fetch",
+                    "allowed_tools": allowed_tools,
+                    "note": "valid in-scope action accepted by the live policy evaluator"
+                }),
+            }))
+        }
+        // Out-of-scope tool — the real allowlist invariant denies it.
+        "scope" => {
+            let check = AllowlistCheck::tools(allowed_tools.clone());
+            let action = Action { tool: "transfer_funds".into(), ..Default::default() };
+            let ctx = EvaluationContext::with_defaults(&action);
+            let reason = match check.evaluate(&ctx) {
+                Verdict::Deny { check, reason } => format!("{check}: {reason}"),
+                Verdict::Allow => "unexpectedly allowed".into(),
+            };
+            Ok(Json(DemoScenarioOut {
+                result: "stopped".into(),
+                status_code: 403,
+                detail: serde_json::json!({
+                    "scenario": "scope_escalation",
+                    "attempted_tool": "transfer_funds",
+                    "allowed_tools": allowed_tools,
+                    "reason": reason
+                }),
+            }))
+        }
+        // Replay — consume the SAME single-use nonce twice against the live store.
+        "replay" => {
+            let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+            let db = st.db.lock().map_err(|_| AppError::Internal("db lock".into()))?;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let nonce = format!("demo-replay-{nanos}");
+            let exp = (nanos / 1_000_000_000) as i64 + 300;
+            let first_ok =
+                crate::ajwt_support::consume_call_nonce(&db, "demo_scenario_agent", &nonce, exp)
+                    .is_ok();
+            let second_err =
+                crate::ajwt_support::consume_call_nonce(&db, "demo_scenario_agent", &nonce, exp)
+                    .err();
+            let stopped = first_ok && second_err.is_some();
+            Ok(Json(DemoScenarioOut {
+                result: if stopped { "stopped" } else { "allowed" }.into(),
+                status_code: if stopped { 409 } else { 200 },
+                detail: serde_json::json!({
+                    "scenario": "replay_attack",
+                    "first_call": if first_ok { "accepted" } else { "rejected" },
+                    "replayed_call": second_err.clone().unwrap_or_else(|| "accepted".into()),
+                    "reason": "single-use nonce — the duplicate was rejected by the live replay-protection store"
+                }),
+            }))
+        }
+        other => Err(AppError::BadRequest(format!("unknown demo scenario: {other}"))),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1241,4 +1455,33 @@ pub async fn get_stats(State(state): State<Arc<RwLock<ServerState>>>) -> Json<St
         exchange_rate: 1,
         controls,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Locks the exact OpenTimestamps detached-file framing the `ots` tooling
+    // expects: HEADER_MAGIC ‖ version(1) ‖ OpSHA256(0x08) ‖ msg(32) ‖ timestamp.
+    #[test]
+    fn ots_detached_framing_is_spec_exact() {
+        let root = [0xABu8; 32];
+        let blob = vec![0x01, 0x02, 0x03, 0x04];
+        let out = build_ots_detached(&root, &blob);
+
+        // Header magic verbatim from the OpenTimestamps spec.
+        let expected_magic: &[u8] = b"\x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94";
+        assert_eq!(expected_magic.len(), 31);
+        assert_eq!(&out[..31], expected_magic, "header magic must match spec");
+
+        // Version varuint (1) then OpSHA256 tag (0x08).
+        assert_eq!(out[31], 0x01, "major version varuint");
+        assert_eq!(out[32], 0x08, "file_hash_op must be OpSHA256");
+
+        // The 32-byte message (merkle root) then the calendar timestamp blob.
+        assert_eq!(&out[33..65], &root, "msg must be the 32-byte root");
+        assert_eq!(&out[65..], &blob[..], "timestamp blob appended verbatim");
+
+        assert_eq!(out.len(), 31 + 1 + 1 + 32 + blob.len());
+    }
 }

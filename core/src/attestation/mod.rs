@@ -142,6 +142,128 @@ pub fn check_server_derived_allowed() -> Result<(), AttestationError> {
     ))
 }
 
+// ─── Registration-time enforcement gate (gap #4) ─────────────────────────
+
+/// Outcome of the registration-time attestation gate.
+#[derive(Debug, Clone, Default)]
+pub struct RegistrationAttestation {
+    /// The measurement that was cryptographically confirmed against the blob.
+    /// Pinned on the agent row (`attestation_pcr_set`) for audit + future
+    /// re-attestation. `None` when no hardware attestation was supplied and
+    /// none was required.
+    pub pinned_measurement_hex: Option<String>,
+}
+
+/// Parse the operator-configured golden-measurement allowlist
+/// (`SAURON_ATTESTATION_GOLDEN_MEASUREMENTS`, comma-separated hex). Empty when
+/// unset. This is the "pre-registered out-of-band" source for mode (a).
+fn golden_measurements() -> Vec<String> {
+    std::env::var("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Enforce the registration-time attestation policy.
+///
+/// Gap #4 was that the verifiers existed but were only reachable via the
+/// standalone `/v1/attestation/*` route — at `/agent/register` the blob was
+/// stored verbatim and never verified. This gate closes that, with the hybrid
+/// expected-measurement model:
+///
+///   - `None` / `ServerDerived`:
+///       * `SAURON_REQUIRE_HARDWARE_ATTESTATION=1` → reject (a verifiable
+///         hardware kind is mandatory).
+///       * otherwise pass through (the separate `check_server_derived_allowed`
+///         gate still governs `ServerDerived`).
+///   - A hardware kind (`Ed25519Self` / `Tpm2Quote` / `NitroEnclave` / …):
+///       1. `expected_measurement_hex` MUST be supplied — the operator asserts
+///          the measurement the genuine blob has to attest to.
+///       2. Mode (a) — `SAURON_REQUIRE_PREREGISTERED_MEASUREMENT=1`: the
+///          asserted measurement MUST be in the golden allowlist. This is what
+///          defends a compromised-at-first-boot host: its blob attests a
+///          non-golden measurement, so verification cannot pass.
+///       3. Mode (b) — TOFU (default): no allowlist; the genuine measurement
+///          the operator asserts is accepted and pinned.
+///       4. [`verify_attestation`] runs with the asserted measurement as
+///          `expected`, so it checks BOTH the signature / cert-chain AND that
+///          the blob attests to exactly that measurement. An attacker who
+///          asserts a golden value but whose blob attests a different state is
+///          rejected with `MeasurementMismatch`.
+pub fn enforce_registration_attestation(
+    kind: AttestationKind,
+    blob: &[u8],
+    trusted_pubkey_b64u: &str,
+    expected_measurement_hex: &str,
+) -> Result<RegistrationAttestation, AttestationError> {
+    let require_hw = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_HARDWARE_ATTESTATION",
+        /* dev_default */ false,
+        /* prod_default */ false,
+    );
+
+    if matches!(kind, AttestationKind::None | AttestationKind::ServerDerived) {
+        if require_hw {
+            return Err(AttestationError::BadCertChain(
+                "SAURON_REQUIRE_HARDWARE_ATTESTATION=1: registration requires a verifiable \
+                 hardware attestation kind (ed25519_self / tpm2_quote / nitro_enclave); \
+                 got none/server_derived"
+                    .into(),
+            ));
+        }
+        return Ok(RegistrationAttestation::default());
+    }
+
+    let measurement = expected_measurement_hex.trim();
+    if measurement.is_empty() {
+        return Err(AttestationError::Malformed(
+            "expected_measurement_hex is required for hardware attestation kinds (operator \
+             asserts the measurement the blob must attest to)"
+                .into(),
+        ));
+    }
+
+    // Mode (a): the asserted measurement must be one the operator pre-registered
+    // out-of-band, not merely whatever the host reports.
+    let strict = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_PREREGISTERED_MEASUREMENT",
+        /* dev_default */ false,
+        /* prod_default */ false,
+    );
+    if strict {
+        let golden = golden_measurements();
+        if golden.is_empty() {
+            return Err(AttestationError::BadCertChain(
+                "SAURON_REQUIRE_PREREGISTERED_MEASUREMENT=1 but \
+                 SAURON_ATTESTATION_GOLDEN_MEASUREMENTS is empty — no golden measurement to \
+                 enforce against"
+                    .into(),
+            ));
+        }
+        if !golden.iter().any(|g| g.eq_ignore_ascii_case(measurement)) {
+            return Err(AttestationError::MeasurementMismatch {
+                expected: format!("one of {} pre-registered golden measurement(s)", golden.len()),
+                got: measurement.to_string(),
+            });
+        }
+    }
+
+    let ctx = AttestationContext {
+        expected_measurement_hex: measurement,
+        trusted_pubkey_b64u,
+    };
+    verify_attestation(kind, blob, &ctx)?;
+
+    Ok(RegistrationAttestation {
+        pinned_measurement_hex: Some(measurement.to_string()),
+    })
+}
+
 // ─── AttestationError ────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -254,9 +376,197 @@ mod tests {
     }
 
     // `std::env::set_var` is process-wide. To avoid one test stomping another's
-    // env (cargo runs tests in parallel by default), we serialise the three
-    // ServerDerived tests behind a mutex.
+    // env (cargo runs tests in parallel by default), we serialise the
+    // env-dependent tests behind a mutex.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ── Registration-gate tests (gap #4) ────────────────────────────────────
+
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::Signer;
+
+    /// Build a valid ed25519_self blob signing `measurement_hex`, returning the
+    /// blob bytes and the matching operator-root public key (b64url).
+    fn ed25519_self_blob(measurement_hex: &str) -> (Vec<u8>, String) {
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let pk_b64u = URL_SAFE_NO_PAD.encode(sk.verifying_key().to_bytes());
+        let payload = serde_json::json!({
+            "measurement": measurement_hex,
+            "ts": 1_000_000_000,
+            "agent_id": "agt_gate_test",
+        });
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let sig = sk.sign(&payload_bytes);
+        let blob = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&payload_bytes),
+            URL_SAFE_NO_PAD.encode(sig.to_bytes())
+        );
+        (blob.into_bytes(), pk_b64u)
+    }
+
+    const GATE_ENV: &[&str] = &[
+        "SAURON_REQUIRE_HARDWARE_ATTESTATION",
+        "SAURON_REQUIRE_PREREGISTERED_MEASUREMENT",
+        "SAURON_ATTESTATION_GOLDEN_MEASUREMENTS",
+    ];
+
+    fn clear_gate_env() -> Vec<(&'static str, Option<&'static str>)> {
+        GATE_ENV.iter().map(|k| (*k, None)).collect()
+    }
+
+    #[test]
+    fn gate_none_kind_passes_when_hw_not_required() {
+        with_env(&clear_gate_env(), || {
+            let r = enforce_registration_attestation(AttestationKind::None, b"", "", "").unwrap();
+            assert_eq!(r.pinned_measurement_hex, None);
+        });
+    }
+
+    #[test]
+    fn gate_none_kind_rejected_when_hw_required() {
+        with_env(
+            &[
+                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", Some("1")),
+                ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", None),
+                ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", None),
+            ],
+            || {
+                match enforce_registration_attestation(AttestationKind::None, b"", "", "") {
+                    Err(AttestationError::BadCertChain(m)) => {
+                        assert!(m.contains("SAURON_REQUIRE_HARDWARE_ATTESTATION"));
+                    }
+                    other => panic!("expected BadCertChain, got {:?}", other),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn gate_hw_kind_requires_expected_measurement() {
+        with_env(&clear_gate_env(), || {
+            let (blob, _pk) = ed25519_self_blob("deadbeef");
+            match enforce_registration_attestation(
+                AttestationKind::Ed25519Self,
+                &blob,
+                "ignored",
+                "",
+            ) {
+                Err(AttestationError::Malformed(m)) => {
+                    assert!(m.contains("expected_measurement_hex"));
+                }
+                other => panic!("expected Malformed, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn gate_tofu_accepts_and_pins_genuine_measurement() {
+        with_env(&clear_gate_env(), || {
+            let measurement = "a1b2c3d4e5f6";
+            let (blob, pk) = ed25519_self_blob(measurement);
+            let r = enforce_registration_attestation(
+                AttestationKind::Ed25519Self,
+                &blob,
+                &pk,
+                measurement,
+            )
+            .expect("TOFU should accept a genuine, self-consistent attestation");
+            assert_eq!(r.pinned_measurement_hex.as_deref(), Some(measurement));
+        });
+    }
+
+    #[test]
+    fn gate_rejects_when_blob_attests_different_measurement() {
+        with_env(&clear_gate_env(), || {
+            // Operator asserts X, but the signed blob attests Y → mismatch. This
+            // is the compromised-host case: the host cannot sign a blob for a
+            // measurement it is not running.
+            let (blob, pk) = ed25519_self_blob("actual_state_Y");
+            match enforce_registration_attestation(
+                AttestationKind::Ed25519Self,
+                &blob,
+                &pk,
+                "asserted_state_X",
+            ) {
+                Err(AttestationError::MeasurementMismatch { .. }) => {}
+                other => panic!("expected MeasurementMismatch, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn gate_strict_rejects_non_golden_measurement() {
+        with_env(
+            &[
+                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
+                ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
+                ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", Some("golden1,golden2")),
+            ],
+            || {
+                let measurement = "not_golden";
+                let (blob, pk) = ed25519_self_blob(measurement);
+                match enforce_registration_attestation(
+                    AttestationKind::Ed25519Self,
+                    &blob,
+                    &pk,
+                    measurement,
+                ) {
+                    Err(AttestationError::MeasurementMismatch { .. }) => {}
+                    other => panic!("expected MeasurementMismatch (not golden), got {:?}", other),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn gate_strict_accepts_golden_measurement_with_genuine_blob() {
+        with_env(
+            &[
+                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
+                ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
+                ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", Some("GOLDEN_ABC,other")),
+            ],
+            || {
+                // Golden compare is case-insensitive; blob measurement is exact.
+                let measurement = "golden_abc";
+                let (blob, pk) = ed25519_self_blob(measurement);
+                let r = enforce_registration_attestation(
+                    AttestationKind::Ed25519Self,
+                    &blob,
+                    &pk,
+                    measurement,
+                )
+                .expect("golden + genuine blob should pass strict mode");
+                assert_eq!(r.pinned_measurement_hex.as_deref(), Some(measurement));
+            },
+        );
+    }
+
+    #[test]
+    fn gate_strict_rejects_when_golden_set_empty() {
+        with_env(
+            &[
+                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
+                ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
+                ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", None),
+            ],
+            || {
+                let (blob, pk) = ed25519_self_blob("x");
+                match enforce_registration_attestation(
+                    AttestationKind::Ed25519Self,
+                    &blob,
+                    &pk,
+                    "x",
+                ) {
+                    Err(AttestationError::BadCertChain(m)) => {
+                        assert!(m.contains("GOLDEN_MEASUREMENTS"));
+                    }
+                    other => panic!("expected BadCertChain (empty golden set), got {:?}", other),
+                }
+            },
+        );
+    }
 
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

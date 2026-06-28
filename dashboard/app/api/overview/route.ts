@@ -1,18 +1,21 @@
 import { fetchCoreJson } from "../_proxy";
 import {
   adaptOverview,
-  type CoreActionReceipt,
+  type CoreEgressRow,
   type CoreAgentRecord,
 } from "../_adapters";
 
+// Home counters derive from REAL agent egress (same source as Activity), so
+// "calls today" / "protected today" reflect what the agents actually did and
+// what the core actually rejected — not receipt-status guesswork.
 export async function GET(_req: Request) {
-  const [agentsR, receiptsR] = await Promise.all([
+  const [agentsR, egressR] = await Promise.all([
     fetchCoreJson<CoreAgentRecord[]>("agents"),
-    fetchCoreJson<CoreActionReceipt[]>("agent_actions/recent", "?limit=1000"),
+    fetchCoreJson<CoreEgressRow[]>("egress/recent", "?limit=1000"),
   ]);
 
   if (!agentsR.ok) return agentsR.response;
-  const receipts = receiptsR.ok ? receiptsR.data : [];
+  const egress = egressR.ok ? egressR.data : [];
 
-  return Response.json(adaptOverview(agentsR.data, receipts));
+  return Response.json(adaptOverview(agentsR.data, egress));
 }

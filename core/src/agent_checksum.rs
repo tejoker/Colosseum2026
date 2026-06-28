@@ -159,6 +159,48 @@ fn canonicalize_value(v: &Value) -> Value {
     }
 }
 
+/// Privacy mode for the `inputs_canonical` column (Gap #4 / "perfectly private").
+///
+/// The raw canonical JSON of an LLM agent contains the full `system_prompt`,
+/// `model_id`, and `tool_list` — usually the operator's most sensitive IP.
+/// Runtime drift detection only ever needs the *hash* (`agents.agent_checksum`
+/// / `computed_checksum`), never the plaintext, so storing the raw inputs is
+/// optional. `hash_only` stores the digest in place of the plaintext, making
+/// SauronID hold zero recoverable agent config. `plaintext` is the back-compat
+/// default and keeps field-level drift diagnostics + checksum recompute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputsStorageMode {
+    /// Store the raw canonical JSON (default; keeps inspection + recompute).
+    Plaintext,
+    /// Store the computed digest instead of the plaintext (max privacy).
+    HashOnly,
+}
+
+impl InputsStorageMode {
+    /// Resolve from `SAURON_CHECKSUM_INPUTS_STORAGE`. Default `plaintext`.
+    pub fn from_env() -> Self {
+        match std::env::var("SAURON_CHECKSUM_INPUTS_STORAGE")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("hash_only") | Some("hash") => Self::HashOnly,
+            _ => Self::Plaintext,
+        }
+    }
+}
+
+/// What actually goes into the `inputs_canonical` column for the resolved
+/// storage mode. In `hash_only` mode the plaintext config never touches the
+/// DB — the digest is stored instead (non-empty, satisfies NOT NULL, and is
+/// still a deterministic per-version value for the rotation audit trail).
+pub fn storage_payload(canonical: &str, computed_checksum: &str) -> String {
+    match InputsStorageMode::from_env() {
+        InputsStorageMode::Plaintext => canonical.to_string(),
+        InputsStorageMode::HashOnly => computed_checksum.to_string(),
+    }
+}
+
 /// Persist the computed inputs + checksum into `agent_checksum_inputs`.
 pub fn persist_inputs(
     db: &rusqlite::Connection,
@@ -242,6 +284,43 @@ mod tests {
     fn unknown_agent_type_rejected() {
         let r = compute_checksum("not_a_type", &serde_json::json!({}));
         assert!(matches!(r, Err(ChecksumError::UnknownType(_))));
+    }
+
+    // env-mutating; serialise against other storage-mode tests via this guard.
+    fn with_storage_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        let prev = std::env::var("SAURON_CHECKSUM_INPUTS_STORAGE").ok();
+        match value {
+            Some(v) => std::env::set_var("SAURON_CHECKSUM_INPUTS_STORAGE", v),
+            None => std::env::remove_var("SAURON_CHECKSUM_INPUTS_STORAGE"),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var("SAURON_CHECKSUM_INPUTS_STORAGE", v),
+            None => std::env::remove_var("SAURON_CHECKSUM_INPUTS_STORAGE"),
+        }
+    }
+
+    #[test]
+    fn storage_payload_plaintext_keeps_canonical_by_default() {
+        with_storage_env(None, || {
+            assert_eq!(InputsStorageMode::from_env(), InputsStorageMode::Plaintext);
+            let canonical = r#"{"model_id":"claude-opus-4-7","system_prompt":"SECRET PROMPT"}"#;
+            assert_eq!(storage_payload(canonical, "sha256:abc"), canonical);
+        });
+    }
+
+    #[test]
+    fn storage_payload_hash_only_never_stores_plaintext() {
+        with_storage_env(Some("hash_only"), || {
+            assert_eq!(InputsStorageMode::from_env(), InputsStorageMode::HashOnly);
+            let canonical = r#"{"model_id":"claude-opus-4-7","system_prompt":"SECRET PROMPT"}"#;
+            let stored = storage_payload(canonical, "sha256:abc");
+            assert_eq!(stored, "sha256:abc");
+            assert!(
+                !stored.contains("SECRET PROMPT"),
+                "hash_only must not leak the raw system prompt into the DB column"
+            );
+        });
     }
 
     #[test]

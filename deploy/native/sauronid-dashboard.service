@@ -1,0 +1,23 @@
+[Unit]
+Description=SauronID dashboard (no-Docker, optional)
+After=network-online.target sauronid-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sauronid
+Group=sauronid
+WorkingDirectory=/opt/sauronid/dashboard
+# Dedicated env (just SAURON_ADMIN_KEY + SAURONID_TENANTS) — NOT core.env,
+# whose PORT=3001 would collide with the core. vm-setup.sh generates it.
+EnvironmentFile=/opt/sauronid/dashboard.env
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+Environment=SAURON_CORE_INTERNAL_URL=http://127.0.0.1:3001
+ExecStart=/usr/bin/node /opt/sauronid/dashboard/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

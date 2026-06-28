@@ -126,3 +126,16 @@ next-env.d.ts
 # WSL Windows zone metadata
 *.Zone.Identifier
 *:Zone.Identifier
+
+# ── SauronID demo: private identity stays local; templates are committed ──────
+# The real connection/identity file (GPU SSH target, VM host, admin key, core
+# URL) and the Solana keypair are NEVER committed. The *.example templates are.
+deploy/demo.local.env
+deploy/secrets/
+# No-Docker path: VM-side secret env files + locally-built artifacts stay out.
+deploy/native/core.env
+deploy/native/site.env
+deploy/native/dist/
+# Re-include the committed templates (negations must follow the broad .env.* rule).
+!deploy/.env.deploy.example
+!deploy/demo.local.env.example

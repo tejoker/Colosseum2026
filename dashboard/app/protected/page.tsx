@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ProtectedPage() {
   const t = await getTranslations("protected");
-  const result = await fetchProtected({ limit: 100 });
+  const result = await fetchProtected({ limit: 1000 });
   const events = result.ok ? result.data : [];
 
   const today = events.filter(
