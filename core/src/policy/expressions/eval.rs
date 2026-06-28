@@ -195,10 +195,19 @@ fn resolve_ident(name: &str, env: &EvalEnv) -> Result<Value, EvalError> {
         }
         "timestamp" | "action.timestamp" => Ok(Value::Num(env.action.timestamp as f64)),
 
-        // Action lacks a structured `metadata.payment_currency` field today;
-        // explicit Null lets `payment_currency in (…)` produce a TypeError
-        // rather than UnknownIdent. The dashboard surfaces that cleanly.
-        "payment_currency" => Ok(Value::Null),
+        // Resolve from the action metadata the payment path populates
+        // (`currency`), so `payment_currency in (…)` allowlists actually
+        // enforce. Falls back to Null only when truly absent (then `in`
+        // collapses to Allow per the Expr::In comment — a non-currency action
+        // isn't currency-constrained).
+        "payment_currency" => Ok(env
+            .action
+            .metadata
+            .get("payment_currency")
+            .or_else(|| env.action.metadata.get("currency"))
+            .and_then(|v| v.as_str())
+            .map(|s| Value::Str(s.to_string()))
+            .unwrap_or(Value::Null)),
 
         _ => Err(EvalError::UnknownIdent(name.to_string())),
     }
@@ -780,6 +789,24 @@ mod tests {
             assert!(pred("'EUR' in ('EUR', 'USD')", env));
             assert!(!pred("'GBP' in ('EUR', 'USD')", env));
         });
+    }
+
+    #[test]
+    fn payment_currency_resolves_from_metadata_so_allowlist_enforces() {
+        // Was a dead no-op (hardcoded Null → Null-in → Allow). Now the
+        // allowlist actually denies a disallowed currency.
+        let binding = mk_binding();
+        let mut deny = mk_action();
+        deny.metadata.insert("currency".into(), serde_json::json!("GBP"));
+        let ctx = EvaluationContext::with_defaults(&deny);
+        let env = EvalEnv { action: &deny, ctx: &ctx, binding: &binding, now_epoch: 1_700_000_500 };
+        assert!(!pred("payment_currency in ('EUR', 'USD')", &env), "GBP must be denied");
+
+        let mut ok = mk_action();
+        ok.metadata.insert("currency".into(), serde_json::json!("EUR"));
+        let ctx2 = EvaluationContext::with_defaults(&ok);
+        let env2 = EvalEnv { action: &ok, ctx: &ctx2, binding: &binding, now_epoch: 1_700_000_500 };
+        assert!(pred("payment_currency in ('EUR', 'USD')", &env2), "EUR must pass");
     }
 
     #[test]

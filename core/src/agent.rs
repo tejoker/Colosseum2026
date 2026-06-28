@@ -282,6 +282,18 @@ pub struct RegisterAgentRequest {
     /// transition seamless.
     #[serde(default)]
     pub tpm2_attestation_pubkey_b64u: Option<String>,
+    /// Gap #4: operator-asserted runtime measurement (hex) the attestation blob
+    /// must attest to. REQUIRED when `attestation_kind` is a hardware kind. For
+    /// ed25519_self this is the operator-signed measurement; for tpm2 / nitro it
+    /// is the expected PCR commitment. Verified at registration by
+    /// `enforce_registration_attestation` (signature/chain + measurement match).
+    #[serde(default)]
+    pub expected_measurement_hex: Option<String>,
+    /// Public key (base64url) trusted to sign the attestation. For ed25519_self
+    /// this is the operator's offline root key; for tpm2 the gate falls back to
+    /// `tpm2_attestation_pubkey_b64u`.
+    #[serde(default)]
+    pub attestation_pubkey_b64u: Option<String>,
 }
 
 fn default_intent() -> String {
@@ -408,6 +420,33 @@ pub async fn register_agent(
         /* dev_default */ false,
         /* prod_default */ true,
     );
+
+    // Gap #3 hardening: the `custom` agent_type carries an EMPTY required-fields
+    // contract (`AgentType::required_fields`), so an operator can register it
+    // with arbitrary or empty `checksum_inputs` — binding nothing the runtime
+    // can drift from, which silently defeats the config-digest leash. Refuse
+    // `custom` in production-like runtimes unless explicitly opted in, matching
+    // the `SAURON_REQUIRE_*` gate convention (dev: allow; prod: deny).
+    if matches!(
+        crate::agent_checksum::AgentType::parse(&payload.agent_type),
+        Some(crate::agent_checksum::AgentType::Custom)
+    ) {
+        let allow_custom = crate::runtime_mode::require_or_default(
+            "SAURON_ALLOW_CUSTOM_CHECKSUM",
+            /* dev_default */ true,
+            /* prod_default */ false,
+        );
+        if !allow_custom {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "agent_type='custom' has no required-field contract and binds nothing the \
+                 runtime can drift from; refused in production. Use a typed agent_type \
+                 (llm/mcp_server/rule_bot/browser/openai_assistant/framework) or set \
+                 SAURON_ALLOW_CUSTOM_CHECKSUM=1 to opt in."
+                    .into(),
+            ));
+        }
+    }
 
     let computed_checksum_pair: Option<(String, String, String)> = if !payload.agent_type.is_empty() {
         let inputs = payload
@@ -572,6 +611,41 @@ pub async fn register_agent(
             }
         }
     }
+
+    // ── Gap #4: enforce attestation AT REGISTRATION ─────────────────────────
+    //
+    // The verifiers (ed25519_self / tpm2 / nitro) existed but were only
+    // reachable via the standalone /v1/attestation route — the blob was
+    // previously persisted verbatim without verification. Resolve the blob per
+    // kind (tpm2 splits across five fields; other kinds use attestation_blob)
+    // and run the hybrid (pre-registered / TOFU) measurement gate.
+    let attest_blob: Vec<u8> =
+        if matches!(kind_parsed, crate::attestation::AttestationKind::Tpm2Quote) {
+            serde_json::json!({
+                "quote_b64": payload.tpm2_quote_b64.as_deref().unwrap_or(""),
+                "attest_b64": payload.tpm2_attest_b64.as_deref().unwrap_or(""),
+                "signature_b64": payload.tpm2_signature_b64.as_deref().unwrap_or(""),
+                "aik_cert_pem": payload.tpm2_aik_cert_pem.as_deref().unwrap_or(""),
+                "ek_cert_chain_pem": payload.tpm2_ek_cert_chain_pem.as_deref().unwrap_or(""),
+            })
+            .to_string()
+            .into_bytes()
+        } else {
+            payload.attestation_blob.clone().into_bytes()
+        };
+    let attest_trusted_pubkey = payload
+        .attestation_pubkey_b64u
+        .as_deref()
+        .or(payload.tpm2_attestation_pubkey_b64u.as_deref())
+        .unwrap_or("");
+    let attest_expected_measurement = payload.expected_measurement_hex.as_deref().unwrap_or("");
+    let registration_attestation = crate::attestation::enforce_registration_attestation(
+        kind_parsed,
+        &attest_blob,
+        attest_trusted_pubkey,
+        attest_expected_measurement,
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("attestation rejected: {e}")))?;
 
     if payload.pop_jkt.trim().is_empty() || payload.pop_public_key_b64u.trim().is_empty() {
         return Err((
@@ -800,10 +874,14 @@ pub async fn register_agent(
             .tpm2_attestation_pubkey_b64u
             .as_deref()
             .filter(|s| !s.is_empty());
+        // Pin the attestation measurement commitment. For tpm2 the operator's
+        // PCR-set JSON; for ed25519_self / nitro the verified measurement the
+        // gate confirmed (gap #4). Consumed by audit + future re-attestation.
         let attestation_pcr_set = payload
             .tpm2_pcr_set
             .as_deref()
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or(registration_attestation.pinned_measurement_hex.as_deref());
         let attestation_ek_cert_chain_pem = payload
             .tpm2_ek_cert_chain_pem
             .as_deref()
@@ -838,8 +916,11 @@ pub async fn register_agent(
 
         // Server-computed checksum: persist the structured inputs so future
         // /agent/{id}/checksum/update calls can audit the prior version.
+        // `storage_payload` honours SAURON_CHECKSUM_INPUTS_STORAGE — in
+        // hash_only mode the raw system prompt / tools never hit the DB.
         if let Some((kind, canonical, _)) = computed_checksum_pair.as_ref() {
-            crate::agent_checksum::persist_inputs(&db, &agent_id, kind, canonical, &payload.agent_checksum, now)
+            let stored = crate::agent_checksum::storage_payload(canonical, &payload.agent_checksum);
+            crate::agent_checksum::persist_inputs(&db, &agent_id, kind, &stored, &payload.agent_checksum, now)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         }
     }
@@ -1031,11 +1112,14 @@ pub async fn update_agent_checksum(
     let new_version = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
+        // Honour the storage-privacy mode on rotation too, otherwise hash_only
+        // would leak the plaintext config via a later checksum update.
+        let stored = crate::agent_checksum::storage_payload(&canonical, &new_checksum);
         crate::agent_checksum::rotate_inputs(
             &db,
             &agent_id,
             &payload.agent_type,
-            &canonical,
+            &stored,
             &new_checksum,
             &payload.reason,
             &actor_human_ki,
@@ -1125,6 +1209,20 @@ pub async fn revoke_agent(
         ));
     }
 
+    // M-3: prune the revoked agent's point from the in-memory ring.
+    let pubkey: Option<String> = {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        db.query_row(
+            "SELECT public_key_hex FROM agents WHERE agent_id = ?1",
+            params![agent_id],
+            |r| r.get(0),
+        )
+        .ok()
+    };
+    if let Some(hex) = pubkey {
+        state.write().unwrap().drop_ring_member(&hex);
+    }
     {
         let st = state.read().unwrap();
         st.log("AGENT_REVOKE", "OK", &agent_id);
@@ -1644,6 +1742,59 @@ async fn try_verify_call_sig(
     Ok(VerifiedCallSig { agent_id })
 }
 
+/// Best-effort: persist a *denied* agent egress attempt into `agent_egress_log`
+/// with `allowed = 0`, so a blocked call (replayed nonce / tampered body /
+/// revoked agent) is visible in the audit feed (the dashboard Activity → Stopped
+/// view), not silently dropped. A real audit records denials, not just
+/// successes — otherwise a blocked attack leaves no trace after the fact.
+///
+/// Scoped to the `/agent/egress/log` route: denials on other signed routes are
+/// not "egress" events and would mislabel the feed. Never fails the request —
+/// any storage error is swallowed, the original 4xx still stands.
+fn log_denied_egress(
+    state: &Arc<RwLock<ServerState>>,
+    parts: &axum::http::request::Parts,
+    body_bytes: &[u8],
+    status: StatusCode,
+) {
+    if parts.uri.path() != "/agent/egress/log" {
+        return;
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(body_bytes).unwrap_or(serde_json::Value::Null);
+    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
+    let agent_id = match field("agent_id") {
+        Some(a) if !a.is_empty() => a,
+        _ => return, // can't attribute the attempt → don't pollute the feed
+    };
+    let target_host = field("target_host").unwrap_or_default();
+    let target_path = field("target_path").unwrap_or_default();
+    let method = field("method").unwrap_or_else(|| parts.method.as_str().to_string());
+    let body_hash_hex = field("body_hash_hex").unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if let Ok(st) = state.read() {
+        if let Ok(db) = st.db.lock() {
+            let _ = db.execute(
+                "INSERT INTO agent_egress_log
+                 (agent_id, target_host, target_path, method, body_hash_hex, status_code, ts, allowed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+                params![
+                    agent_id,
+                    target_host,
+                    target_path,
+                    method,
+                    body_hash_hex,
+                    status.as_u16() as i64,
+                    now,
+                ],
+            );
+        }
+    }
+}
+
 pub async fn require_call_signature(
     State(state): State<Arc<RwLock<ServerState>>>,
     req: axum::extract::Request,
@@ -1670,6 +1821,9 @@ pub async fn require_call_signature(
         }
         Err((status, msg)) => {
             if enforce {
+                // Record the blocked attempt so the rejection is auditable
+                // (Activity → Stopped) instead of vanishing.
+                log_denied_egress(&state, &parts, &body_bytes, status);
                 Err((status, msg))
             } else {
                 tracing::warn!(

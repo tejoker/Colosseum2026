@@ -138,6 +138,36 @@ export function adaptAgents(
   return agents.map((a) => adaptAgent(a, m));
 }
 
+/** A REAL outbound call an agent made — from /admin/egress/recent. */
+export interface CoreEgressRow {
+  id: number;
+  agent_id: string;
+  target_host: string;
+  target_path: string;
+  method: string;
+  status_code: number;
+  ts: number;
+  allowed?: boolean;
+}
+
+/** Adapt real agent egress into the Activity feed shape (live monitor). */
+export function adaptEgress(
+  rows: CoreEgressRow[],
+  agentNameById: Map<string, string>
+): ActivityCall[] {
+  return rows.map((e) => ({
+    id: `egr_${e.id}`,
+    agent_id: e.agent_id,
+    agent_name: agentNameById.get(e.agent_id) ?? e.agent_id,
+    action: `${e.method} ${e.target_host}${e.target_path ?? ""}`,
+    intent: e.target_host,
+    result: e.allowed === false ? "stopped" : "allowed",
+    latency_ms: 0,
+    timestamp: epochToIso(e.ts),
+    detail: {},
+  }));
+}
+
 export function adaptActivity(
   receipts: CoreActionReceipt[],
   agentNameById: Map<string, string>
@@ -161,35 +191,42 @@ export function adaptActivity(
   });
 }
 
+/**
+ * The "Protected" feed = governance stops that ACTUALLY happened. The only
+ * genuine stops in the live system are blocked agent calls — egress attempts
+ * the core REJECTED (allowed = false): a replayed nonce (409), a tampered body
+ * or revoked agent (401/403). We read those directly, so every row is a real
+ * rejection the core made, never an accepted action mislabeled as blocked.
+ */
 export function adaptProtected(
-  receipts: CoreActionReceipt[],
+  rows: CoreEgressRow[],
   agentNameById: Map<string, string>
 ): ProtectedEvent[] {
-  // Filter to stopped-only on the way out.
-  return receipts
-    .filter((r) => {
-      const s = r.status?.toLowerCase();
-      return s !== "ok" && s !== "allowed";
-    })
-    .map((r) => ({
-      id: r.receipt_id,
-      agent_id: r.agent_id,
-      agent_name: agentNameById.get(r.agent_id) ?? r.agent_id,
-      reason: r.status || "stopped",
-      reason_code: mapReasonCode(r.status),
-      timestamp: epochToIso(r.created_at),
-      detail: { action_hash: r.action_hash, policy_version: r.policy_version },
+  return rows
+    .filter((e) => e.allowed === false)
+    .map((e) => ({
+      id: `egr_${e.id}`,
+      agent_id: e.agent_id,
+      agent_name: agentNameById.get(e.agent_id) ?? e.agent_id,
+      reason: `HTTP ${e.status_code}`,
+      reason_code: mapEgressReason(e.status_code, e.target_path),
+      timestamp: epochToIso(e.ts),
+      detail: {
+        method: e.method,
+        target: `${e.target_host}${e.target_path ?? ""}`,
+        status_code: e.status_code,
+      },
     }));
 }
 
-function mapReasonCode(status: string | undefined): ProtectedEvent["reason_code"] {
-  const s = (status ?? "").toLowerCase();
-  if (s.includes("replay")) return "replay";
-  if (s.includes("scope")) return "scope";
-  if (s.includes("sig")) return "signature";
-  if (s.includes("nonce")) return "nonce";
-  if (s.includes("revoke")) return "revoked";
-  if (s.includes("expir")) return "expired";
+function mapEgressReason(
+  statusCode: number,
+  path: string | undefined
+): ProtectedEvent["reason_code"] {
+  const p = (path ?? "").toLowerCase();
+  if (p.includes("revoke")) return "revoked";
+  if (statusCode === 409) return "replay";
+  if (statusCode === 401 || statusCode === 403) return "signature";
   return "scope";
 }
 
@@ -264,9 +301,15 @@ export function adaptHealth(h: CoreHealthResponse, agentCount: number): SystemHe
   };
 }
 
+/**
+ * Home counters, derived from REAL agent egress (the same source as Activity).
+ * `calls_today` = outbound calls the agents actually made today; `protected_today`
+ * = the subset the core rejected (allowed === false). No receipt-status guessing,
+ * so an accepted action can never be miscounted as "protected".
+ */
 export function adaptOverview(
   agents: CoreAgentRecord[],
-  receipts: CoreActionReceipt[]
+  egress: CoreEgressRow[]
 ): OverviewStats {
   const total_agents = agents.length;
   const active_agents = agents.filter((a) => !a.revoked).length;
@@ -274,11 +317,10 @@ export function adaptOverview(
   const startOfDay = Math.floor(new Date(new Date().setHours(0, 0, 0, 0)).getTime() / 1000);
   let calls_today = 0;
   let protected_today = 0;
-  for (const r of receipts) {
-    if (r.created_at < startOfDay || r.created_at > now) continue;
+  for (const e of egress) {
+    if (e.ts < startOfDay || e.ts > now) continue;
     calls_today += 1;
-    const s = r.status?.toLowerCase();
-    if (s && s !== "ok" && s !== "allowed") protected_today += 1;
+    if (e.allowed === false) protected_today += 1;
   }
   return { total_agents, active_agents, calls_today, protected_today };
 }

@@ -1,13 +1,14 @@
 import { fetchCoreJson } from "../_proxy";
 import {
-  adaptActivity,
+  adaptEgress,
   buildAgentNameMap,
-  filterReceiptsByAgent,
-  filterReceiptsByResult,
-  type CoreActionReceipt,
+  type CoreEgressRow,
   type CoreAgentRecord,
 } from "../_adapters";
 
+// Live monitor: the REAL outbound calls every agent made (the LLM calls + tool
+// fetches), straight from the core's egress log. This reflects the actual
+// agents you run from the Console, not a simulation.
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const agentId = url.searchParams.get("agent_id");
@@ -15,20 +16,18 @@ export async function GET(req: Request) {
   const limitRaw = url.searchParams.get("limit");
   const limit = limitRaw ? Math.max(1, Math.min(1000, Number(limitRaw))) : 200;
 
-  const [receiptsR, agentsR] = await Promise.all([
-    fetchCoreJson<CoreActionReceipt[]>(
-      "agent_actions/recent",
-      `?limit=${limit}`
-    ),
+  const [egressR, agentsR] = await Promise.all([
+    fetchCoreJson<CoreEgressRow[]>("egress/recent", `?limit=${limit}`),
     fetchCoreJson<CoreAgentRecord[]>("agents"),
   ]);
 
-  if (!receiptsR.ok) return receiptsR.response;
+  if (!egressR.ok) return egressR.response;
   const agents = agentsR.ok ? agentsR.data : [];
 
-  let rows = receiptsR.data;
-  rows = filterReceiptsByAgent(rows, agentId);
-  rows = filterReceiptsByResult(rows, result);
-
-  return Response.json(adaptActivity(rows, buildAgentNameMap(agents)));
+  let rows = adaptEgress(egressR.data, buildAgentNameMap(agents));
+  if (agentId) rows = rows.filter((r) => r.agent_id === agentId);
+  if (result === "allowed" || result === "stopped") {
+    rows = rows.filter((r) => r.result === result);
+  }
+  return Response.json(rows);
 }

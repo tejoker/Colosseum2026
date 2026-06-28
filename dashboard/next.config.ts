@@ -22,7 +22,11 @@ const SECURITY_HEADERS = [
       "object-src 'none'",
       "img-src 'self' data:",
       "style-src 'self' 'unsafe-inline'",
-      "script-src 'self'",
+      // Next.js App Router injects inline hydration/RSC bootstrap scripts;
+      // a strict script-src 'self' blocks them and the app never hydrates.
+      // 'unsafe-inline' (+ 'unsafe-eval' for the client runtime) is the
+      // pragmatic demo fix — production should use nonce-based CSP.
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "connect-src 'self'",
       "form-action 'self'",
     ].join("; "),
@@ -30,6 +34,9 @@ const SECURITY_HEADERS = [
 ];
 
 const config: NextConfig = {
+  // Standalone output bundles a minimal server + only the needed node_modules
+  // into .next/standalone, so the Docker runtime image stays small.
+  output: "standalone",
   turbopack: {
     resolveAlias: {
       "next-intl/config": "./i18n/request.ts",

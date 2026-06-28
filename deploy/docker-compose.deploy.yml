@@ -1,0 +1,74 @@
+# Self-contained demo deploy: Caddy (TLS) + SauronID core + dashboard.
+#
+# Runs on a single Ubuntu VM (AWS EC2 or GCP GCE — identical). Bring up with:
+#     ./deploy.sh
+# which loads .env (copy from .env.deploy.example), builds, and starts the stack.
+#
+# Only Caddy publishes ports (80/443). Core and dashboard are reachable solely
+# through Caddy on the internal network — the core API is then exposed at
+# https://${CORE_DOMAIN} (the remote agent talks to this) and the dashboard at
+# https://${DASH_DOMAIN} (behind basic auth).
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - ACME_EMAIL=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - CORE_DOMAIN=${CORE_DOMAIN:?set CORE_DOMAIN in .env}
+      - DASH_DOMAIN=${DASH_DOMAIN:?set DASH_DOMAIN in .env}
+      - DASH_USER=${DASH_USER:?set DASH_USER in .env}
+      - DASH_BASICAUTH_HASH=${DASH_BASICAUTH_HASH:?set DASH_BASICAUTH_HASH in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - dashboard
+
+  backend:
+    build: ../core
+    image: sauronid-backend:${SAURONID_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    expose:
+      - "3001"
+    env_file: .env
+    environment:
+      - PORT=3001
+      # Demo posture: dev onboarding endpoints on, per-call-sig enforcement on
+      # (see deploy/native/core.env.example for the rationale).
+      - ENV=development
+      - SAURON_ENABLE_DEV_ENDPOINTS=1
+      - DATABASE_PATH=/var/lib/sauronid/sauron.db
+      # Solana keypair is mounted read-only (see volumes); core reads this path.
+      - SAURON_SOLANA_KEYPAIR_PATH=/etc/sauronid/solana-keypair.json
+    volumes:
+      - sauron_data:/var/lib/sauronid
+      - ./secrets/solana-devnet.json:/etc/sauronid/solana-keypair.json:ro
+
+  dashboard:
+    build:
+      context: ../dashboard
+      args:
+        # NEXT_PUBLIC_* is baked at build time; rebuild per cloud since the
+        # domain differs. Used only for display/explorer links in the browser.
+        NEXT_PUBLIC_CORE_URL: https://${CORE_DOMAIN}
+    image: sauronid-dashboard:${SAURONID_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      - PORT=3000
+      - SAURON_CORE_INTERNAL_URL=http://backend:3001
+      - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?set SAURON_ADMIN_KEY in .env}
+      - SAURONID_TENANTS=${SAURONID_TENANTS:-default}
+    depends_on:
+      - backend
+
+volumes:
+  sauron_data:
+  caddy_data:
+  caddy_config:

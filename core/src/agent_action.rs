@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
 };
 use hmac::{Hmac, Mac};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -442,6 +442,219 @@ pub fn validate_agent_action(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Anonymous ring-policy action path (phase 3; gated by SAURON_ANON_RINGS).
+//
+//  The agent proves anonymous membership in a ring (= a rule) by signing the
+//  action envelope with its per-ring pseudonym (`ring_pseudonym`). The server
+//  verifies against the ring's member set, evaluates the ring rule, enforces
+//  single-use on the per-ring key image, and writes a receipt that carries NO
+//  agent identity — only ring_id + the per-ring key image + config_digest, all
+//  committed by `action_hash`. The legacy /agent/action/challenge path is
+//  untouched.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn default_tenant_id() -> String {
+    "default".to_string()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnonActionEnvelope {
+    #[serde(default = "default_tenant_id")]
+    pub tenant_id: String,
+    pub ring_id: String,
+    pub action: String,
+    #[serde(default)]
+    pub resource: String,
+    #[serde(default)]
+    pub merchant_id: String,
+    #[serde(default)]
+    pub amount_minor: i64,
+    #[serde(default)]
+    pub currency: String,
+    /// Agent's runtime config digest, checked against the ring's allowed set.
+    #[serde(default)]
+    pub config_digest: String,
+    pub nonce: String,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnonActionProof {
+    pub envelope: AnonActionEnvelope,
+    #[serde(alias = "agent_ring_signature")]
+    pub ring_signature: ring::RingSignature,
+}
+
+/// Fixed-field canonical JSON for anon action signatures (byte parity across
+/// implementations — do not replace with `Value::to_string()`).
+pub fn canonical_anon_envelope_json(e: &AnonActionEnvelope) -> String {
+    format!(
+        "{{\"tenant_id\":{},\"ring_id\":{},\"action\":{},\"resource\":{},\"merchant_id\":{},\"amount_minor\":{},\"currency\":{},\"config_digest\":{},\"nonce\":{},\"expires_at\":{}}}",
+        json_str(&e.tenant_id),
+        json_str(&e.ring_id),
+        json_str(&e.action),
+        json_str(&e.resource),
+        json_str(&e.merchant_id),
+        e.amount_minor,
+        json_str(&e.currency),
+        json_str(&e.config_digest),
+        json_str(&e.nonce),
+        e.expires_at,
+    )
+}
+
+pub fn canonical_anon_envelope_bytes(e: &AnonActionEnvelope) -> Vec<u8> {
+    canonical_anon_envelope_json(e).into_bytes()
+}
+
+pub fn anon_action_hash(e: &AnonActionEnvelope) -> String {
+    let mut h = Sha256::new();
+    h.update(canonical_anon_envelope_bytes(e));
+    hex::encode(h.finalize())
+}
+
+/// Core verification + receipt creation for the anonymous ring path. Pure over a
+/// DB connection + jwt secret (no `ServerState`), so it is unit-testable against
+/// an in-memory DB. `submit_anon_action` is a thin wrapper.
+pub fn validate_anon_action(
+    db: &Connection,
+    jwt_secret: &[u8],
+    proof: &AnonActionProof,
+    now: i64,
+) -> Result<ActionReceipt, (StatusCode, String)> {
+    let env = &proof.envelope;
+    if env.ring_id.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "ring_id is required".into()));
+    }
+    if env.nonce.trim().len() < 16 || env.nonce.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "nonce must be 16..128 chars".into()));
+    }
+    if env.expires_at < now {
+        return Err((StatusCode::UNAUTHORIZED, "anon action envelope expired".into()));
+    }
+
+    let canonical = canonical_anon_envelope_bytes(env);
+    let action_hash = anon_action_hash(env);
+    let key_image_hex = hex::encode(proof.ring_signature.key_image.compress().as_bytes());
+
+    // 1. Ring rule.
+    let (rule, version) = crate::rings::get_ring(db, &env.tenant_id, &env.ring_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or((StatusCode::NOT_FOUND, "ring not found".to_string()))?;
+
+    // 2. Rule eval (ring-level intent + config-drift gate).
+    if let crate::rings::RuleDecision::Deny(why) =
+        crate::rings::evaluate_rule(&rule, &env.action, &env.config_digest)
+    {
+        return Err((StatusCode::FORBIDDEN, format!("ring rule denied: {why}")));
+    }
+
+    // 3. Anonymous membership: verify the ring signature against the live member set.
+    let members = crate::rings::list_member_points(db, &env.tenant_id, &env.ring_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if members.is_empty() {
+        return Err((StatusCode::UNAUTHORIZED, "ring has no members".into()));
+    }
+    if !ring::verify(&canonical, &members, &proof.ring_signature) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "anon ring signature verification failed".into(),
+        ));
+    }
+
+    // 3b. Per-ring budget (phase 4): refuse a new action once this pseudonym has
+    //     already exceeded any budget the ring caps. Keyed on the key image, not
+    //     an agent identity. Checked after ring verify so it can't be probed
+    //     without a valid membership proof, and before the nonce is consumed.
+    let totals = crate::usage::get_usage(db, &env.tenant_id, &env.ring_id, &key_image_hex)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if let Some(why) = crate::usage::budget_exceeded(&totals, &rule.budgets) {
+        return Err((
+            StatusCode::PAYMENT_REQUIRED,
+            format!("ring budget exceeded: {why}"),
+        ));
+    }
+
+    // 4. Single-use on (per-ring key image | nonce) — replay protection keyed on
+    //    the pseudonym, never an agent identity.
+    db.execute(
+        "DELETE FROM agent_action_nonces WHERE expires_at < ?1",
+        params![now],
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let nonce_key = format!("{key_image_hex}|{}", env.nonce);
+    db.execute(
+        "INSERT INTO agent_action_nonces (nonce, agent_id, action_hash, expires_at, used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![nonce_key, "", action_hash, env.expires_at, now],
+    )
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            (StatusCode::UNAUTHORIZED, "anon action nonce replay".to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    })?;
+
+    // 5. Receipt with NO agent identity. ring_id + config_digest are also
+    //    committed by action_hash (which is in the signed payload).
+    let mut receipt = ActionReceipt {
+        receipt_id: format!("ar_{}", crate::ajwt_support::random_hex_32()),
+        action_hash: action_hash.clone(),
+        agent_id: String::new(),
+        ring_key_image_hex: key_image_hex,
+        policy_version: format!("ring:{}:v{}", env.ring_id, version),
+        ajwt_jti: String::new(),
+        pop_jkt: String::new(),
+        timestamp: now,
+        status: "verified".to_string(),
+        signature: String::new(),
+    };
+    receipt.signature = sign_receipt(jwt_secret, &receipt);
+    db.execute(
+        "INSERT OR REPLACE INTO agent_action_receipts
+         (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, ring_id, config_digest, tenant_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            receipt.receipt_id,
+            receipt.action_hash,
+            receipt.agent_id,
+            receipt.ring_key_image_hex,
+            receipt.policy_version,
+            receipt.ajwt_jti,
+            receipt.pop_jkt,
+            receipt.status,
+            receipt.signature,
+            receipt.timestamp,
+            env.ring_id,
+            env.config_digest,
+            env.tenant_id,
+        ],
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(receipt)
+}
+
+/// POST /agent/action/anon — anonymous ring-policy action submission.
+pub async fn submit_anon_action(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    Json(proof): Json<AnonActionProof>,
+) -> Result<Json<ActionReceipt>, (StatusCode, String)> {
+    if !crate::rings::anon_rings_enabled() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "anonymous rings are disabled (set SAURON_ANON_RINGS=1)".into(),
+        ));
+    }
+    let now = now_secs();
+    let st = state.read().unwrap();
+    let db = st.db.lock().unwrap();
+    let receipt = validate_anon_action(&db, &st.jwt_secret, &proof, now)?;
+    Ok(Json(receipt))
+}
+
 pub async fn action_challenge(
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<AgentActionChallengeBody>,
@@ -691,5 +904,175 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    // ── Anonymous ring path (phase 3) ──────────────────────────────────────
+    use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_TABLE, scalar::Scalar};
+
+    fn anon_scalar(seed: &[u8]) -> Scalar {
+        let mut h = sha2::Sha512::new();
+        h.update(seed);
+        Scalar::from_hash(h)
+    }
+    fn anon_pub_hex(s: &Scalar) -> String {
+        hex::encode((s * RISTRETTO_BASEPOINT_TABLE).compress().as_bytes())
+    }
+    fn anon_mem_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn);
+        conn
+    }
+    fn anon_env(ring_id: &str, action: &str, config_digest: &str, nonce: &str) -> AnonActionEnvelope {
+        AnonActionEnvelope {
+            tenant_id: "default".into(),
+            ring_id: ring_id.into(),
+            action: action.into(),
+            resource: String::new(),
+            merchant_id: String::new(),
+            amount_minor: 0,
+            currency: String::new(),
+            config_digest: config_digest.into(),
+            nonce: nonce.into(),
+            expires_at: 10_000_000_000,
+        }
+    }
+    /// Sign an anon envelope as `a` under its ring, using the CURRENT member set
+    /// (exactly as the verifier loads it).
+    fn sign_anon(db: &Connection, a: &Scalar, t: &Scalar, env: &AnonActionEnvelope) -> AnonActionProof {
+        let big_t = t * RISTRETTO_BASEPOINT_TABLE;
+        let shared = crate::ring_pseudonym::shared_secret_agent(a, &big_t);
+        let signer_id = crate::ring_pseudonym::agent_ring_identity(a, &shared, &env.ring_id);
+        let members = crate::rings::list_member_points(db, &env.tenant_id, &env.ring_id).unwrap();
+        let idx = members
+            .iter()
+            .position(|p| *p == signer_id.public)
+            .expect("signer must be a ring member");
+        let sig = ring::sign(&canonical_anon_envelope_bytes(env), &members, &signer_id, idx);
+        AnonActionProof { envelope: env.clone(), ring_signature: sig }
+    }
+    /// Build a ring with `allowed`/`digests` and subscribe agent `a` + a decoy.
+    fn setup_ring(db: &Connection, t: &Scalar, a: &Scalar, allowed: &[&str], digests: &[&str]) {
+        let rule = crate::rings::RingRule {
+            allowed_actions: allowed.iter().map(|s| s.to_string()).collect(),
+            allowed_config_digests: digests.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        crate::rings::upsert_ring(db, "default", "r", &rule, 1).unwrap();
+        crate::rings::subscribe(db, "default", t, &anon_pub_hex(a), "r", 1).unwrap();
+        crate::rings::subscribe(db, "default", t, &anon_pub_hex(&anon_scalar(b"decoy")), "r", 1).unwrap();
+    }
+
+    #[test]
+    fn anon_action_accepts_member_and_writes_identityless_receipt() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"trapdoor"), anon_scalar(b"agent-a"));
+        setup_ring(&db, &t, &a, &["search"], &[]);
+        let env = anon_env("r", "search", "", "nonce-abcdef123456");
+        let proof = sign_anon(&db, &a, &t, &env);
+        let r = validate_anon_action(&db, b"secret", &proof, 1000).expect("genuine member accepted");
+        assert_eq!(r.agent_id, "", "anon receipt must carry NO agent identity");
+        assert!(r.policy_version.starts_with("ring:r:v"));
+        assert!(!r.ring_key_image_hex.is_empty());
+    }
+
+    #[test]
+    fn anon_action_replay_rejected() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"a"));
+        setup_ring(&db, &t, &a, &["x"], &[]);
+        let env = anon_env("r", "x", "", "nonce-replay-000001");
+        let proof = sign_anon(&db, &a, &t, &env);
+        assert!(validate_anon_action(&db, b"s", &proof, 1).is_ok());
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(err.1.contains("replay"), "got: {}", err.1);
+    }
+
+    #[test]
+    fn anon_action_rule_denies_unlisted_action() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"a"));
+        setup_ring(&db, &t, &a, &["search"], &[]);
+        let env = anon_env("r", "transfer", "", "nonce-deny-00000001");
+        let proof = sign_anon(&db, &a, &t, &env);
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn anon_action_config_drift_rejected() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"a"));
+        setup_ring(&db, &t, &a, &["search"], &["sha256:good"]);
+        let env = anon_env("r", "search", "sha256:DRIFTED", "nonce-drift-0000001");
+        let proof = sign_anon(&db, &a, &t, &env);
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn anon_action_tampered_envelope_fails_ring_verify() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"a"));
+        setup_ring(&db, &t, &a, &["search"], &[]);
+        let env = anon_env("r", "search", "", "nonce-tamper-000001");
+        let mut proof = sign_anon(&db, &a, &t, &env);
+        // Mutate after signing — action stays allowed so the rule passes, but the
+        // canonical bytes change, so the ring signature must fail.
+        proof.envelope.resource = "evil".into();
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(err.1.contains("signature"), "got: {}", err.1);
+    }
+
+    #[test]
+    fn anon_action_unknown_ring_is_404() {
+        let db = anon_mem_db();
+        let env = anon_env("ghost", "search", "", "nonce-ghost-0000001");
+        let id = crate::identity::Identity::random();
+        let sig = ring::sign(&canonical_anon_envelope_bytes(&env), &[id.public], &id, 0);
+        let proof = AnonActionProof { envelope: env, ring_signature: sig };
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn anon_action_refused_when_pseudonym_over_ring_budget() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"a"));
+        let rule = crate::rings::RingRule {
+            allowed_actions: vec!["search".into()],
+            budgets: crate::rings::RingBudgets {
+                usd: None,
+                input_tokens: Some(100),
+                output_tokens: None,
+            },
+            ..Default::default()
+        };
+        crate::rings::upsert_ring(&db, "default", "r", &rule, 1).unwrap();
+        crate::rings::subscribe(&db, "default", &t, &anon_pub_hex(&a), "r", 1).unwrap();
+        crate::rings::subscribe(&db, "default", &t, &anon_pub_hex(&anon_scalar(b"decoy")), "r", 1).unwrap();
+
+        // Pre-load the agent's pseudonym over the input-token cap.
+        let big_t = &t * RISTRETTO_BASEPOINT_TABLE;
+        let shared = crate::ring_pseudonym::shared_secret_agent(&a, &big_t);
+        let x_r = crate::ring_pseudonym::agent_per_ring_secret(&a, &shared, "r");
+        let p_r = crate::ring_pseudonym::per_ring_public(&(&a * RISTRETTO_BASEPOINT_TABLE), &shared, "r");
+        let ki = hex::encode(
+            crate::ring_pseudonym::per_ring_key_image(&x_r, &p_r)
+                .compress()
+                .as_bytes(),
+        );
+        db.execute(
+            "INSERT INTO usage_ledger (tenant_id, ring_id, key_image_hex, input_tokens, output_tokens, usd, updated_at)
+             VALUES ('default','r',?1,500,0,0,1)",
+            params![ki],
+        )
+        .unwrap();
+
+        let env = anon_env("r", "search", "", "nonce-overbudget-01");
+        let proof = sign_anon(&db, &a, &t, &env);
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::PAYMENT_REQUIRED, "got: {}", err.1);
     }
 }

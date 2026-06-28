@@ -158,6 +158,19 @@ pub async fn verify_action_log_proof_with_vk(
 ) -> Result<(), ZkVerifyError> {
     validate_payload_shape(payload)?;
 
+    // H-4: the circuit's `valid` output is public_inputs[0] and MUST equal 1.
+    // A *sound* Groth16 proof can correctly attest `valid==0` (the predicate
+    // FAILED) with a perfectly matching Merkle root; without this assertion we
+    // would accept a proof of a failed predicate as if it succeeded. The root
+    // binding below proves WHICH log was evaluated; this proves the evaluation
+    // PASSED.
+    let claimed_valid = payload.public_inputs[0].trim();
+    if claimed_valid != "1" {
+        return Err(ZkVerifyError::Invalid(format!(
+            "circuit output valid={claimed_valid}, expected 1 (proof attests a FAILED predicate)"
+        )));
+    }
+
     // Public-root binding (decimal public_inputs[1] → 32-byte hex).
     let claimed_root_dec = payload.public_inputs[1].trim();
     let expected_root_hex = expected_root_hex
@@ -418,6 +431,22 @@ mod tests {
         )
         .await;
         assert!(matches!(r, Err(ZkVerifyError::Malformed(_))));
+    }
+
+    #[tokio::test]
+    async fn valid_signal_zero_rejected() {
+        // H-4: public_inputs[0]="0" means the circuit's predicate FAILED. Even
+        // with a correct root, this must be rejected before any snarkjs call.
+        let p = payload("ActionSumBound", vec!["0", "42"], "{}");
+        let r = verify_action_log_proof(
+            &p,
+            &"ff".repeat(32),
+            &StubLoader {
+                path: PathBuf::from("/tmp/never-exists.vkey.json"),
+            },
+        )
+        .await;
+        assert!(matches!(r, Err(ZkVerifyError::Invalid(msg)) if msg.contains("valid")));
     }
 
     #[tokio::test]

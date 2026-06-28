@@ -57,6 +57,13 @@ impl Identity {
         Self { secret, public }
     }
 
+    /// Reconstruit une identité à partir d'un scalaire secret déjà calculé.
+    /// Utilisé par `ring_pseudonym` pour fabriquer l'identité par-anneau `x_R`.
+    pub fn from_scalar(secret: Scalar) -> Self {
+        let public = &secret * RISTRETTO_BASEPOINT_TABLE;
+        Self { secret, public }
+    }
+
     /// Reconstruit une identité depuis une clé privée (scalaire) encodée en hex (32 octets).
     pub fn from_secret_hex(hex_str: &str) -> Option<Self> {
         let bytes = hex::decode(hex_str).ok()?;

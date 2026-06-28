@@ -2,7 +2,7 @@
 //
 //   GET /api/cohorts?mode=raw                  → proxies GET /v1/stats/cohort (S7)
 //   GET /api/cohorts?mode=published            → proxies GET /v1/cohort list (S8)
-//   GET /api/cohorts?mode=tenant_rank&metric=X → returns MOCK tenant rank (deferred)
+//   GET /api/cohorts?mode=tenant_rank&metric=X → 501; no real source yet (no mock)
 //
 // Sprint 8 wired the real `/v1/cohort/published` endpoint. The list view
 // pulls every cohort definition from `/v1/cohort` (operator-managed) and
@@ -12,7 +12,6 @@
 
 import { NextRequest } from "next/server";
 import { fetchCoreV1Json, proxyCoreV1 } from "../_proxy";
-import { MOCK_NOTICE, mockTenantRank } from "./_mock";
 
 interface CoreCohortDefinition {
   cohort_id: string;
@@ -46,15 +45,12 @@ export async function GET(req: NextRequest) {
   }
 
   if (mode === "tenant_rank") {
-    // Tenant-rank widget still mock until Sprint 10. Keeps the same
-    // envelope shape so unwrap logic in lib/api.ts stays uniform.
-    const metric = url.searchParams.get("metric") ?? "success_rate";
-    const rank = mockTenantRank(metric);
-    return Response.json({
-      mock: true,
-      notice: MOCK_NOTICE,
-      data: rank,
-    });
+    // No real per-tenant rank source exists yet. We refuse rather than serve
+    // fabricated data — the dashboard must never show a mocked rank.
+    return Response.json(
+      { error: "tenant_rank not available", data: null },
+      { status: 501 },
+    );
   }
 
   // Default: mode=published — list cohort definitions via the live /v1/cohort

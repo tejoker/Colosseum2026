@@ -188,6 +188,73 @@ export async function fetchCoreJson<T = unknown>(
   }
 }
 
+/**
+ * Binary-safe GET proxy to `${CORE_INTERNAL_URL}/admin/${coreAdminPath}`.
+ *
+ * Unlike `proxyCore`, this reads the upstream body as raw bytes (never decoded
+ * as text) so binary downloads such as the OpenTimestamps `.ots` proof stay
+ * byte-exact. Forwards the upstream `content-type` and `content-disposition`
+ * (so the browser triggers a file download); falls back to an octet-stream
+ * attachment with `fallbackFilename` when the upstream omits the disposition.
+ *
+ * `coreAdminPath` MUST NOT start with a slash.
+ */
+export async function proxyCoreBinary(
+  coreAdminPath: string,
+  req: Request,
+  fallbackFilename?: string
+): Promise<Response> {
+  let key: string;
+  try {
+    key = adminKey();
+  } catch (e) {
+    return Response.json(
+      { ok: false, error: e instanceof Error ? e.message : "admin key missing" },
+      { status: 500 }
+    );
+  }
+  let search = "";
+  try {
+    search = new URL(req.url).search;
+  } catch {
+    search = "";
+  }
+  const target = `${CORE_INTERNAL_URL}/admin/${coreAdminPath}${search}`;
+  const headers: Record<string, string> = {
+    "x-admin-key": key,
+    accept: "application/octet-stream",
+  };
+  const tenant = tenantFromRequest(req);
+  if (tenant) headers[TENANT_HEADER] = tenant;
+
+  try {
+    const upstream = await fetch(target, { headers, cache: "no-store" });
+    if (!upstream.ok) {
+      const text = await upstream.text();
+      return new Response(text || `core ${upstream.status}`, {
+        status: upstream.status,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+    const buf = await upstream.arrayBuffer();
+    const outHeaders: Record<string, string> = {
+      "content-type":
+        upstream.headers.get("content-type") ?? "application/octet-stream",
+      "cache-control": "no-store",
+    };
+    const cd = upstream.headers.get("content-disposition");
+    if (cd) outHeaders["content-disposition"] = cd;
+    else if (fallbackFilename)
+      outHeaders["content-disposition"] = `attachment; filename="${fallbackFilename}"`;
+    return new Response(buf, { status: 200, headers: outHeaders });
+  } catch {
+    return Response.json(
+      { ok: false, error: "upstream unreachable" },
+      { status: 503 }
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // /v1/* variants. Same admin-key auth, but mount point is `/v1/<prefix>/<path>`
 // instead of `/admin/<path>` (used by /v1/policy/* and /v1/agents/*/spend).

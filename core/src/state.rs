@@ -323,6 +323,16 @@ impl ServerState {
         }
     }
 
+    /// M-3: drop a (revoked) agent's point from the in-memory ring. The DB
+    /// `revoked` check already blocks revoked agents; this also bounds the ring
+    /// (it was append-only and never shrank) and removes them from the live
+    /// anonymity set. No-op if the hex doesn't parse.
+    pub fn drop_ring_member(&mut self, public_key_hex: &str) {
+        if let Ok(pt) = crate::rings::parse_point_hex(public_key_hex) {
+            self.agent_group.members.retain(|p| *p != pt);
+        }
+    }
+
     pub fn log(&self, action_type: &str, status: &str, detail: &str) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -107,20 +107,23 @@ For a full local demo (core + analytics shim + branded Next.js dashboard) in one
 # dashboard → http://127.0.0.1:3000   (Mandate Console)
 ```
 
-To deploy in production: see [docs/operations.md](docs/operations.md).
+To deploy: either the **docker-compose** files in [`deploy/`](deploy/), or the **no-Docker native/systemd** path in [`deploy/native/`](deploy/native/) (Caddy auto-TLS + `sauronid-core` / `sauronid-dashboard` units). The [`scripts/demo/democtl.sh`](scripts/demo/) driver wraps the native path (`build-native` → `deploy-native` → `runner` → `status`) and brings up the real LLM agent behind the Console. Full guide: [docs/operations.md](docs/operations.md).
 
 ## Mandate Console — the web dashboard
 
-A branded Next.js console at `dashboard/` reads only live data from the running core (no parquet, no fixtures). Six routes:
+A branded Next.js console at `dashboard/` reads **only live data from the running core** — no parquet, no fixtures, no mocks. Main routes (nav label → code path):
 
 | Route | What it shows |
 |---|---|
-| `/` Overview | Active agents, PoP-bound count, daily action receipts (90d gradient line), anchor pipeline doughnut, ring memberships |
-| `/agents` | Agent registry with PoP / config-digest / action + egress counters, filter strip (TOTAL / ACTIVE / REVOKED / NO·POP) |
-| `/anchors` | Anchor batches, BTC OTS upgraded vs pending, Solana confirmed vs unconfirmed, recent receipts |
-| `/clients` | Partner-site ring members, search + type filter |
-| `/users` | OPRF key-image registry (humans), nationality breakdown |
-| `/requests` | Append-only activity log, polled every 5 s |
+| **Home** (`/`) | Live counters — total agents, calls today, protected (blocked) today — computed from real agent egress, not estimates |
+| **Console** (`/try`) | The interactive console: pick a model (**local gemma** on a GPU box, or **cloud Groq**), give a real agent a task, watch it use tools and answer — then make it misbehave (replay / tamper / revoke) and watch the core reject it live (HTTP 409/401), and seal every action into Bitcoin. Every step is a real signed call to the core. |
+| **Protected** (`/protected`) | Governance stops that actually happened — agent calls the core rejected (replayed nonce, tampered body, revoked agent), each with the real 4xx status. Sourced from blocked egress, never inferred. |
+| **Activity** (`/activity`) | Live feed of every real agent call (allowed + stopped), filterable by agent / result / date |
+| **Proofs** (`/proofs`) | Bitcoin (OpenTimestamps) + Solana anchor batches. Each batch's Merkle root is **one-click verifiable** — download its `.ots` proof and check it with the open-source `ots` tool (`ots upgrade` / `ots info`). Honest three-state surface per ADR-001 (Solana ≤30 s, BTC pending ≤1 h, dually anchored). |
+| **Policies** (`/policies`) | Policy invariants bound to agents, with an evaluation endpoint |
+| **Cohorts** (`/cohorts`) | Differential-privacy published cohort stats (k-anonymity gated) |
+| **Compliance** (`/compliance`) | Compliance screening surface (provider operator-supplied) |
+| **Settings** (`/settings`) | Tenant + core-connection settings |
 
 Visual identity is in [`BRANDING.md`](BRANDING.md): dark navy canvas (`#06090F`), Sauron Blue / Ice Blue / Cyan, Instrument Serif display, Space Mono structural labels, Satoshi UI body. Investor pitch deck: [`SauronID_Pitch_Deck.pdf`](SauronID_Pitch_Deck.pdf).
 
@@ -232,8 +235,10 @@ schemas/               Shared JSON schemas (external crypto, attestation)
 zkp/                   ZKP issuer + circuits
 
 scripts/dev/           Dev orchestration shell scripts (quickstart, launch, start, ...)
+scripts/demo/          Live-demo driver (democtl.sh) + real LLM agent-runner (agent_runner.py)
 scripts/               Python simulation + audit utilities (simulate_real_actions.py, solana_audit.py, ...)
-deploy/                docker-compose files (dev, prod, postgres)
+deploy/                docker-compose (dev/prod/postgres) AND a no-Docker native/systemd path
+                       (deploy/native/: vm-setup.sh, *.service, Caddyfiles) + Solana setup
 branding/              BRANDING.md, logo.svg, brand-book.pdf
 docs/                  threat-model, operations, production-readiness, roadmap, competitive-benchmark
 
@@ -250,7 +255,8 @@ archive/banking-2025/  Pre-pivot bank-KYC code. Feature-flagged off by default; 
 - Python client: [`clients/python/sauronid_client/`](clients/python/sauronid_client/) — LangChain + OpenAI + Anthropic adapters.
 - Empirical attack suite: [`redteam/`](redteam/) — 9 invariant scenarios + 16-attack empirical suite + 18-attack Tavily fuzzer.
 - Simulation + audit scripts: [`scripts/`](scripts/) — Python utilities; dev orchestration shells under [`scripts/dev/`](scripts/dev/).
-- Deploy config: [`deploy/`](deploy/) — docker-compose for dev / prod / postgres.
+- Deploy config: [`deploy/`](deploy/) — docker-compose (dev/prod/postgres) **or** no-Docker native/systemd ([`deploy/native/`](deploy/native/): `vm-setup.sh`, `sauronid-core.service`, `sauronid-dashboard.service`, Caddyfiles).
+- Live-demo driver: [`scripts/demo/democtl.sh`](scripts/demo/) — build-native / deploy-native / runner / status; pairs with the real LLM agent-runner (`agent_runner.py`) behind the Console.
 - Custom Solana program: [`contracts/sauron_ledger/`](contracts/sauron_ledger/) — Anchor program (optional; default uses Solana Memo).
 - Operations: [`docs/operations.md`](docs/operations.md) — every env var, every deploy step.
 - Threat model: [`docs/threat-model.md`](docs/threat-model.md) — what we protect against, what we don't.

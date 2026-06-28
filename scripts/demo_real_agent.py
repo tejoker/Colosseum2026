@@ -151,6 +151,12 @@ class ProviderConfig:
     api_path: str
     env_var: str
     sdk_install_hint: str
+    # Additive: URL scheme (Ollama is plain http on localhost), whether an
+    # API key is required (Ollama needs none), and which chat-loop dialect to
+    # use ("openai" for Chat Completions, "anthropic" for the Messages API).
+    scheme: str = "https"
+    requires_key: bool = True
+    chat_kind: str = "openai"
 
 
 PROVIDERS: Dict[str, ProviderConfig] = OrderedDict({
@@ -192,8 +198,51 @@ PROVIDERS: Dict[str, ProviderConfig] = OrderedDict({
         api_path="/v1/messages",
         env_var="ANTHROPIC_API_KEY",
         sdk_install_hint="pip install anthropic",
+        chat_kind="anthropic",
+    ),
+    "openai": ProviderConfig(
+        name="openai",
+        model_id=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        system_prompt=(
+            "You are a research assistant. You have one tool: web_fetch(url). "
+            "Use it to fetch a URL and then reply with a single concise sentence "
+            "summarising what the page is about. Do not fabricate content."
+        ),
+        api_host="api.openai.com",
+        api_path="/v1/chat/completions",
+        env_var="OPENAI_API_KEY",
+        sdk_install_hint="(uses the OpenAI Chat Completions API — pay-per-token API key, NOT a ChatGPT subscription)",
+        chat_kind="openai",
     ),
 })
+
+
+# Hybrid: a local open-weight model served by Ollama on the operator's own
+# hardware (e.g. a 4060Ti). Ollama exposes an OpenAI-compatible Chat
+# Completions surface at http://<host>/v1/chat/completions and needs no API
+# key. Enabled with SAURON_DEMO_OLLAMA=1 so the default 3-provider demo is
+# unchanged for users without a local model.
+#   OLLAMA_HOST   default localhost:11434
+#   OLLAMA_MODEL  default qwen2.5:14b  (fits 16 GB; try llama3.1:8b if tight)
+if os.environ.get("SAURON_DEMO_OLLAMA", "").strip().lower() in ("1", "true", "yes"):
+    _ollama_host = os.environ.get("OLLAMA_HOST", "localhost:11434")
+    _ollama_model = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
+    PROVIDERS["ollama"] = ProviderConfig(
+        name="ollama",
+        model_id=_ollama_model,
+        system_prompt=(
+            "You are a research assistant. You have one tool: web_fetch(url). "
+            "Use it to fetch a URL and then reply with a single concise sentence "
+            "summarising what the page is about. Do not fabricate content."
+        ),
+        api_host=_ollama_host,
+        api_path="/v1/chat/completions",
+        env_var="OLLAMA_HOST",
+        sdk_install_hint="run `ollama serve` + `ollama pull <model>` on the GPU box",
+        scheme="http",
+        requires_key=False,
+        chat_kind="openai",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,13 +299,22 @@ def act1_auth_and_register(
 
     registered: List[RegisteredAgent] = []
     for prov in PROVIDERS.values():
-        api_key = os.environ.get(prov.env_var)
-        if api_key:
-            info(f"{prov.env_var} found — {prov.name} will run the live chat loop")
+        if prov.requires_key:
+            api_key = os.environ.get(prov.env_var)
+            if api_key:
+                info(f"{prov.env_var} found — {prov.name} will run the live chat loop")
+            else:
+                warn(
+                    f"{prov.env_var} not set — {prov.name} registered for visibility, "
+                    f"chat loop skipped"
+                )
         else:
-            warn(
-                f"{prov.env_var} not set — {prov.name} registered for visibility, "
-                f"chat loop skipped"
+            # Keyless local provider (Ollama). A dummy bearer keeps the
+            # OpenAI-compatible header shape; Ollama ignores it.
+            api_key = "ollama"
+            info(
+                f"{prov.name}: local model {prov.model_id} at "
+                f"{prov.scheme}://{prov.api_host} — live chat loop will run"
             )
 
         # Generate ring keypair only if the helper binary is built; fall back to
@@ -568,20 +626,18 @@ def act2_real_chat(registered: List[RegisteredAgent]) -> None:
             info("no API key in env — skipping live chat (agent is still in dashboard)")
             continue
 
-        if r.provider.name == "groq":
-            answer = _openai_compatible_chat_loop(
-                r.provider, r.agent, r.api_key,
-                base_url=f"https://{r.provider.api_host}{r.provider.api_path}",
-            )
-        elif r.provider.name == "gemini":
-            answer = _openai_compatible_chat_loop(
-                r.provider, r.agent, r.api_key,
-                base_url=f"https://{r.provider.api_host}{r.provider.api_path}",
-            )
-        elif r.provider.name == "anthropic":
+        if r.provider.chat_kind == "anthropic":
             answer = _anthropic_chat_loop(r.provider, r.agent, r.api_key)
+        elif r.provider.chat_kind == "openai":
+            # Groq, Gemini, and Ollama all speak OpenAI Chat Completions. The
+            # scheme/host come from the provider so a local http Ollama box and
+            # a remote https API share one loop.
+            base_url = f"{r.provider.scheme}://{r.provider.api_host}{r.provider.api_path}"
+            answer = _openai_compatible_chat_loop(
+                r.provider, r.agent, r.api_key, base_url=base_url,
+            )
         else:
-            warn(f"no chat-loop handler for provider '{r.provider.name}'")
+            warn(f"no chat-loop handler for chat_kind '{r.provider.chat_kind}'")
             continue
 
         if answer:

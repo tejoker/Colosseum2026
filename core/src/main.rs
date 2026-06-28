@@ -27,7 +27,7 @@ use sauron_core::{
     agent, db,
     identity::{Identity, UserData},
 };
-use sauron_core::{agent_action, oprf, ring, state::ServerState};
+use sauron_core::{agent_action, oprf, ring, state::ServerState, usage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::sync::{Arc, RwLock};
@@ -310,6 +310,14 @@ async fn main() {
             "/agent/action/receipt/verify",
             post(agent_action::receipt_verify),
         )
+        // Anonymous ring-policy action path (phase 3; gated by SAURON_ANON_RINGS).
+        // The ring signature is the auth, so no per-call-signature layer here.
+        .route(
+            "/agent/action/anon",
+            post(agent_action::submit_anon_action),
+        )
+        // Phase 4: report token usage for a prior anon receipt (gated likewise).
+        .route("/agent/usage", post(usage::record_usage_handler))
         .route(
             "/agent/payment/authorize",
             post(agent_payment_authorize).route_layer(middleware::from_fn_with_state(
@@ -3570,11 +3578,29 @@ async fn agent_payment_authorize(
             }
             Ok(_) => {}
             Err(e) => {
+                // H-7: fail CLOSED in enforce mode. An infra error during policy
+                // evaluation previously fell through and authorised the action —
+                // an attacker who can induce an eval error (DB pressure, etc.)
+                // could bypass the bound policy. In enforce mode we now refuse;
+                // advisory/off modes still fall through (dev convenience).
                 tracing::warn!(
                     target: "sauron::policy::enforcement",
                     error = %e,
-                    "bound policy enforcement failed — falling through (fail-open on infra error)",
+                    enforce = matches!(
+                        enforcement_mode,
+                        sauron_core::runtime_mode::PolicyEnforcementMode::Enforce
+                    ),
+                    "bound policy enforcement errored",
                 );
+                if matches!(
+                    enforcement_mode,
+                    sauron_core::runtime_mode::PolicyEnforcementMode::Enforce
+                ) {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("policy enforcement unavailable (failing closed): {e}"),
+                    ));
+                }
             }
         }
     }
@@ -4083,7 +4109,37 @@ async fn agent_egress_log(
             ],
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        db.last_insert_rowid()
+        let egress_id = db.last_insert_rowid();
+
+        // Commit this accepted action to the anchorable ledger, so "Seal into
+        // Bitcoin" covers the agent's REAL calls (the live agent reports its
+        // actions here, not via the heavier /agent/action flow). Each accepted
+        // egress event becomes one receipt; the anchor batches these into a
+        // Merkle root committed to Bitcoin via OpenTimestamps. Best-effort —
+        // a receipt-write failure must not fail the egress report itself.
+        let action_hash = {
+            let mut h = Sha256::new();
+            h.update(payload.agent_id.as_bytes());
+            h.update(b"|");
+            h.update(payload.target_host.as_bytes());
+            h.update(b"|");
+            h.update(payload.target_path.as_bytes());
+            h.update(b"|");
+            h.update(payload.method.as_bytes());
+            h.update(b"|");
+            h.update(egress_id.to_string().as_bytes());
+            h.update(b"|");
+            h.update(now.to_string().as_bytes());
+            hex::encode(h.finalize())
+        };
+        let receipt_id = format!("rcp_egr_{egress_id}");
+        let _ = db.execute(
+            "INSERT INTO agent_action_receipts
+             (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at)
+             VALUES (?1, ?2, ?3, '', 'egress', '', '', 'accepted', '', ?4)",
+            params![receipt_id, action_hash, payload.agent_id, now],
+        );
+        egress_id
     };
     Ok(Json(serde_json::json!({ "id": id, "ts": now })))
 }

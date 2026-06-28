@@ -90,6 +90,18 @@ The vendor-rooted kinds (`tpm2_quote` etc.) are recognised but return `Attestati
 
 When hardware-backed: even host compromise no longer leaks the PoP private key. The attacker can call SauronID using whatever public key the hardware exposes, but signing every call requires reaching the hardware — which a compromised userland process cannot do without also compromising the firmware boundary.
 
+### Enforced at registration (not just available)
+
+Previously the attestation verifiers were reachable only via the standalone `POST /v1/attestation/*` route; `/agent/register` stored the blob verbatim without verifying it. Registration now runs `enforce_registration_attestation` (`core/src/attestation/mod.rs`) inline:
+
+- The operator asserts the runtime measurement via `expected_measurement_hex`. `verify_attestation` checks BOTH the signature / cert-chain AND that the blob attests to exactly that measurement — an attacker who asserts a blessed value but whose blob attests a different state is rejected with `MeasurementMismatch`.
+- `SAURON_REQUIRE_HARDWARE_ATTESTATION=1` rejects `none` / `server_derived` kinds outright (a verifiable hardware kind becomes mandatory).
+- The expected measurement is sourced one of two ways:
+  - **Mode (a) — pre-registered (`SAURON_REQUIRE_PREREGISTERED_MEASUREMENT=1`):** the asserted measurement must be in the operator's out-of-band golden allowlist (`SAURON_ATTESTATION_GOLDEN_MEASUREMENTS`). Defends a compromised-at-first-boot host, whose blob attests a non-golden measurement and therefore cannot pass.
+  - **Mode (b) — trust-on-first-use (default):** no allowlist; the genuine measurement the operator asserts is accepted and pinned to `agents.attestation_pcr_set`. Catches post-enrollment drift, not a compromised first boot.
+
+Coverage today: `ed25519_self` (full), `tpm2_quote` (M2 verifier), `nitro_enclave` (COSE path). `sgx` / `sev_snp` / `arm_cca` / `apple_secure` still return `NotImplemented` and so cannot pass the gate.
+
 ## Gap 2 mitigation: agent egress logging
 
 `POST /agent/egress/log` records every outbound third-party API call the agent makes. The endpoint is itself per-call-sig-protected, so log entries are bound to the specific agent + signed by its PoP key + carry the matching config digest. Each row is included in the next agent-action anchor batch and committed to Bitcoin (OTS) and Solana (Memo) — making after-the-fact tampering require forging both chains.

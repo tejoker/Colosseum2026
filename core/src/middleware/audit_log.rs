@@ -149,6 +149,13 @@ static FILE_SINK: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
 /// tests that don't spin up a SQLite DB.
 static DB_SINK: OnceLock<Mutex<Option<Arc<DbHandle>>>> = OnceLock::new();
 
+/// Serialises hash-chain appends. `DbHandle::lock()` draws from an r2d2 pool, so
+/// two concurrent appends could read the same head and assign a duplicate `seq`,
+/// breaking the chain. Audit writes are low-frequency security events, so a
+/// process-wide lock around the read-head → insert step is the simplest correct
+/// guard.
+static AUDIT_CHAIN_LOCK: Mutex<()> = Mutex::new(());
+
 /// Initialize file + DB sinks. Idempotent — calling twice is safe; the
 /// second call replaces the previous sinks under their mutex.
 ///
@@ -204,7 +211,14 @@ pub fn ensure_security_audit_schema(db: &DbHandle) -> Result<(), rusqlite::Error
             tenant_id   TEXT NOT NULL DEFAULT 'default',
             event_type  TEXT NOT NULL,
             event_json  TEXT NOT NULL,
-            timestamp   INTEGER NOT NULL
+            timestamp   INTEGER NOT NULL,
+            -- H-2: tamper-evident hash chain. `seq` is monotonic; `entry_hash`
+            -- is HMAC(key, seq|prev_hash|audit_id|tenant|type|json|ts); `prev_hash`
+            -- links to the previous row. Editing/deleting/reordering any row
+            -- breaks the chain for anyone holding the audit key.
+            seq         INTEGER,
+            prev_hash   TEXT,
+            entry_hash  TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_security_audit_tenant_ts
             ON security_audit_log(tenant_id, timestamp);
@@ -212,7 +226,48 @@ pub fn ensure_security_audit_schema(db: &DbHandle) -> Result<(), rusqlite::Error
             ON security_audit_log(event_type, timestamp);
         "#,
     )?;
+    // Idempotent ALTERs for DBs whose security_audit_log was created (here or in
+    // db.rs) before the hash chain landed. Must precede the seq index below.
+    let _ = conn.execute("ALTER TABLE security_audit_log ADD COLUMN seq INTEGER", []);
+    let _ = conn.execute("ALTER TABLE security_audit_log ADD COLUMN prev_hash TEXT", []);
+    let _ = conn.execute("ALTER TABLE security_audit_log ADD COLUMN entry_hash TEXT", []);
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_security_audit_seq ON security_audit_log(seq)",
+        [],
+    );
     Ok(())
+}
+
+/// HMAC key for the audit hash chain. Sourced from `SAURON_AUDIT_HMAC_KEY`
+/// (raw bytes); falls back to a fixed dev key when unset so dev/test still
+/// produce a verifiable chain. Operators MUST set it in production — without a
+/// secret key, a DB writer could recompute the chain after editing a row.
+fn audit_hmac_key() -> Vec<u8> {
+    match std::env::var("SAURON_AUDIT_HMAC_KEY") {
+        Ok(v) if !v.trim().is_empty() => v.into_bytes(),
+        _ => b"SAURON_DEV_AUDIT_HMAC_KEY_v1".to_vec(),
+    }
+}
+
+/// Compute `entry_hash = hex(HMAC-SHA256(key, seq|prev|audit_id|tenant|type|json|ts))`.
+fn compute_entry_hash(
+    key: &[u8],
+    seq: i64,
+    prev_hash: &str,
+    audit_id: &str,
+    tenant_id: &str,
+    event_type: &str,
+    event_json: &str,
+    timestamp: i64,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac key");
+    mac.update(
+        format!("{seq}|{prev_hash}|{audit_id}|{tenant_id}|{event_type}|{event_json}|{timestamp}")
+            .as_bytes(),
+    );
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn unix_now() -> i64 {
@@ -261,17 +316,96 @@ fn write_db_sink(record: &AuditRecord) {
         Ok(s) => s,
         Err(_) => return,
     };
+    // H-2: append to the tamper-evident hash chain. `DbHandle::lock()` is a pool
+    // checkout (not a global mutex), so the head-read → insert must be serialised
+    // explicitly to keep `seq` monotonic and gap-free.
+    let _chain = AUDIT_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (last_seq, last_hash): (i64, String) = conn
+        .query_row(
+            "SELECT seq, entry_hash FROM security_audit_log
+             WHERE seq IS NOT NULL ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .unwrap_or((0, "genesis".to_string()));
+    let seq = last_seq + 1;
+    let key = audit_hmac_key();
+    let entry_hash = compute_entry_hash(
+        &key,
+        seq,
+        &last_hash,
+        &record.audit_id,
+        &record.tenant_id,
+        &record.event_type,
+        &event_json,
+        record.timestamp,
+    );
     let _ = conn.execute(
-        "INSERT INTO security_audit_log (audit_id, tenant_id, event_type, event_json, timestamp)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO security_audit_log
+         (audit_id, tenant_id, event_type, event_json, timestamp, seq, prev_hash, entry_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             record.audit_id,
             record.tenant_id,
             record.event_type,
             event_json,
-            record.timestamp
+            record.timestamp,
+            seq,
+            last_hash,
+            entry_hash
         ],
     );
+}
+
+/// Verify the integrity of the security-audit hash chain. Walks rows in `seq`
+/// order, recomputing each `entry_hash` and checking the `prev_hash` linkage.
+/// Returns `Err(reason)` at the first inconsistency (edit, deletion, reorder).
+/// Used by an admin verify endpoint / external auditor holding the audit key.
+pub fn verify_audit_chain(conn: &rusqlite::Connection) -> Result<u64, String> {
+    let key = audit_hmac_key();
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, prev_hash, entry_hash, audit_id, tenant_id, event_type, event_json, timestamp
+             FROM security_audit_log WHERE seq IS NOT NULL ORDER BY seq ASC",
+        )
+        .map_err(|e| format!("prepare: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        })
+        .map_err(|e| format!("query: {e}"))?;
+    let mut expected_seq = 1i64;
+    let mut prev = "genesis".to_string();
+    let mut count = 0u64;
+    for row in rows {
+        let (seq, prev_hash, entry_hash, audit_id, tenant_id, event_type, event_json, ts) =
+            row.map_err(|e| format!("row: {e}"))?;
+        if seq != expected_seq {
+            return Err(format!("seq gap: expected {expected_seq}, got {seq} (row deleted/reordered)"));
+        }
+        if prev_hash != prev {
+            return Err(format!("prev_hash mismatch at seq {seq} (chain broken)"));
+        }
+        let recomputed = compute_entry_hash(
+            &key, seq, &prev_hash, &audit_id, &tenant_id, &event_type, &event_json, ts,
+        );
+        if recomputed != entry_hash {
+            return Err(format!("entry_hash mismatch at seq {seq} (row tampered)"));
+        }
+        prev = entry_hash;
+        expected_seq += 1;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Record one audit event to all configured sinks.
@@ -520,6 +654,33 @@ mod tests {
             )),
             "expected auth_failed row, got {rows:?}"
         );
+    }
+
+    #[test]
+    fn audit_hash_chain_verifies_and_detects_tampering() {
+        let _g = lock_sink_tests();
+        reset_sinks_for_test();
+        let (db, _path) = fresh_db();
+        init_audit_sink(Arc::clone(&db));
+        for i in 0..3 {
+            record(AuditEvent::AuthFailed {
+                ip: format!("10.0.0.{i}"),
+                path: "/v1/admin".into(),
+                reason: "test".into(),
+            });
+        }
+        let conn = db.lock().unwrap();
+        // Intact chain verifies.
+        let n = verify_audit_chain(&conn).expect("chain should verify");
+        assert!(n >= 3, "expected >=3 chained rows, got {n}");
+        // Tamper a row's payload in place — verification must now fail.
+        conn.execute(
+            "UPDATE security_audit_log SET event_json = '{\"tampered\":true}' WHERE seq = 2",
+            [],
+        )
+        .unwrap();
+        let err = verify_audit_chain(&conn).expect_err("tampering must be detected");
+        assert!(err.contains("seq 2"), "got: {err}");
     }
 
     #[test]

@@ -1,0 +1,22 @@
+[Unit]
+Description=SauronID core (no-Docker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sauronid
+Group=sauronid
+WorkingDirectory=/opt/sauronid
+EnvironmentFile=/opt/sauronid/core.env
+ExecStart=/opt/sauronid/sauron-core
+Restart=always
+RestartSec=3
+# Light hardening. ProtectSystem=full keeps /usr,/etc read-only; /opt stays
+# writable for the SQLite database under /opt/sauronid/data.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

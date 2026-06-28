@@ -10,7 +10,7 @@ use crate::{
     audit::handlers as audit_report_handlers,
     middleware::audit_log as audit_log,
     policy::binding_handlers as binding_handlers, policy::handlers as policy_handlers,
-    state::ServerState, tenancy, zk_verifier,
+    rings, state::ServerState, tenancy, usage, zk_verifier,
 };
 
 /// Router for `/v1/policy/*` — Sprint 2 policy DSL endpoints.
@@ -253,15 +253,25 @@ pub fn admin_router() -> Router<Arc<RwLock<ServerState>>> {
         .route("/anchor/agent-actions/run", post(admin::force_action_anchor_run))
         // ADR-001: per-batch three-state surface (solana.confirmed / bitcoin.ots_upgraded)
         .route("/anchor/batches", get(admin::get_anchor_batches))
+        // Download the OpenTimestamps `.ots` proof for a batch's BTC anchor.
+        .route("/anchor/ots/{anchor_id}", get(admin::get_anchor_ots))
         // Live-data analytics endpoints (Analytics 5/5 — replaces parquet path)
         .route("/agents", get(admin::get_agents))
         .route("/agents/{agent_id}/revoke", post(admin::revoke_agent_admin))
         .route("/agent_actions/recent", get(admin::get_recent_actions))
+        // Dashboard "Try" page — runs real governance scenarios (replay/scope/normal).
+        .route("/demo/scenario/{scenario}", post(admin::run_demo_scenario))
         .route("/anchor/status", get(admin::get_anchor_status))
         .route("/per_agent_metrics", get(admin::get_per_agent_metrics))
         .route("/egress/recent", get(admin::get_recent_egress))
         .route("/checksum/audit/{agent_id}", get(admin::get_checksum_audit))
         .route("/health/detailed", get(admin::health))
+        // Anonymous ring-policy admin ops (phase 2; gated by SAURON_ANON_RINGS).
+        .route("/rings", post(rings::create_ring_handler).get(rings::list_rings_handler))
+        .route("/rings/{ring_id}/subscribe", post(rings::subscribe_handler))
+        .route("/rings/{ring_id}/revoke", post(rings::revoke_handler))
+        .route("/rings/{ring_id}/members", get(rings::members_handler))
+        .route("/rings/{ring_id}/usage", get(usage::ring_usage_handler))
         .route_layer(middleware::from_fn(admin::auth_middleware))
         // Admin endpoints aggregate across tenants by default — they are
         // operator-global. Per-endpoint tenant filtering is layered in

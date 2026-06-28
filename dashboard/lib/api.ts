@@ -199,6 +199,19 @@ export async function fetchProofs(): Promise<ApiResult<AnchorStats>> {
   return get<AnchorStats>(`/api/proofs`);
 }
 
+export interface AnchorBatch {
+  anchor_id: string;
+  root: string;
+  n_actions: number;
+  created_at: string;
+  btc_confirmed: boolean;
+  btc_anchor_id: string;
+}
+
+export async function fetchAnchorBatches(): Promise<ApiResult<AnchorBatch[]>> {
+  return get<AnchorBatch[]>(`/api/proofs/batches`);
+}
+
 export async function fetchCompanies(): Promise<ApiResult<Company[]>> {
   return get<Company[]>(`/api/clients`);
 }
