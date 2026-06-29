@@ -286,8 +286,12 @@ mod tests {
         assert!(matches!(r, Err(ChecksumError::UnknownType(_))));
     }
 
-    // env-mutating; serialise against other storage-mode tests via this guard.
+    // env-mutating; serialise against other storage-mode tests via this lock,
+    // held across set→run→restore so a parallel test can't observe the var
+    // mid-run (cargo runs tests in parallel).
+    static STORAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn with_storage_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        let _g = STORAGE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("SAURON_CHECKSUM_INPUTS_STORAGE").ok();
         match value {
             Some(v) => std::env::set_var("SAURON_CHECKSUM_INPUTS_STORAGE", v),

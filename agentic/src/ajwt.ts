@@ -21,7 +21,6 @@ import * as crypto from "crypto";
 import * as jose from "jose";
 import { etc, getPublicKey } from "@noble/ed25519";
 import { sha512 } from "@noble/hashes/sha512";
-import { v4 as uuidv4 } from "uuid";
 
 etc.sha512Sync = (...m: Uint8Array[]) => sha512(etc.concatBytes(...m));
 import { PopKeyPair, verifyPopChallenge } from "./pop-keys";
@@ -336,11 +335,11 @@ export async function forgeAgentToken(
         aud: config.audience,
         exp: now + ttl,
         iat: now,
-        jti: uuidv4(),
+        jti: crypto.randomUUID(),
 
         intent: config.intent,
         agent_checksum: config.agentChecksum,
-        workflow_id: config.workflowId || uuidv4(),
+        workflow_id: config.workflowId || crypto.randomUUID(),
         delegation_chain: config.delegationChain || [],
         cnf: { jkt: config.popKeyPair.thumbprint },
 

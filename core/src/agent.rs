@@ -25,8 +25,6 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
-use rand::RngCore;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -132,7 +130,7 @@ pub fn forge_ajwt(
         "intent": intent_json,
         "iat": now,
         "exp": now + ttl_secs,
-        "jti": uuid_v4(),
+        "jti": ajwt_support::random_hex_32(),
     });
     if let Some(ex) = extra {
         if let Some(ref jkt) = ex.cnf_jkt {
@@ -197,12 +195,6 @@ pub fn verify_ajwt(jwt_secret: &[u8], token: &str) -> Option<serde_json::Value> 
     }
 
     Some(payload)
-}
-
-fn uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    hex::encode(bytes)
 }
 
 // ─── Request / Response types ────────────────────────────────────────────────
