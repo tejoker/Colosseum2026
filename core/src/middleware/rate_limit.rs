@@ -150,7 +150,9 @@ impl GlobalRateLimiter {
             tokens: burst,
             last_refill: now,
         });
-        let elapsed = now.saturating_duration_since(entry.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(entry.last_refill)
+            .as_secs_f64();
         entry.tokens = (entry.tokens + elapsed * rps).min(burst);
         entry.last_refill = now;
         if entry.tokens >= 1.0 {
@@ -287,15 +289,13 @@ pub async fn global_rate_limit_middleware(
             );
             // Best-effort audit record. Failures here must never block
             // the 429 response or panic the request worker.
-            crate::middleware::audit_log::record(crate::middleware::audit_log::AuditEvent::RateLimitTripped {
-                ip: ip.to_string(),
-                path: request.uri().path().to_string(),
-            });
-            let mut resp = (
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate limit exceeded",
-            )
-                .into_response();
+            crate::middleware::audit_log::record(
+                crate::middleware::audit_log::AuditEvent::RateLimitTripped {
+                    ip: ip.to_string(),
+                    path: request.uri().path().to_string(),
+                },
+            );
+            let mut resp = (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response();
             if let Ok(v) = HeaderValue::from_str(&retry_after.to_string()) {
                 resp.headers_mut().insert("retry-after", v);
             }

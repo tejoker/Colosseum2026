@@ -2,11 +2,11 @@ import { fetchCoreJson } from "../../_proxy";
 import { adaptCompanies, type CoreClientRecord } from "../../_adapters";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const r = await fetchCoreJson<CoreClientRecord[]>("clients");
+  const r = await fetchCoreJson<CoreClientRecord[]>("clients", "", req);
   if (!r.ok) return r.response;
 
   const all = adaptCompanies(r.data);

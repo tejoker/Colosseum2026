@@ -136,6 +136,11 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/sauron_test
           SAURON_DB_BACKEND: postgres
           SAURON_REQUIRE_CALL_SIG: "1"
+          # The Postgres port is partial: un-ported tables still use the local
+          # SQLite sidecar (see postgres_backend_drift.sh), so the single-node
+          # acknowledgement is required to boot in the default (production)
+          # runtime. This CI box IS single-node, so accepting it is honest.
+          SAURON_ACCEPT_SINGLE_NODE_SQLITE: "1"
         run: |
           cargo build --bin sauron-core
           nohup ./target/debug/sauron-core > /tmp/sauron-core.log 2>&1 &

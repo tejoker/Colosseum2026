@@ -115,7 +115,8 @@ impl std::fmt::Display for TenantId {
 fn valid_tenant_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_TENANT_ID_LEN
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Optional admin-JWT claim used to override the tenant header. Only `tnt`
@@ -147,52 +148,84 @@ fn tenant_from_jwt(headers: &HeaderMap, secret: &[u8]) -> Option<String> {
     let mut v = Validation::new(Algorithm::HS256);
     v.validate_exp = true;
     let data = decode::<TenantClaims>(token, &DecodingKey::from_secret(secret), &v).ok()?;
-    data.claims
-        .tnt
-        .filter(|s| valid_tenant_id(s))
+    data.claims.tnt.filter(|s| valid_tenant_id(s))
+}
+
+/// Outcome of reconciling an authenticated JWT tenant claim with a request
+/// header. The JWT claim is AUTHENTICATED, so it is authoritative — a plain
+/// header may restate it but must never override it.
+#[derive(Debug, PartialEq)]
+pub enum TenantResolution {
+    /// Use this tenant id.
+    Use(String),
+    /// No signal — use the default tenant.
+    Default,
+    /// Header contradicts the authenticated tenant claim → reject the request.
+    Conflict,
+}
+
+/// Pure reconciliation (unit-tested). Precedence: authenticated JWT tenant wins;
+/// a header may only match it, never change it; absent JWT, the header is used;
+/// absent both, the default.
+pub fn resolve_tenant(
+    jwt_tenant: Option<String>,
+    header_tenant: Option<String>,
+) -> TenantResolution {
+    match (jwt_tenant, header_tenant) {
+        (Some(jwt), Some(hdr)) if jwt != hdr => TenantResolution::Conflict,
+        (Some(jwt), _) => TenantResolution::Use(jwt),
+        (None, Some(hdr)) => TenantResolution::Use(hdr),
+        (None, None) => TenantResolution::Default,
+    }
 }
 
 /// Resolve the tenant id for an incoming request and stash it in
 /// `request.extensions_mut()` so handlers can extract it with
-/// `Extension<TenantId>`. On a malformed `x-sauron-tenant-id` header we
-/// return `400 Bad Request` — we never silently fall back to the default
-/// when the caller explicitly asked for something else.
+/// `Extension<TenantId>`. A malformed `x-sauron-tenant-id` header is a
+/// `400`; a header that contradicts an authenticated JWT tenant claim is a
+/// `403` — the header can never override authenticated tenant identity.
 pub async fn extract_tenant(mut request: Request, next: Next) -> Response {
-    // Priority 1: explicit header.
-    let header_value = request
+    let header_tenant = match request
         .headers()
         .get(TENANT_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    if let Some(raw) = header_value {
-        if !valid_tenant_id(&raw) {
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) if !valid_tenant_id(&raw) => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("invalid {TENANT_HEADER}: must match [A-Za-z0-9_-]{{1,{MAX_TENANT_ID_LEN}}}"),
+                format!(
+                    "invalid {TENANT_HEADER}: must match [A-Za-z0-9_-]{{1,{MAX_TENANT_ID_LEN}}}"
+                ),
             )
                 .into_response();
         }
-        request.extensions_mut().insert(TenantId::new(raw));
-        return next.run(request).await;
-    }
+        other => other,
+    };
 
-    // Priority 2: admin JWT `tnt` claim (only if the operator runs JWT auth).
-    if let Some(secret) = std::env::var("SAURON_ADMIN_JWT_HS256_SECRET").ok() {
-        if !secret.is_empty() {
-            if let Some(t) = tenant_from_jwt(request.headers(), secret.as_bytes()) {
-                request.extensions_mut().insert(TenantId::new(t));
-                return next.run(request).await;
-            }
+    // Authenticated tenant from a validated admin JWT (only if JWT auth is
+    // configured). Authoritative over any header.
+    let jwt_tenant = std::env::var("SAURON_ADMIN_JWT_HS256_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .and_then(|secret| tenant_from_jwt(request.headers(), secret.as_bytes()));
+
+    match resolve_tenant(jwt_tenant, header_tenant) {
+        TenantResolution::Use(t) => {
+            request.extensions_mut().insert(TenantId::new(t));
+        }
+        TenantResolution::Default => {
+            request.extensions_mut().insert(TenantId::default_tenant());
+        }
+        TenantResolution::Conflict => {
+            return (
+                StatusCode::FORBIDDEN,
+                format!("{TENANT_HEADER} does not match the authenticated tenant claim"),
+            )
+                .into_response();
         }
     }
-
-    // Priority 4: fallback to default. (Priority 3 — URL `:tenant_id` path
-    // params — is intentionally out of scope for S11; revisit in 11.5.)
-    request
-        .extensions_mut()
-        .insert(TenantId::default_tenant());
     next.run(request).await
 }
 
@@ -262,6 +295,33 @@ mod tests {
         let t = TenantId::default_tenant();
         assert_eq!(t.as_str(), DEFAULT_TENANT);
         assert_eq!(t.0, "default");
+    }
+
+    #[test]
+    fn authenticated_jwt_tenant_wins_over_header() {
+        let j = |s: &str| Some(s.to_string());
+        // Header cannot override an authenticated JWT tenant claim.
+        assert_eq!(
+            resolve_tenant(j("acme"), j("globex")),
+            TenantResolution::Conflict
+        );
+        // Header may restate it.
+        assert_eq!(
+            resolve_tenant(j("acme"), j("acme")),
+            TenantResolution::Use("acme".into())
+        );
+        // JWT alone is authoritative.
+        assert_eq!(
+            resolve_tenant(j("acme"), None),
+            TenantResolution::Use("acme".into())
+        );
+        // No JWT → header is the (unauthenticated) signal.
+        assert_eq!(
+            resolve_tenant(None, j("globex")),
+            TenantResolution::Use("globex".into())
+        );
+        // Neither → default.
+        assert_eq!(resolve_tenant(None, None), TenantResolution::Default);
     }
 
     #[test]

@@ -78,16 +78,14 @@ ok "core compiled"
 # ────────────────────────────────────────────────────────────────────────
 step "Build redteam (TS)"
 cd "$ROOT/redteam"
-if [ ! -d node_modules ]; then npm install --silent 2>&1 | tail -2; fi
+npm ci --ignore-scripts --silent
 npm run build --silent
 ok "redteam compiled"
 
 step "Build agentic SDK (TS)"
 cd "$ROOT/agentic"
-if [ ! -d node_modules ]; then npm install --silent 2>&1 | tail -2; fi
-if grep -q '"build"' package.json 2>/dev/null; then
-    npm run build --silent || true
-fi
+npm ci --ignore-scripts --silent
+npm run build --silent
 ok "agentic compiled"
 
 # ────────────────────────────────────────────────────────────────────────

@@ -5,10 +5,10 @@ import {
   type CorePerAgentMetric,
 } from "../_adapters";
 
-export async function GET(_req: Request) {
+export async function GET(req: Request) {
   const [agentsR, metricsR] = await Promise.all([
-    fetchCoreJson<CoreAgentRecord[]>("agents"),
-    fetchCoreJson<CorePerAgentMetric[]>("per_agent_metrics", "?limit=500"),
+    fetchCoreJson<CoreAgentRecord[]>("agents", "", req),
+    fetchCoreJson<CorePerAgentMetric[]>("per_agent_metrics", "?limit=500", req),
   ]);
 
   if (!agentsR.ok) return agentsR.response;

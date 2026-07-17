@@ -13,8 +13,8 @@ SauronID's production claim should be the cryptographic agent-binding core (per-
 
 - Set strong random `SAURON_ADMIN_KEY` or `SAURON_ADMIN_KEYS`; production rejects admin keys under 32 bytes.
 - Set `SAURON_TOKEN_SECRET`, `SAURON_JWT_SECRET`, and `SAURON_OPRF_SEED` through a secret manager.
-- Set `SAURONID_ADMIN_PROXY_TOKEN` (legacy alias: `TRUSTAI_ADMIN_PROXY_TOKEN`) and have the edge/reverse proxy inject it as `x-sauronid-admin-token` (legacy: `x-trustai-admin-token`) or an HTTP-only `sauronid_admin_token` (legacy: `trustai_admin_token`) cookie before allowing browser traffic to Next.js admin proxy routes.
-- Do not set `SAURONID_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1` (legacy alias: `TRUSTAI_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1`) outside local demos.
+- Set `SAURON_DASHBOARD_SESSION_SECRET` and `SAURON_DASHBOARD_OPERATORS` for the signed dashboard session. Use scrypt records for operator passwords; raw SHA-256 records are development-only.
+- Keep the dashboard behind TLS and, where appropriate, the optional Caddy HTTP basic-auth defense-in-depth layer.
 - For Phase 0+ deployments, set `SAURON_REQUIRE_CALL_SIG=1` to fail-close on missing/invalid per-call signatures (default in non-development runtimes).
 - Configure `SAURON_ALLOWED_ORIGINS` explicitly for deployed web origins.
 - Use `SAURON_COMPLIANCE_JURISDICTION_MODE=enforce` with a non-empty `SAURON_COMPLIANCE_JURISDICTION_ALLOWLIST` where required.
@@ -53,4 +53,4 @@ At minimum, the gate should include:
 
 ## Current Production Boundary
 
-The system is demo/staging-ready only when all checks pass and the demo is launched with development settings. It is production-ready only after the admin proxy token is enforced, secrets are injected externally, runtime DB artifacts are untracked, and mock payment/anchoring providers are either clearly disabled or replaced by real testnet/mainnet integrations.
+The system is demo/staging-ready only when all checks pass and the demo is launched with development settings. It is production-ready only after dashboard sessions, strict policy binding, the egress gateway/firewall, external secrets, tenant-safe admin views, untracked runtime DB artifacts, and real payment/anchoring providers are configured.

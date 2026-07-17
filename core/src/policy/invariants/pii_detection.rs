@@ -106,8 +106,10 @@ mod tests {
     #[test]
     fn denies_on_email_pattern_in_payload() {
         let mut a = Action::default();
-        a.metadata
-            .insert("payload".into(), json!("contact me at jane@example.com please"));
+        a.metadata.insert(
+            "payload".into(),
+            json!("contact me at jane@example.com please"),
+        );
         assert!(PiiDetectionCheck::new().evaluate(&ctx(&a)).is_deny());
     }
 
@@ -122,7 +124,8 @@ mod tests {
     #[test]
     fn allows_clean_payload() {
         let mut a = Action::default();
-        a.metadata.insert("payload".into(), json!("nothing sensitive here"));
+        a.metadata
+            .insert("payload".into(), json!("nothing sensitive here"));
         assert!(PiiDetectionCheck::new().evaluate(&ctx(&a)).is_allow());
     }
 }

@@ -118,6 +118,18 @@ export async function verifyAgeProof(
             result.valid = false;
             console.log(`[VERIFIER] Threshold mismatch: expected ${expectedThreshold}, got ${publicSignals[1]}`);
         }
+        // Bind the issuer public key: without this a prover can present a proof
+        // made under its OWN issuer key (self-selected credential) and have it
+        // accepted. [3]=issuerPubKeyAx, [4]=issuerPubKeyAy.
+        if (expectedIssuerPubKey !== undefined) {
+            if (
+                publicSignals[3] !== expectedIssuerPubKey[0].toString() ||
+                publicSignals[4] !== expectedIssuerPubKey[1].toString()
+            ) {
+                result.valid = false;
+                console.log("[VERIFIER] Issuer public key mismatch — proof made under a different issuer key");
+            }
+        }
     }
 
     return result;
@@ -167,6 +179,8 @@ export async function verifyCredentialProof(
         ageThreshold?: number;
         requiredNationality?: bigint;
         merkleRoot?: bigint;
+        currentDate?: number;
+        issuerPubKey?: [bigint, bigint];
     }
 ): Promise<VerificationResult & { decodedOutputs: { ageVerified: boolean; nationalityMatched: boolean; credentialValid: boolean } }> {
     const result = await verifyProof("CredentialVerification", proof, publicSignals);
@@ -189,6 +203,28 @@ export async function verifyCredentialProof(
 
     if (result.valid && !decodedOutputs.credentialValid) {
         result.valid = false;
+    }
+
+    // Bind the verifier's intended parameters to the proof's public inputs.
+    // Without this, a prover substitutes its own currentDate, issuer key,
+    // nationality requirement, and Merkle root and still gets "valid". Signal
+    // layout: [3]=currentDate [4]=ageThreshold [5]=requiredNationality
+    // [6]=merkleRoot [7]=issuerPubKeyAx [8]=issuerPubKeyAy.
+    if (result.valid && expectedParams) {
+        const checks: Array<[string, string | undefined, number]> = [
+            ["currentDate", expectedParams.currentDate?.toString(), 3],
+            ["ageThreshold", expectedParams.ageThreshold?.toString(), 4],
+            ["requiredNationality", expectedParams.requiredNationality?.toString(), 5],
+            ["merkleRoot", expectedParams.merkleRoot?.toString(), 6],
+            ["issuerPubKeyAx", expectedParams.issuerPubKey?.[0]?.toString(), 7],
+            ["issuerPubKeyAy", expectedParams.issuerPubKey?.[1]?.toString(), 8],
+        ];
+        for (const [label, want, idx] of checks) {
+            if (want !== undefined && publicSignals[idx] !== want) {
+                result.valid = false;
+                console.log(`[VERIFIER] ${label} mismatch: expected ${want}, got ${publicSignals[idx]}`);
+            }
+        }
     }
 
     return { ...result, decodedOutputs };

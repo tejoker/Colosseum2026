@@ -115,6 +115,33 @@ pub fn policy_enforcement_mode() -> PolicyEnforcementMode {
     }
 }
 
+/// Global blast-radius ceiling: the maximum USD value of ANY single agent
+/// action, enforced as a hard circuit-breaker regardless of the bound policy,
+/// the binding's own cap, or the enforcement mode. A broad or misconfigured
+/// policy therefore cannot authorize a payment larger than this. Set via
+/// `SAURON_MAX_ACTION_USD`; unset / non-positive ⇒ no global ceiling (the
+/// per-policy `per_action_cap` invariant still applies where declared).
+pub fn global_max_action_usd() -> Option<f64> {
+    std::env::var("SAURON_MAX_ACTION_USD")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|&v| v.is_finite() && v > 0.0)
+}
+
+/// Whether every protected agent MUST have a valid, loadable bound policy.
+/// When `SAURON_POLICY_REQUIRE_BINDING` is truthy AND enforcement mode is
+/// `Enforce`, an action from an agent with no binding is denied (rather than
+/// allowed through the legacy no-op path). Off by default so deployments that
+/// intentionally leave some agents unmanaged keep working; commercial
+/// enforcement deployments turn it on. Independent of `PolicyUnavailable`,
+/// which always fails closed in `Enforce` mode regardless of this flag.
+pub fn policy_require_binding() -> bool {
+    std::env::var("SAURON_POLICY_REQUIRE_BINDING")
+        .ok()
+        .and_then(|v| parse_truthy(&v))
+        .unwrap_or(false)
+}
+
 /// Assert that the running configuration is safe before the server binds
 /// its TCP socket. Refuses to start when `ENV=production` and a critical
 /// enforcement gate has been explicitly disabled without the matching
@@ -151,6 +178,17 @@ pub fn assert_production_enforcement_safe() -> Result<(), String> {
             "production runtime refuses to start with SAURON_POLICY_ENFORCEMENT_MODE=off (set SAURON_UNSAFE_ALLOW_ADVISORY_IN_PROD=1 to override)".into(),
         );
     }
+    // The security-audit hash chain is only tamper-evident if its HMAC key is
+    // secret. Without SAURON_AUDIT_HMAC_KEY the code falls back to a PUBLIC dev
+    // key, so any DB writer could recompute the chain after editing a row.
+    match std::env::var("SAURON_AUDIT_HMAC_KEY") {
+        Ok(v) if !v.trim().is_empty() => {}
+        _ => {
+            return Err(
+                "production runtime refuses to start without SAURON_AUDIT_HMAC_KEY (the audit hash chain would use a public dev key; set SAURON_UNSAFE_ALLOW_ADVISORY_IN_PROD=1 to override)".into(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -158,31 +196,18 @@ pub fn assert_production_enforcement_safe() -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // Each test owns a single env var name to avoid cross-test bleed. We
-    // restore the prior value (or unset) at scope exit.
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-        fn unset(key: &'static str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::remove_var(key);
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
+    #[test]
+    fn global_max_action_usd_parses_and_filters() {
+        // No other test reads SAURON_MAX_ACTION_USD, so touching it here is safe.
+        std::env::remove_var("SAURON_MAX_ACTION_USD");
+        assert_eq!(global_max_action_usd(), None, "unset → no ceiling");
+        std::env::set_var("SAURON_MAX_ACTION_USD", "1000.50");
+        assert_eq!(global_max_action_usd(), Some(1000.50));
+        std::env::set_var("SAURON_MAX_ACTION_USD", "0");
+        assert_eq!(global_max_action_usd(), None, "non-positive rejected");
+        std::env::set_var("SAURON_MAX_ACTION_USD", "not-a-number");
+        assert_eq!(global_max_action_usd(), None, "garbage rejected");
+        std::env::remove_var("SAURON_MAX_ACTION_USD");
     }
 
     #[test]

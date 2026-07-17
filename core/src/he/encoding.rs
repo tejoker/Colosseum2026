@@ -85,9 +85,7 @@ pub fn encode_f64_for_modulus(v: f64, scale: u32, n: &BigUint) -> Result<BigUint
 /// [`encode_f64`] for unsigned values only. For signed decoding use
 /// [`decode_f64_signed`].
 pub fn decode_f64(m: &BigUint, scale: u32) -> Result<f64, HeError> {
-    let raw = m
-        .to_u64()
-        .ok_or(HeError::DecodeOverflow)?;
+    let raw = m.to_u64().ok_or(HeError::DecodeOverflow)?;
     Ok((raw as f64) / (scale as f64))
 }
 

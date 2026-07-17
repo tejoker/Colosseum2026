@@ -51,7 +51,7 @@ These artefacts let the requester reconstruct *what the specified tenant's agent
 
 3. **Minimum-disclosure principle.** Even within the subpoena scope, produce the narrowest dataset that satisfies the request. If they asked for "all actions by agent X," do not include other agents' actions even if they share a `tenant_id`.
 
-4. **Audit-log entry of the disclosure event.** Append a row to the security audit log: `action=disclosure`, `target=<tenant_id,agent_id>`, `actor=<operator>`, `reason=<subpoena_ref>`, `scope=<json>`, `timestamp=<ts>`. This row is anchored to Bitcoin / Solana in the next batch — tamper-evident.
+4. **Audit-log entry of the disclosure event.** Append a row to the security audit log: `action=disclosure`, `target=<tenant_id,agent_id>`, `actor=<operator>`, `reason=<subpoena_ref>`, `scope=<json>`, `timestamp=<ts>`. This row joins the tamper-evident HMAC hash chain (`seq`/`prev_hash`/`entry_hash`); any later edit/delete is detectable via `verify_audit_chain`. (The security-audit log is HMAC-chain tamper-evident, not Bitcoin/Solana anchored — on-chain anchoring covers `agent_action_receipts`.)
 
 5. **Produce in a defensible format.** JSON exports with the merkle proofs included so the receiver can independently verify the data has not been tampered with. Operator signs the bundle with the operator's signing key for chain-of-custody.
 

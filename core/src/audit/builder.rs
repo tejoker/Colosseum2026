@@ -17,9 +17,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::report::{AttachedProof, AuditReport, AuditSection};
-use crate::audit::types::{
-    AnchorEvidence, ComplianceSummary, SectionEvidence, SectionVerdict,
-};
+use crate::audit::types::{AnchorEvidence, ComplianceSummary, SectionEvidence, SectionVerdict};
 use crate::middleware::audit_log::AuditEvent;
 use crate::state::ServerState;
 
@@ -76,9 +74,7 @@ pub async fn build_audit_report(
     req: BuildRequest,
 ) -> Result<AuditReport, AuditError> {
     if req.period_end < req.period_start {
-        return Err(AuditError::Invalid(
-            "period_end < period_start".into(),
-        ));
+        return Err(AuditError::Invalid("period_end < period_start".into()));
     }
 
     let (db, _policy_store) = {
@@ -103,10 +99,13 @@ pub async fn build_audit_report(
             )
             .map_err(|e| AuditError::Storage(e.to_string()))?;
         let rows = stmt
-            .query_map(
-                params![tenant_id, req.period_start, req.period_end],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
-            )
+            .query_map(params![tenant_id, req.period_start, req.period_end], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
             .map_err(|e| AuditError::Storage(e.to_string()))?;
         rows.flatten().collect()
     } else {
@@ -137,7 +136,11 @@ pub async fn build_audit_report(
         bound.push(&req.period_end);
         let rows = stmt
             .query_map(rusqlite::params_from_iter(bound.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })
             .map_err(|e| AuditError::Storage(e.to_string()))?;
         rows.flatten().collect()
@@ -148,8 +151,7 @@ pub async fn build_audit_report(
     // Resolve the canonical agent list (from the receipts when the
     // request omitted one). Sorted for deterministic output.
     let observed_agents: Vec<String> = if canonical_agents.is_empty() {
-        let mut s: Vec<String> =
-            receipts.iter().map(|(a, _, _)| a.clone()).collect();
+        let mut s: Vec<String> = receipts.iter().map(|(a, _, _)| a.clone()).collect();
         s.sort();
         s.dedup();
         s
@@ -173,31 +175,29 @@ pub async fn build_audit_report(
         )
         .map_err(|e| AuditError::Storage(e.to_string()))?;
     let stats_rows = stats_stmt
-        .query_map(
-            params![tenant_id, req.period_start, req.period_end],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                ))
-            },
-        )
+        .query_map(params![tenant_id, req.period_start, req.period_end], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })
         .map_err(|e| AuditError::Storage(e.to_string()))?;
-    let stats: Vec<(String, i64, i64, String, String, String)> =
-        stats_rows.flatten().collect();
+    let stats: Vec<(String, i64, i64, String, String, String)> = stats_rows.flatten().collect();
 
     let mut zk_proofs: Vec<AttachedProof> = stats
         .iter()
-        .map(|(metric_id, _, _, merkle_root, proof_b64, vk_id)| AttachedProof {
-            circuit: "StatsHonestComputation".to_string(),
-            public_inputs: vec![merkle_root.clone(), metric_id.clone()],
-            proof_b64: proof_b64.clone(),
-            vk_id: vk_id.clone(),
-        })
+        .map(
+            |(metric_id, _, _, merkle_root, proof_b64, vk_id)| AttachedProof {
+                circuit: "StatsHonestComputation".to_string(),
+                public_inputs: vec![merkle_root.clone(), metric_id.clone()],
+                proof_b64: proof_b64.clone(),
+                vk_id: vk_id.clone(),
+            },
+        )
         .collect();
 
     // ── 3. Anchors ─────────────────────────────────────────────────
@@ -244,9 +244,10 @@ pub async fn build_audit_report(
             .map(|b| b.0.clone())
             .or_else(|| sol.as_ref().map(|s| s.0.clone()))
             .unwrap_or_default(),
-        bitcoin_ots_receipt_b64: btc.as_ref().and_then(|b| b.1.as_ref()).map(|blob| {
-            base64::engine::general_purpose::STANDARD.encode(blob)
-        }),
+        bitcoin_ots_receipt_b64: btc
+            .as_ref()
+            .and_then(|b| b.1.as_ref())
+            .map(|blob| base64::engine::general_purpose::STANDARD.encode(blob)),
         bitcoin_block_height: btc.as_ref().map(|b| b.2),
         solana_signature: sol.as_ref().map(|s| s.1.clone()),
         solana_slot: sol.as_ref().map(|s| s.2),
@@ -262,25 +263,22 @@ pub async fn build_audit_report(
         )
         .map_err(|e| AuditError::Storage(e.to_string()))?;
     let audit_rows = audit_stmt
-        .query_map(
-            params![tenant_id, req.period_start, req.period_end],
-            |r| r.get::<_, String>(0),
-        )
+        .query_map(params![tenant_id, req.period_start, req.period_end], |r| {
+            r.get::<_, String>(0)
+        })
         .map_err(|e| AuditError::Storage(e.to_string()))?;
     let mut policy_ids: Vec<String> = Vec::new();
     let mut denial_breakdown: HashMap<String, u32> = HashMap::new();
     let mut denied: u32 = 0;
     for row in audit_rows.flatten() {
-        if let Ok(ev) = serde_json::from_str::<AuditEvent>(&row) {
-            if let AuditEvent::PolicyViolation {
-                policy_id, check, ..
-            } = ev
-            {
-                denied = denied.saturating_add(1);
-                *denial_breakdown.entry(check).or_insert(0) += 1;
-                if !policy_id.is_empty() && !policy_ids.contains(&policy_id) {
-                    policy_ids.push(policy_id);
-                }
+        if let Ok(AuditEvent::PolicyViolation {
+            policy_id, check, ..
+        }) = serde_json::from_str::<AuditEvent>(&row)
+        {
+            denied = denied.saturating_add(1);
+            *denial_breakdown.entry(check).or_insert(0) += 1;
+            if !policy_id.is_empty() && !policy_ids.contains(&policy_id) {
+                policy_ids.push(policy_id);
             }
         }
     }
@@ -308,9 +306,7 @@ pub async fn build_audit_report(
     let spend_evidence = stats.iter().find(|(metric_id, _, _, _, _, _)| {
         metric_id.contains("spend") || metric_id.contains("cost")
     });
-    if let Some((metric_id, claimed, n_records, merkle_root, _proof_b64, vk_id)) =
-        spend_evidence
-    {
+    if let Some((metric_id, claimed, n_records, merkle_root, _proof_b64, vk_id)) = spend_evidence {
         sections.push(AuditSection {
             heading: "Spend Budget Compliance".into(),
             statement: format!(
@@ -360,9 +356,7 @@ pub async fn build_audit_report(
         + *denial_breakdown.get("tool_allowlist").unwrap_or(&0);
     sections.push(AuditSection {
         heading: "Tool Allowlist".into(),
-        statement: format!(
-            "{allowlist_denials} out-of-allowlist attempts blocked by policy"
-        ),
+        statement: format!("{allowlist_denials} out-of-allowlist attempts blocked by policy"),
         evidence: SectionEvidence::ToolAllowlist {
             allowlist: vec![],
             attempted_violations: allowlist_denials,
@@ -383,9 +377,7 @@ pub async fn build_audit_report(
     let tw_violations = *denial_breakdown.get("time_window").unwrap_or(&0);
     sections.push(AuditSection {
         heading: "Time Window".into(),
-        statement: format!(
-            "{tw_violations} actions attempted outside declared time window"
-        ),
+        statement: format!("{tw_violations} actions attempted outside declared time window"),
         evidence: SectionEvidence::TimeWindow {
             window_start: String::new(),
             window_end: String::new(),
@@ -504,8 +496,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("sauron-audit-build-{pid}-{nanos}-{label}.db"));
+        let path =
+            std::env::temp_dir().join(format!("sauron-audit-build-{pid}-{nanos}-{label}.db"));
         let _ = std::fs::remove_file(&path);
         Arc::new(open_db_at(path.to_str().unwrap(), 2))
     }

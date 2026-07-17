@@ -15,12 +15,9 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::aggregation::cohorts::{CohortDefinition, CohortError};
-use crate::aggregation::publish::{
-    publish_cohort_with_ledger, PublishError, PublishedCohort,
-};
+use crate::aggregation::publish::{publish_cohort_with_ledger, PublishError, PublishedCohort};
 use crate::aggregation::store::{
-    anchor_submission, list_cohort, list_for_cohort, synthetic_action_hash,
-    upsert_submission,
+    anchor_submission, list_cohort, list_for_cohort, synthetic_action_hash, upsert_submission,
 };
 use crate::aggregation::submission::{CohortRow, StatsSubmission, StatsSubmitResponse};
 use crate::aggregation::verify::{verify_stats_submission, AggError};
@@ -112,8 +109,7 @@ pub async fn cohort_handler(
             .map_err(|_| AppError::Internal("state lock".into()))?;
         st.db.clone()
     };
-    let rows = list_cohort(&db, &q.metric_id, q.period_start, q.period_end)
-        .map_err(map_agg_err)?;
+    let rows = list_cohort(&db, &q.metric_id, q.period_start, q.period_end).map_err(map_agg_err)?;
     let n = rows.len();
     Ok(Json(CohortResponse { rows, n }))
 }

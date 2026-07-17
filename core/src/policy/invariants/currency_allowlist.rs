@@ -21,7 +21,10 @@ impl CurrencyAllowlistCheck {
     /// for comparison (`eur` and `EUR` both match an `EUR` entry).
     pub fn new(allowed: Vec<String>) -> Self {
         Self {
-            allowed: allowed.into_iter().map(|s| s.to_ascii_uppercase()).collect(),
+            allowed: allowed
+                .into_iter()
+                .map(|s| s.to_ascii_uppercase())
+                .collect(),
         }
     }
 }

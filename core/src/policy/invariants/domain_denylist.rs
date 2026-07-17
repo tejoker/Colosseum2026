@@ -24,7 +24,10 @@ impl DomainDenylistCheck {
     /// — we lowercase at construction.
     pub fn new(domains: Vec<String>) -> Self {
         Self {
-            domains: domains.into_iter().map(|d| d.to_ascii_lowercase()).collect(),
+            domains: domains
+                .into_iter()
+                .map(|d| d.to_ascii_lowercase())
+                .collect(),
         }
     }
 }

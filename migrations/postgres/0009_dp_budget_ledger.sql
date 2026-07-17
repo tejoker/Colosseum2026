@@ -43,6 +43,23 @@ CREATE TABLE IF NOT EXISTS dp_budget_publications (
 CREATE INDEX IF NOT EXISTS idx_dp_pub_cohort
     ON dp_budget_publications(cohort_id, cycle_start);
 
+-- Operator-managed cohort registry for DP-published cross-tenant benchmarks.
+-- Global (NOT tenant-scoped) — see docs/privacy-model.md "Publication pipeline".
+-- Created here because 0009 is the first migration to reference it; the ε ledger
+-- above extends it with per-cycle caps below.
+CREATE TABLE IF NOT EXISTS cohort_definitions (
+    cohort_id              TEXT PRIMARY KEY,
+    label                  TEXT    NOT NULL,
+    vendor                 TEXT,
+    sector                 TEXT,
+    tenant_ids_json        TEXT    NOT NULL,
+    k_anonymity_threshold  INTEGER NOT NULL DEFAULT 5,
+    epsilon_per_metric     DOUBLE PRECISION NOT NULL,
+    delta                  DOUBLE PRECISION NOT NULL,
+    created_at             BIGINT  NOT NULL,
+    updated_at             BIGINT  NOT NULL
+);
+
 -- Extend cohort_definitions with optional cycle defaults. All nullable;
 -- existing rows keep working untouched. The ledger module falls back to
 -- 90-day cycles and epsilon_per_metric * 4 cap when these are NULL.

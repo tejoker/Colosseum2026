@@ -67,11 +67,11 @@ step "Build Rust core (release)"
 ok "core compiled"
 
 step "Build redteam (TS)"
-(cd "$ROOT/redteam" && (test -d node_modules || npm install --silent) && npm run build --silent)
+(cd "$ROOT/redteam" && npm ci --ignore-scripts --silent && npm run build --silent)
 ok "redteam compiled"
 
 step "Build agentic SDK (TS)"
-(cd "$ROOT/agentic" && (test -d node_modules || npm install --silent) && (test -f tsconfig.json && tsc -p . 2>/dev/null || true))
+(cd "$ROOT/agentic" && npm ci --ignore-scripts --silent && npm run build --silent)
 ok "agentic compiled"
 
 # ────────────────────────────────────────────────────────────────────────

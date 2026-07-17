@@ -101,10 +101,7 @@ fn load_keypair_secret() -> Result<[u8; 64], String> {
     let bytes: Vec<u8> = serde_json::from_str(text.trim())
         .map_err(|e| format!("keypair file '{}' not a JSON array of bytes: {}", path, e))?;
     if bytes.len() != 64 {
-        return Err(format!(
-            "keypair file length {}, expected 64",
-            bytes.len()
-        ));
+        return Err(format!("keypair file length {}, expected 64", bytes.len()));
     }
     let mut arr = [0u8; 64];
     arr.copy_from_slice(&bytes);
@@ -182,13 +179,15 @@ impl SolanaAnchorService {
         if memo_program_id.len() != 32 {
             return Err("memo program id has wrong length".into());
         }
-        let memo_program_id_arr: [u8; 32] = memo_program_id
-            .as_slice()
-            .try_into()
-            .expect("32 bytes");
+        let memo_program_id_arr: [u8; 32] =
+            memo_program_id.as_slice().try_into().expect("32 bytes");
 
-        let message_bytes =
-            build_legacy_message(&signer_pk, &memo_program_id_arr, memo_text.as_bytes(), &blockhash);
+        let message_bytes = build_legacy_message(
+            &signer_pk,
+            &memo_program_id_arr,
+            memo_text.as_bytes(),
+            &blockhash,
+        );
 
         // Step 3: sign the serialized message
         let signature = signing.sign(&message_bytes).to_bytes();
@@ -222,13 +221,7 @@ impl SolanaAnchorService {
                 "INSERT INTO solana_merkle_anchors
                  (anchor_id, merkle_root_hex, network, signature, slot, confirmed, created_at)
                  VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
-                params![
-                    anchor_id,
-                    root_hex,
-                    self.network,
-                    signature_b58,
-                    now,
-                ],
+                params![anchor_id, root_hex, self.network, signature_b58, now,],
             )
             .map_err(|e| format!("DB error: {e}"))?;
         }
@@ -253,9 +246,7 @@ impl SolanaAnchorService {
             .pointer("/result/value/blockhash")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                format!(
-                    "RPC getLatestBlockhash missing result.value.blockhash: {resp}"
-                )
+                format!("RPC getLatestBlockhash missing result.value.blockhash: {resp}")
             })?;
         let bh_bytes = bs58::decode(bh_str)
             .into_vec()
@@ -449,10 +440,7 @@ fn build_legacy_message(
     msg
 }
 
-async fn http_post_json(
-    url: &str,
-    body: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
+async fn http_post_json(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(RPC_TIMEOUT_SECS))
         .build()

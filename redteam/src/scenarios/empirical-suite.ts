@@ -715,30 +715,16 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
     //
     // Real flow: authenticate one user, then fire (limit+overflow) parallel /agent/register
     // calls against the same human_key_image bucket (risk::bucket_agent_register).
-    // Production default = 20/window; dev default = 0 (disabled). If the server's effective
-    // limit is 0, this is by-design unenforced in dev — we report dynamic=false with the
-    // env value so the investor sees the config-state, not a code-review handwave.
+    // Production default = 20/window. Development also has a safe registration
+    // floor (60/window) unless an operator explicitly overrides it; keep the
+    // harness aligned with the server's effective limit so this case is always
+    // a live test rather than a statically "skipped" pass.
     {
         const envLimit = parseInt(
-            process.env.SAURON_RISK_AGENT_REGISTER_PER_WINDOW || "0",
+            process.env.SAURON_RISK_AGENT_REGISTER_PER_WINDOW || "60",
             10
         );
-        if (!envLimit || envLimit <= 0) {
-            record(
-                out,
-                "A12",
-                "Rate limit on /agent/register (effective limit=0 in current env)",
-                "blocked",
-                "blocked",
-                0,
-                "skipped (dev runtime: limit=0 by design; set SAURON_RISK_AGENT_REGISTER_PER_WINDOW>0 to enforce)",
-                {
-                    dynamic: false,
-                    evidence:
-                        "risk::parse_limit returns 0 when ENV=development and env var unset (risk.rs:60-66)",
-                }
-            );
-        } else {
+        if (envLimit > 0) {
             const sfx = `A12-${randSuffix()}`;
             const retail = `redteam-rl-${sfx}`;
             await api.ensureClient(bankSite, "BANK");
@@ -790,6 +776,20 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
                 {
                     dynamic: true,
                     evidence: `${tooMany}/${N} requests returned HTTP 429 (risk::check_and_increment denied)`,
+                }
+            );
+        } else {
+            record(
+                out,
+                "A12",
+                "Rate limit on /agent/register (operator explicitly disabled)",
+                "blocked",
+                "allowed",
+                0,
+                "not dynamically testable: SAURON_RISK_AGENT_REGISTER_PER_WINDOW=0",
+                {
+                    dynamic: false,
+                    evidence: "operator explicitly disabled the registration limiter",
                 }
             );
         }
@@ -1283,7 +1283,7 @@ async function main() {
 
     const passed = results.filter((r) => r.pass).length;
     const total = results.length;
-    const skipped = results.filter((r) => r.detail === "skipped").length;
+    const skipped = results.filter((r) => r.detail?.startsWith("skipped") || r.detail?.startsWith("not dynamically testable")).length;
 
     console.log("┌─────┬──────────────────────────────────────────────────────────────────┬──────────┬──────────┬─────┐");
     console.log("│ id  │ attack                                                            │ expected │ observed │ ms  │");

@@ -124,8 +124,7 @@ mod tests {
 
     #[test]
     fn multiple_roles_all_must_pass() {
-        let c =
-            SignatureCheck::from_required(vec![req("partner", 1), req("compliance", 1)]);
+        let c = SignatureCheck::from_required(vec![req("partner", 1), req("compliance", 1)]);
         let a = Action {
             signatures: vec!["partner".into()],
             ..Default::default()
@@ -155,7 +154,10 @@ mod tests {
             signatures: vec!["clinician".into(), "clinician".into()],
             ..Default::default()
         };
-        assert!(c.evaluate(&ctx(&a)).is_deny(), "duplicates must not meet 2-of-2");
+        assert!(
+            c.evaluate(&ctx(&a)).is_deny(),
+            "duplicates must not meet 2-of-2"
+        );
     }
 
     #[test]
@@ -165,7 +167,10 @@ mod tests {
             signatures: vec!["clinician:alice".into(), "clinician:bob".into()],
             ..Default::default()
         };
-        assert!(c.evaluate(&ctx(&a)).is_allow(), "two distinct signers meet 2-of-2");
+        assert!(
+            c.evaluate(&ctx(&a)).is_allow(),
+            "two distinct signers meet 2-of-2"
+        );
     }
 
     #[test]

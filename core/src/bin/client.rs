@@ -17,8 +17,7 @@ use std::env;
 const SERVER: &str = "http://localhost:3001";
 
 fn admin_key() -> String {
-    std::env::var("SAURON_ADMIN_KEY")
-        .expect("SAURON_ADMIN_KEY env var required")
+    std::env::var("SAURON_ADMIN_KEY").expect("SAURON_ADMIN_KEY env var required")
 }
 
 // ─── OPRF ───────────────────────────────────────────

@@ -111,12 +111,18 @@ pub fn budget_exceeded(totals: &UsageTotals, budgets: &RingBudgets) -> Option<St
     }
     if let Some(cap) = budgets.input_tokens {
         if totals.input_tokens > cap {
-            return Some(format!("input_tokens {} > cap {}", totals.input_tokens, cap));
+            return Some(format!(
+                "input_tokens {} > cap {}",
+                totals.input_tokens, cap
+            ));
         }
     }
     if let Some(cap) = budgets.output_tokens {
         if totals.output_tokens > cap {
-            return Some(format!("output_tokens {} > cap {}", totals.output_tokens, cap));
+            return Some(format!(
+                "output_tokens {} > cap {}",
+                totals.output_tokens, cap
+            ));
         }
     }
     None
@@ -275,8 +281,8 @@ pub async fn ring_usage_handler(
     }
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let rows =
-        list_ring_usage(&db, &q.tenant_id, &ring_id).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let rows = list_ring_usage(&db, &q.tenant_id, &ring_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let out: Vec<Value> = rows
         .into_iter()
         .map(|(ki, t)| {
@@ -296,7 +302,12 @@ mod tests {
         conn
     }
 
-    fn insert_anon_receipt(db: &Connection, receipt_id: &str, ring_id: Option<&str>, key_image: &str) {
+    fn insert_anon_receipt(
+        db: &Connection,
+        receipt_id: &str,
+        ring_id: Option<&str>,
+        key_image: &str,
+    ) {
         db.execute(
             "INSERT INTO agent_action_receipts
              (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, ring_id, config_digest, tenant_id)
@@ -311,7 +322,10 @@ mod tests {
         let mut prices = HashMap::new();
         prices.insert(
             "claude-opus-4-8".to_string(),
-            ModelPrice { in_per_1k: 0.015, out_per_1k: 0.075 },
+            ModelPrice {
+                in_per_1k: 0.015,
+                out_per_1k: 0.075,
+            },
         );
         // 2000 in, 1000 out → 2*0.015 + 1*0.075 = 0.105
         let usd = usd_from_prices(&prices, "claude-opus-4-8", 2000, 1000);
@@ -322,19 +336,31 @@ mod tests {
 
     #[test]
     fn budget_exceeded_respects_caps_and_unlimited() {
-        let totals = UsageTotals { input_tokens: 1500, output_tokens: 10, usd: 2.0 };
+        let totals = UsageTotals {
+            input_tokens: 1500,
+            output_tokens: 10,
+            usd: 2.0,
+        };
         // Unlimited everywhere.
         assert!(budget_exceeded(&totals, &RingBudgets::default()).is_none());
         // Under all caps.
         assert!(budget_exceeded(
             &totals,
-            &RingBudgets { usd: Some(5.0), input_tokens: Some(2000), output_tokens: Some(100) }
+            &RingBudgets {
+                usd: Some(5.0),
+                input_tokens: Some(2000),
+                output_tokens: Some(100)
+            }
         )
         .is_none());
         // Over the token cap.
         assert!(budget_exceeded(
             &totals,
-            &RingBudgets { usd: None, input_tokens: Some(1000), output_tokens: None }
+            &RingBudgets {
+                usd: None,
+                input_tokens: Some(1000),
+                output_tokens: None
+            }
         )
         .is_some());
     }
@@ -346,10 +372,24 @@ mod tests {
         let (ring_id, ki, t1) = record_usage(&db, "ar_1", "local-model", 100, 50, 1).unwrap();
         assert_eq!(ring_id, "ring:r");
         assert_eq!(ki, "kimg_abc");
-        assert_eq!(t1, UsageTotals { input_tokens: 100, output_tokens: 50, usd: 0.0 });
+        assert_eq!(
+            t1,
+            UsageTotals {
+                input_tokens: 100,
+                output_tokens: 50,
+                usd: 0.0
+            }
+        );
         // Second event accumulates on the same pseudonym.
         let (_, _, t2) = record_usage(&db, "ar_1", "local-model", 10, 5, 2).unwrap();
-        assert_eq!(t2, UsageTotals { input_tokens: 110, output_tokens: 55, usd: 0.0 });
+        assert_eq!(
+            t2,
+            UsageTotals {
+                input_tokens: 110,
+                output_tokens: 55,
+                usd: 0.0
+            }
+        );
         assert_eq!(get_usage(&db, "default", "ring:r", "kimg_abc").unwrap(), t2);
     }
 

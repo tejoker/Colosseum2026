@@ -23,13 +23,7 @@ fn prop_laplace_unbiased() {
         let mean = sum / n as f64;
         let sigma_mean = m.scale() * (2.0 / n as f64).sqrt();
         let tol = 4.0 * sigma_mean;
-        assert!(
-            mean.abs() < tol,
-            "seed={} mean={} tol={}",
-            seed,
-            mean,
-            tol
-        );
+        assert!(mean.abs() < tol, "seed={} mean={} tol={}", seed, mean, tol);
     }
 }
 
@@ -50,7 +44,14 @@ fn prop_gaussian_variance() {
         let var = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
         let expected = m.sigma().powi(2);
         let rel = (var - expected).abs() / expected;
-        assert!(rel < 0.1, "seed={} var={} expected={} rel={}", seed, var, expected, rel);
+        assert!(
+            rel < 0.1,
+            "seed={} var={} expected={} rel={}",
+            seed,
+            var,
+            expected,
+            rel
+        );
     }
 }
 
@@ -129,8 +130,7 @@ fn temp_ledger(label: &str) -> DpBudgetLedger {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir()
-        .join(format!("sauron-dpprop-{pid}-{nanos}-{label}.db"));
+    let path = std::env::temp_dir().join(format!("sauron-dpprop-{pid}-{nanos}-{label}.db"));
     let _ = std::fs::remove_file(&path);
     DpBudgetLedger::new(std::sync::Arc::new(open_db_at(path.to_str().unwrap(), 2)))
 }
@@ -143,14 +143,10 @@ fn prop_ledger_total_eps_never_exceeds_cap() {
         let ledger = temp_ledger(&format!("cap_{seed}"));
         let cap = 1.0 + (seed as f64) * 0.5;
         let charge = 0.1 + (seed as f64) * 0.05;
-        ledger
-            .ensure_cycle("coh_p", "m", 0, cap, 1e-5)
-            .unwrap();
+        ledger.ensure_cycle("coh_p", "m", 0, cap, 1e-5).unwrap();
         let mut total = 0.0f64;
         for _ in 0..100 {
-            let dec = ledger
-                .can_publish("coh_p", "m", 0, charge, 1e-9)
-                .unwrap();
+            let dec = ledger.can_publish("coh_p", "m", 0, charge, 1e-9).unwrap();
             match dec {
                 BudgetDecision::Approved { .. } => {
                     ledger
@@ -229,8 +225,7 @@ fn prop_he_homomorphic_add_commutative() {
     use rand::SeedableRng;
     use sauron_core::he::paillier::PaillierPrivateKey;
 
-    let sk = PaillierPrivateKey::from_primes(&BigUint::from(17u32), &BigUint::from(19u32))
-        .unwrap();
+    let sk = PaillierPrivateKey::from_primes(&BigUint::from(17u32), &BigUint::from(19u32)).unwrap();
     let mut rng = StdRng::seed_from_u64(555);
     // For 8 (a,b) pairs verify add(Enc(a), Enc(b)) and add(Enc(b), Enc(a))
     // decrypt to the same sum.
@@ -255,8 +250,7 @@ fn prop_he_encrypt_decrypt_identity() {
     use rand::SeedableRng;
     use sauron_core::he::paillier::PaillierPrivateKey;
 
-    let sk = PaillierPrivateKey::from_primes(&BigUint::from(17u32), &BigUint::from(19u32))
-        .unwrap();
+    let sk = PaillierPrivateKey::from_primes(&BigUint::from(17u32), &BigUint::from(19u32)).unwrap();
     let mut rng = StdRng::seed_from_u64(556);
     for m in [0u32, 1, 2, 7, 50, 100, 200, 322] {
         let pt = BigUint::from(m);

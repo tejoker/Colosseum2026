@@ -275,8 +275,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("sauron-stats-{pid}-{nanos}-{label}.db"));
+        let path = std::env::temp_dir().join(format!("sauron-stats-{pid}-{nanos}-{label}.db"));
         let _ = std::fs::remove_file(&path);
         open_db_at(path.to_str().unwrap(), 2)
     }
@@ -339,7 +338,10 @@ mod tests {
         let db = temp_db("anchor");
         let sub = sample("t1", None);
         let hash = anchor_submission(&db, &sub, 100).unwrap();
-        assert_eq!(hash, synthetic_action_hash(&sub.merkle_root, &sub.metric_id));
+        assert_eq!(
+            hash,
+            synthetic_action_hash(&sub.merkle_root, &sub.metric_id)
+        );
         // Receipt landed.
         let conn = db.lock().unwrap();
         let n: i64 = conn

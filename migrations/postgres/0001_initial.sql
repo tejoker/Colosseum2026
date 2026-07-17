@@ -344,4 +344,51 @@ CREATE TABLE IF NOT EXISTS user_compliance_screening (
     updated_at      BIGINT NOT NULL DEFAULT 0
 );
 
+-- Merkle batch anchors that timestamp agent_action_receipts on BTC/Solana.
+-- tenant_id is added by 0004_multi_tenant.sql (same pattern as agents etc.).
+CREATE TABLE IF NOT EXISTS agent_action_anchors (
+    anchor_id        TEXT PRIMARY KEY NOT NULL,
+    batch_root_hex   TEXT NOT NULL,
+    n_actions        BIGINT NOT NULL,
+    from_receipt_id  TEXT NOT NULL,
+    to_receipt_id    TEXT NOT NULL,
+    from_created_at  BIGINT NOT NULL,
+    to_created_at    BIGINT NOT NULL,
+    btc_anchor_id    TEXT NOT NULL DEFAULT '',
+    sol_anchor_id    TEXT NOT NULL DEFAULT '',
+    created_at       BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_root  ON agent_action_anchors (batch_root_hex);
+CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_range ON agent_action_anchors (from_created_at, to_created_at);
+
+-- Agent egress audit/enforcement log (see core/src/egress_gateway.rs).
+-- tenant_id is added by 0004_multi_tenant.sql.
+CREATE TABLE IF NOT EXISTS agent_egress_log (
+    id            BIGSERIAL PRIMARY KEY,
+    agent_id      TEXT    NOT NULL,
+    target_host   TEXT    NOT NULL,
+    target_path   TEXT    NOT NULL DEFAULT '',
+    method        TEXT    NOT NULL,
+    body_hash_hex TEXT    NOT NULL DEFAULT '',
+    status_code   INTEGER NOT NULL DEFAULT 0,
+    ts            BIGINT  NOT NULL,
+    allowed       INTEGER NOT NULL DEFAULT 1
+);
+
+-- Lightning/L402 invoices for agent-paid APIs. Intentionally NOT tenant-scoped
+-- (see 0004_multi_tenant.sql header).
+CREATE TABLE IF NOT EXISTS lightning_l402_invoices (
+    invoice_id      TEXT    PRIMARY KEY NOT NULL,
+    auth_id         TEXT    NOT NULL,
+    agent_id        TEXT    NOT NULL,
+    service         TEXT    NOT NULL,
+    amount_msat     BIGINT  NOT NULL,
+    payment_hash    TEXT    NOT NULL,
+    macaroon        TEXT    NOT NULL UNIQUE,
+    settled         INTEGER NOT NULL DEFAULT 0,
+    created_at      BIGINT  NOT NULL,
+    expires_at      BIGINT  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lightning_l402_auth ON lightning_l402_invoices (auth_id);
+
 COMMIT;

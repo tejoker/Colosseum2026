@@ -76,10 +76,7 @@ pub async fn bind_policy(
     Path(agent_id): Path<String>,
     Json(body): Json<BindPolicyBody>,
 ) -> Result<Json<PolicyBindingRecord>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     bind_policy_inner_tenant(state, &tenant_id, &agent_id, body).await
 }
 
@@ -130,10 +127,7 @@ pub async fn bind_policy_with_handles(
     // request than to roll back a transaction. Both checks are filtered
     // by tenant so a tenant cannot bind to another tenant's policy_id
     // (and we never leak that fact across tenants).
-    if store
-        .get_by_id_tenant(tenant_id, &body.policy_id)
-        .is_none()
-    {
+    if store.get_by_id_tenant(tenant_id, &body.policy_id).is_none() {
         return Err(AppError::BadRequest(format!(
             "policy_id {} not found in this tenant",
             body.policy_id
@@ -190,10 +184,7 @@ pub async fn get_binding(
     tenant: Option<Extension<TenantId>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<PolicyBindingRecord>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     get_binding_inner_tenant(state, &tenant_id, &agent_id).await
 }
 
@@ -252,10 +243,7 @@ pub async fn unbind_policy(
     tenant: Option<Extension<TenantId>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<UnbindResponse>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     unbind_policy_inner_tenant(state, &tenant_id, &agent_id).await
 }
 
@@ -343,9 +331,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "sauron-bind-{pid}-{nanos}-{test_name}.db"
-        ));
+        let path = std::env::temp_dir().join(format!("sauron-bind-{pid}-{nanos}-{test_name}.db"));
         let _ = std::fs::remove_file(&path);
         let handle = Arc::new(open_db_at(path.to_str().unwrap(), 2));
         let store = Arc::new(PolicyStore::new(Arc::clone(&handle)));
@@ -365,7 +351,14 @@ mod tests {
             "INSERT INTO agents
              (agent_id, human_key_image, agent_checksum, issued_at, expires_at, tenant_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![agent_id, "human-test", "checksum-test", 0_i64, 9_999_999_999_i64, tenant_id],
+            params![
+                agent_id,
+                "human-test",
+                "checksum-test",
+                0_i64,
+                9_999_999_999_i64,
+                tenant_id
+            ],
         )
         .unwrap();
     }
@@ -409,6 +402,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_must_use)] // test asserts DB side-effects, not the Json response
     fn rebind_is_idempotent_last_write_wins() {
         let (db, store) = fresh_handles("rebind_idempotent");
         rt().block_on(async {
@@ -455,6 +449,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_must_use)] // test asserts DB side-effects, not the Json response
     fn unbind_is_idempotent_and_clears_row() {
         let (db, store) = fresh_handles("unbind_idempotent");
         rt().block_on(async {

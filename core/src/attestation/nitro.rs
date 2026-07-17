@@ -117,10 +117,7 @@ impl AttestationVerifier for NitroEnclaveVerifier {
 /// instance in this build. Operators MUST run an end-to-end test in their
 /// own Nitro environment before exposing this path. See
 /// `docs/tee-deployment.md`.
-pub fn verify_nitro_enclave(
-    blob: &[u8],
-    ctx: &AttestationContext,
-) -> Result<(), AttestationError> {
+pub fn verify_nitro_enclave(blob: &[u8], ctx: &AttestationContext) -> Result<(), AttestationError> {
     let first = blob.first().copied().unwrap_or(0);
     // H-5: fail CLOSED in production. The unsigned dev-JSON path has NO
     // cryptographic binding, so it must be refused unless explicitly opted in.
@@ -148,10 +145,7 @@ pub fn verify_nitro_enclave(
 }
 
 /// M1 path: dev-mode JSON envelope. Kept exactly as before for back-compat.
-fn verify_nitro_dev_blob(
-    blob: &[u8],
-    ctx: &AttestationContext,
-) -> Result<(), AttestationError> {
+fn verify_nitro_dev_blob(blob: &[u8], ctx: &AttestationContext) -> Result<(), AttestationError> {
     let doc = parse_nitro_dev(blob)?;
 
     let pcr0 = doc.pcrs.get(&0).ok_or_else(|| {
@@ -208,9 +202,7 @@ fn verify_nitro_cose_blob(
 /// document without running the measurement / cert-chain checks. Used by the
 /// `/v1/attestation/nitro/verify` admin route. Operators still call
 /// [`verify_nitro_enclave`] for the full validation flow.
-pub fn parse_nitro_cose_blob(
-    blob: &[u8],
-) -> Result<super::cbor::NitroParsedDoc, AttestationError> {
+pub fn parse_nitro_cose_blob(blob: &[u8]) -> Result<super::cbor::NitroParsedDoc, AttestationError> {
     let (_cose, doc) = super::cbor::parse_nitro_cose(blob)?;
     Ok(doc)
 }
@@ -299,10 +291,12 @@ mod tests {
                 "should accept dev-mode attestation with matching measurement"
             );
             // Sanity: dispatcher reaches the same path.
-            assert!(
-                crate::attestation::verify_attestation(AttestationKind::NitroEnclave, &blob, &ctx)
-                    .is_ok()
-            );
+            assert!(crate::attestation::verify_attestation(
+                AttestationKind::NitroEnclave,
+                &blob,
+                &ctx
+            )
+            .is_ok());
         });
     }
 

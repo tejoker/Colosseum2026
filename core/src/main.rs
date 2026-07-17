@@ -1,7 +1,9 @@
 use axum::{
     body::{to_bytes, Body},
     extract::{DefaultBodyLimit, Extension, Json, Path, Request, State},
-    http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderMap, HeaderName, Method, StatusCode},
+    http::{
+        header::AUTHORIZATION, header::CONTENT_TYPE, HeaderMap, HeaderName, Method, StatusCode,
+    },
     middleware,
     routing::{delete, get, post},
     Router,
@@ -12,12 +14,12 @@ use hmac::{Hmac, Mac};
 use rusqlite::params;
 use sauron_core::compliance;
 use sauron_core::issuer_runtime::IssuerVerifyError;
+use sauron_core::middleware::{
+    audit_log_middleware, global_rate_limit_middleware, init_audit_sink,
+    security_headers_middleware, GlobalRateLimitConfig, GlobalRateLimiter,
+};
 use sauron_core::policy::{self, AssuranceLevel};
 use sauron_core::risk;
-use sauron_core::middleware::{
-    audit_log_middleware, global_rate_limit_middleware, init_audit_sink, security_headers_middleware,
-    GlobalRateLimitConfig, GlobalRateLimiter,
-};
 use sauron_core::routes::{
     admin_router, agent_spend_router, attestation_router, audit_reports_router, audit_router,
     cohort_router, policy_router, proofs_router, stats_router,
@@ -43,15 +45,13 @@ fn assert_production_sqlite_acknowledged() {
     if sauron_core::runtime_mode::is_development_runtime() {
         return;
     }
-    // The acknowledgement only applies to the single-node SQLite data tier.
-    // With the Postgres backend selected, all tables are ported (Plan 2
-    // M1-M4) and HA is the operator's Postgres concern, so the flag is moot.
-    if std::env::var("SAURON_DB_BACKEND")
-        .map(|v| v.eq_ignore_ascii_case("postgres"))
-        .unwrap_or(false)
-    {
-        return;
-    }
+    // The single-node SQLite tier is load-bearing in EVERY production config.
+    // Even with SAURON_DB_BACKEND=postgres, only a subset of tables are ported
+    // to the Repo/Postgres path (see core/tests/postgres_backend_drift.sh) — the
+    // rest (agents, agent_action_receipts, spend_ledger, …) still write to the
+    // local SQLite sidecar, which is NOT covered by the operator's Postgres HA.
+    // So the acknowledgement is required regardless of backend until the port
+    // is complete; re-add a postgres bypass here only when the drift test flips.
     let ok = std::env::var("SAURON_ACCEPT_SINGLE_NODE_SQLITE")
         .map(|v| {
             let low = v.to_ascii_lowercase();
@@ -60,7 +60,7 @@ fn assert_production_sqlite_acknowledged() {
         .unwrap_or(false);
     if !ok {
         panic!(
-            "[FATAL] SQLite is single-node (no cross-region HA). Set SAURON_ACCEPT_SINGLE_NODE_SQLITE=1 to acknowledge this deployment, or replace the data tier before claiming global production readiness."
+            "[FATAL] SQLite is single-node (no cross-region HA) and stays load-bearing even under SAURON_DB_BACKEND=postgres (partial port — see core/tests/postgres_backend_drift.sh). Set SAURON_ACCEPT_SINGLE_NODE_SQLITE=1 to acknowledge this deployment, or finish the Postgres port before claiming global production readiness."
         );
     }
 }
@@ -74,7 +74,9 @@ fn init_tracing() {
         .unwrap_or(false);
     let registry = tracing_subscriber::registry().with(filter);
     if json_mode {
-        registry.with(fmt::layer().json().with_current_span(false)).init();
+        registry
+            .with(fmt::layer().json().with_current_span(false))
+            .init();
     } else {
         registry.with(fmt::layer()).init();
     }
@@ -86,11 +88,16 @@ use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, Tex
 static METRICS_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 static HTTP_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
-        Opts::new("http_requests_total", "Total HTTP requests handled by the server."),
+        Opts::new(
+            "http_requests_total",
+            "Total HTTP requests handled by the server.",
+        ),
         &["method", "path", "status"],
     )
     .expect("counter");
-    METRICS_REGISTRY.register(Box::new(c.clone())).expect("register");
+    METRICS_REGISTRY
+        .register(Box::new(c.clone()))
+        .expect("register");
     c
 });
 static HTTP_REQUEST_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
@@ -99,11 +106,15 @@ static HTTP_REQUEST_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
             "http_request_duration_seconds",
             "HTTP request duration in seconds.",
         )
-        .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]),
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+        ]),
         &["method", "path"],
     )
     .expect("histogram");
-    METRICS_REGISTRY.register(Box::new(h.clone())).expect("register");
+    METRICS_REGISTRY
+        .register(Box::new(h.clone()))
+        .expect("register");
     h
 });
 
@@ -256,12 +267,11 @@ async fn main() {
 
     // Background Solana confirmer: polls getSignatureStatuses for unconfirmed
     // Solana memo anchors and marks them confirmed once finalized.
-    if let Some(rpc_url) = std::env::var("SAURON_SOLANA_RPC_URL")
-        .ok()
-        .filter(|_| std::env::var("SAURON_SOLANA_ENABLED")
+    if let Some(rpc_url) = std::env::var("SAURON_SOLANA_RPC_URL").ok().filter(|_| {
+        std::env::var("SAURON_SOLANA_ENABLED")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
-            .unwrap_or(false))
-    {
+            .unwrap_or(false)
+    }) {
         sauron_core::solana_anchor::spawn_solana_confirmer(Arc::clone(&db_arc), rpc_url);
     }
 
@@ -312,10 +322,7 @@ async fn main() {
         )
         // Anonymous ring-policy action path (phase 3; gated by SAURON_ANON_RINGS).
         // The ring signature is the auth, so no per-call-signature layer here.
-        .route(
-            "/agent/action/anon",
-            post(agent_action::submit_anon_action),
-        )
+        .route("/agent/action/anon", post(agent_action::submit_anon_action))
         // Phase 4: report token usage for a prior anon receipt (gated likewise).
         .route("/agent/usage", post(usage::record_usage_handler))
         .route(
@@ -343,6 +350,15 @@ async fn main() {
                 Arc::clone(&state),
                 agent::require_call_signature,
             )),
+        )
+        // In-path egress gateway (Phase 1; gated by SAURON_EGRESS_GATEWAY).
+        // Same per-call-sig gate as /egress/log — the ring sig proves the bound
+        // agent; the handler enforces intent_json.egress_allowlist before forwarding.
+        .route(
+            "/agent/egress/proxy",
+            post(sauron_core::egress_gateway::agent_egress_proxy).route_layer(
+                middleware::from_fn_with_state(Arc::clone(&state), agent::require_call_signature),
+            ),
         )
         .route(
             "/agent/{agent_id}",
@@ -475,12 +491,7 @@ async fn main() {
                 ];
                 CorsLayer::new()
                     .allow_origin(allowed_origins)
-                    .allow_methods([
-                        Method::GET,
-                        Method::POST,
-                        Method::DELETE,
-                        Method::OPTIONS,
-                    ])
+                    .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
                     .allow_headers(allowed_headers)
             }
         })
@@ -800,40 +811,27 @@ async fn bank_register_user(
     }
 
     let user_preexisting = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
+        let repo = state.read().unwrap().repo.clone();
 
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM users WHERE key_image_hex = ?1",
-                params![payload.key_image_hex],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            > 0;
+        let exists = repo
+            .user_exists(&payload.key_image_hex)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        db.execute(
-            "INSERT INTO users (key_image_hex, public_key_hex, first_name, last_name, email, date_of_birth, nationality)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(key_image_hex) DO UPDATE SET
-                 public_key_hex = excluded.public_key_hex,
-                 first_name = excluded.first_name,
-                 last_name = excluded.last_name,
-                 email = excluded.email,
-                 date_of_birth = excluded.date_of_birth,
-                 nationality = excluded.nationality",
-            params![
-                payload.key_image_hex,
-                payload.public_key_hex,
-                payload.first_name,
-                payload.last_name,
-                payload.email,
-                payload.date_of_birth,
-                nationality,
-            ],
+        repo.upsert_user(
+            &payload.key_image_hex,
+            &payload.public_key_hex,
+            &payload.first_name,
+            &payload.last_name,
+            &payload.email,
+            &payload.date_of_birth,
+            &nationality,
         )
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // bank_kyc_links is a SQLite-only table (never routed through the repo),
+        // so it stays on the raw handle — consistent on both backends.
         if let Some(bank_customer_id) = payload
             .bank_customer_id
             .as_ref()
@@ -846,6 +844,8 @@ async fn bank_register_user(
                 "attestation_nonce": payload.attestation_nonce,
             })
             .to_string();
+            let st = state.read().unwrap();
+            let db = st.db.lock().unwrap();
             db.execute(
                 "INSERT OR REPLACE INTO bank_kyc_links (bank_customer_id, user_key_image, updated_at, metadata_json)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -854,11 +854,14 @@ async fn bank_register_user(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
 
-        let _ = db.execute(
-            "INSERT OR IGNORE INTO user_registrations (client_name, user_key_image_hex, source, timestamp)
-             VALUES (?1, ?2, 'bank_webhook', ?3)",
-            params![payload.bank_client_name, payload.key_image_hex, now],
-        );
+        repo.insert_user_registration(
+            &payload.bank_client_name,
+            &payload.key_image_hex,
+            "bank_webhook",
+            now,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         exists
     };
@@ -911,6 +914,14 @@ async fn handle_register(
     // Vérifier que la ring sig provient d'un site partenaire légitime.
     {
         let st = state.read().unwrap();
+        // Fail closed on an empty partner ring: with no registered partners there
+        // is no legitimate signer, so /register must reject rather than accept an
+        // (empty-ring) signature. `ring::verify` also rejects this, but guard here
+        // for a clear error + defence in depth.
+        if st.client_group.members.is_empty() {
+            tracing::warn!(target: "sauron::security", endpoint = "/register", "no registered partners — refusing registration");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
         if !st
             .client_group
             .verify_proof(msg.as_bytes(), &payload.client_signature)
@@ -920,23 +931,31 @@ async fn handle_register(
         }
     }
 
-    // Persister l'utilisateur dans la DB.
+    // Persister l'utilisateur dans la DB (dual-backend repo).
     let p = &payload.profile;
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.execute(
-            "INSERT OR IGNORE INTO users
-             (key_image_hex, public_key_hex, first_name, last_name, email, date_of_birth, nationality)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![hex_ki, hex_pk, p.first_name, p.last_name, p.email, p.date_of_birth, p.nationality],
-        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let repo = state.read().unwrap().repo.clone();
+        repo.insert_user_if_absent(
+            &hex_ki,
+            &hex_pk,
+            &p.first_name,
+            &p.last_name,
+            &p.email,
+            &p.date_of_birth,
+            &p.nationality,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
     // Mettre à jour le groupe en mémoire + insérer le commitment Merkle.
     let mut merkle_root_out: Option<String> = None;
     let mut merkle_proof_out: Option<Vec<String>> = None;
     let mut leaf_index_out: Option<usize> = None;
+    // Stashed inside the state write-guard, persisted via the dual-backend repo
+    // once the guard is dropped (the Postgres path is async — can't .await while
+    // holding a std RwLock guard).
+    let mut merkle_leaf_to_persist: Option<(String, i64)> = None;
     {
         let mut st = state.write().unwrap();
         st.user_group.add_member(pk_point);
@@ -950,13 +969,7 @@ async fn handle_register(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs() as i64;
-                    {
-                        let db = st.db.lock().unwrap();
-                        let _ = db.execute(
-                            "INSERT OR IGNORE INTO merkle_leaves (commitment_hex, registered_at) VALUES (?1, ?2)",
-                            params![commitment_hex, ts],
-                        );
-                    }
+                    merkle_leaf_to_persist = Some((commitment_hex.clone(), ts));
                     tracing::debug!(
                         target: "sauron::merkle",
                         leaf_index = receipt.leaf_index,
@@ -985,6 +998,16 @@ async fn handle_register(
             merkle_leaves = st.merkle_ledger.len(),
             "register accepted"
         );
+    }
+
+    // Persist the merkle leaf through the dual-backend repo (SQLite default,
+    // Postgres when SAURON_DB_BACKEND=postgres). Best-effort: it only feeds
+    // ledger reconstruction on restart, so a failure is non-fatal.
+    if let Some((commitment_hex, ts)) = merkle_leaf_to_persist {
+        let repo = state.read().unwrap().repo.clone();
+        if let Err(e) = repo.insert_merkle_leaf(&commitment_hex, ts).await {
+            tracing::warn!(target: "sauron::merkle", error = %e, "merkle leaf persist failed (non-fatal)");
+        }
     }
 
     // ── Dual anchoring (non-blocking, independent failure paths) ─────────
@@ -1111,43 +1134,38 @@ async fn dev_register_user(
     let oprf_result = dev_oprf_eval(server_k, &payload.email, &payload.password);
     let identity = Identity::from_oprf(oprf_result);
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.execute(
-            "INSERT INTO users (key_image_hex, public_key_hex, first_name, last_name, email, date_of_birth, nationality)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(key_image_hex) DO UPDATE SET
-                public_key_hex = excluded.public_key_hex,
-                first_name = excluded.first_name,
-                last_name = excluded.last_name,
-                email = excluded.email,
-                date_of_birth = excluded.date_of_birth,
-                nationality = excluded.nationality",
-            params![
-                identity.key_image_hex(),
-                identity.public_hex(),
-                payload.first_name,
-                payload.last_name,
-                payload.email,
-                payload.date_of_birth,
-                payload.nationality
-            ],
-        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let repo = state.read().unwrap().repo.clone();
+        repo.upsert_user(
+            &identity.key_image_hex(),
+            &identity.public_hex(),
+            &payload.first_name,
+            &payload.last_name,
+            &payload.email,
+            &payload.date_of_birth,
+            &payload.nationality,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        db.execute(
-            "INSERT OR IGNORE INTO user_registrations (client_name, user_key_image_hex, source, timestamp)
-             VALUES (?1, ?2, 'register', ?3)",
-            params![payload.site_name, identity.key_image_hex(), ts],
+        repo.insert_user_registration(
+            &payload.site_name,
+            &identity.key_image_hex(),
+            "register",
+            ts,
         )
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // bank_kyc_links: SQLite-only table, stays on the raw handle.
         let bank_customer_id = format!("DEV-{}", identity.key_image_hex());
         let metadata =
             serde_json::json!({ "source": "dev", "site_name": payload.site_name }).to_string();
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
         db.execute(
             "INSERT OR IGNORE INTO bank_kyc_links (bank_customer_id, user_key_image, updated_at, metadata_json) VALUES (?1, ?2, ?3, ?4)",
             params![bank_customer_id, identity.key_image_hex(), 1000000, metadata],
@@ -1332,15 +1350,20 @@ async fn dev_leash_demo(
     let pop_jkt = "dev-leash-pop-thumbprint";
     let ring_members = vec![agent_identity.public, decoy_identity.public];
     {
+        let repo = state.read().unwrap().repo.clone();
+        repo.upsert_user(
+            &human_key_image,
+            &human.public_hex(),
+            "Dev",
+            "Leash",
+            "dev-leash@example.test",
+            "1990-01-01",
+            "FR",
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
-        db.execute(
-            "INSERT OR REPLACE INTO users
-             (key_image_hex, public_key_hex, first_name, last_name, email, date_of_birth, nationality)
-             VALUES (?1, ?2, 'Dev', 'Leash', 'dev-leash@example.test', '1990-01-01', 'FR')",
-            params![human_key_image, human.public_hex()],
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         db.execute(
             "INSERT OR REPLACE INTO bank_kyc_links
              (bank_customer_id, user_key_image, updated_at, metadata_json)
@@ -1745,37 +1768,33 @@ async fn dev_consent_profile(
         .unwrap()
         .as_secs() as i64;
 
-    let st = state.read().unwrap();
-    let db = st.db.lock().unwrap();
-    let user_key_image: String = db
-        .query_row(
-            "SELECT user_key_image FROM consent_log
-             WHERE consent_token = ?1 AND site_name = ?2 AND token_used = 0 AND revoked = 0
-             AND (consent_expires_at = 0 OR consent_expires_at > ?3)",
-            params![payload.consent_token, payload.site_name, now],
-            |r| r.get(0),
-        )
-        .map_err(|_| {
-            (
+    // consent_log is still on the raw handle (ported separately); scope the
+    // lock so it drops before the async users read.
+    let user_key_image: String = {
+        let repo = state.read().unwrap().repo.clone();
+        repo.resolve_consent_user(&payload.consent_token, &payload.site_name, now)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((
                 StatusCode::UNAUTHORIZED,
-                "invalid, used, revoked, or expired consent token".into(),
-            )
-        })?;
+                "invalid, used, revoked, or expired consent token".to_string(),
+            ))?
+    };
 
-    let (first_name, last_name, email, date_of_birth, nationality): (
-        String,
-        String,
-        String,
-        String,
-        String,
-    ) = db
-        .query_row(
-            "SELECT first_name, last_name, email, date_of_birth, nationality
-             FROM users WHERE key_image_hex = ?1",
-            params![user_key_image],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .map_err(|_| (StatusCode::NOT_FOUND, "consent user not found".into()))?;
+    let user = {
+        let repo = state.read().unwrap().repo.clone();
+        repo.get_user(&user_key_image)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "consent user not found".to_string()))?
+    };
+    let (first_name, last_name, email, date_of_birth, nationality) = (
+        user.first_name,
+        user.last_name,
+        user.email,
+        user.date_of_birth,
+        user.nationality,
+    );
 
     let mut missing_fields = Vec::new();
     for field in payload.required_fields {
@@ -1912,14 +1931,14 @@ async fn delegated_agent_binding_middleware(
         .to_string();
 
     let (user_key_image, issuing_agent_id) = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.query_row(
-            "SELECT user_key_image, issuing_agent_id FROM consent_log WHERE consent_token = ?1 AND revoked = 0",
-            params![consent_token],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-        )
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked consent token".to_string()))?
+        let repo = state.read().unwrap().repo.clone();
+        repo.get_consent_by_token(&consent_token)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((
+                StatusCode::UNAUTHORIZED,
+                "Invalid or revoked consent token".to_string(),
+            ))?
     };
 
     let mut request = Request::from_parts(parts, Body::from(body_bytes));
@@ -2179,7 +2198,12 @@ async fn kyc_request(
         };
         repo.insert_pending_consent(&request_id, &payload.site_name, &claims_json)
             .await
-            .map_err(|e| (StatusCode::CONFLICT, format!("Unable to create consent request: {e}")))?;
+            .map_err(|e| {
+                (
+                    StatusCode::CONFLICT,
+                    format!("Unable to create consent request: {e}"),
+                )
+            })?;
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         let _ = db.execute(
@@ -2227,16 +2251,15 @@ async fn kyc_consent_info(
     State(state): State<Arc<RwLock<ServerState>>>,
     axum::extract::Path(request_id): axum::extract::Path<String>,
 ) -> Result<Json<KycConsentInfo>, (StatusCode, String)> {
-    let st = state.read().unwrap();
-    let db = st.db.lock().unwrap();
-
-    let (site_name, claims_json, consent_token): (String, String, Option<String>) = db
-        .query_row(
-            "SELECT site_name, requested_claims_json, consent_token FROM consent_log WHERE request_id = ?1",
-            params![request_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .map_err(|_| (StatusCode::NOT_FOUND, "Consent request not found or expired".into()))?;
+    let repo = state.read().unwrap().repo.clone();
+    let (site_name, claims_json, consent_token): (String, String, Option<String>) = repo
+        .get_consent_info(&request_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Consent request not found or expired".to_string(),
+        ))?;
 
     let requested_claims: Vec<String> = serde_json::from_str(&claims_json).unwrap_or_default();
     let status = if consent_token.is_some() {
@@ -2278,14 +2301,14 @@ async fn kyc_consent(
     }
     // Validate the consent request exists and is pending
     let site_name = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.query_row(
-            "SELECT site_name FROM consent_log WHERE request_id = ?1 AND revoked = 0 AND token_used = 0",
-            params![payload.request_id],
-            |r| r.get::<_, String>(0),
-        )
-        .map_err(|_| (StatusCode::NOT_FOUND, "Consent request not found or expired".into()))?
+        let repo = state.read().unwrap().repo.clone();
+        repo.pending_consent_site(&payload.request_id, false)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                "Consent request not found or expired".to_string(),
+            ))?
     };
 
     // Authenticate the user (dev mode: OPRF server-side)
@@ -2318,17 +2341,19 @@ async fn kyc_consent(
     let consent_token = hex::encode(&h.finalize()[..]);
     let expires_at = ts + 300; // 5 minutes to use the token
 
-    // Update pending consent row atomically
+    // Update pending consent row atomically (dual-backend repo)
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        let rows = db
-            .execute(
-                "UPDATE consent_log
-                 SET user_key_image = ?1, granted_at = ?2, consent_expires_at = ?3, consent_token = ?4
-                 WHERE request_id = ?5 AND consent_token IS NULL AND revoked = 0 AND token_used = 0",
-                params![hex_ki, ts, expires_at, consent_token, payload.request_id],
+        let repo = state.read().unwrap().repo.clone();
+        let rows = repo
+            .grant_consent_token(
+                &payload.request_id,
+                &hex_ki,
+                ts,
+                expires_at,
+                &consent_token,
+                None,
             )
+            .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if rows == 0 {
             return Err((
@@ -2337,11 +2362,15 @@ async fn kyc_consent(
             ));
         }
 
-        // Also log the consent in requests_log
-        let _ = db.execute(
-            "INSERT INTO requests_log (timestamp, action_type, status, detail) VALUES (?1,'KYC_CONSENT','OK',?2)",
-            params![ts, format!("site={} user={}", site_name, &hex_ki[..16])],
-        );
+        // Also log the consent in requests_log (SQLite-only table, raw handle).
+        {
+            let st = state.read().unwrap();
+            let db = st.db.lock().unwrap();
+            let _ = db.execute(
+                "INSERT INTO requests_log (timestamp, action_type, status, detail) VALUES (?1,'KYC_CONSENT','OK',?2)",
+                params![ts, format!("site={} user={}", site_name, &hex_ki[..16])],
+            );
+        }
     }
 
     // Email is PII — log site + request_id only.
@@ -2449,22 +2478,28 @@ async fn kyc_retrieve(
 
     // Risk + compliance (DB-backed nationality only; never trust client-supplied jurisdiction).
     let jurisdiction_decision: compliance::JurisdictionDecision = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        risk::check_and_increment(
-            &db,
-            &risk::bucket_kyc_retrieve(&tenant_id, &payload.site_name, &user_ki),
-            now,
-            risk::limit_kyc_retrieve(),
-        )
-        .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
-        let nationality: String = db
-            .query_row(
-                "SELECT IFNULL(nationality, '') FROM users WHERE key_image_hex = ?1",
-                params![user_ki],
-                |r| r.get(0),
+        // Risk counter stays on the raw handle (risk_rate_counters is not a
+        // ported table); scope it so the lock drops before the async read.
+        {
+            let st = state.read().unwrap();
+            let db = st.db.lock().unwrap();
+            risk::check_and_increment(
+                &db,
+                &risk::bucket_kyc_retrieve(&tenant_id, &payload.site_name, &user_ki),
+                now,
+                risk::limit_kyc_retrieve(),
             )
-            .unwrap_or_default();
+            .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
+        }
+        let nationality: String = {
+            let repo = state.read().unwrap().repo.clone();
+            repo.get_user(&user_ki)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map(|u| u.nationality)
+                .unwrap_or_default()
+        };
+        let st = state.read().unwrap();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?
     };
@@ -2626,11 +2661,6 @@ async fn kyc_retrieve(
                 "INSERT INTO api_usage (client_name, action, is_agent, timestamp) VALUES (?1,?2,?3,?4)",
                 params![payload.site_name, action, is_agent_int, ts],
             );
-            let _ = db.execute(
-                "INSERT OR IGNORE INTO user_registrations (client_name, user_key_image_hex, source, timestamp)
-                 VALUES (?1, ?2, 'kyc_retrieval', ?3)",
-                params![payload.site_name, user_ki, ts],
-            );
         }
         st.log(
             "KYC_RETRIEVE",
@@ -2638,23 +2668,36 @@ async fn kyc_retrieve(
             &format!("site={} user={}", payload.site_name, &user_ki[..16]),
         );
     }
+    // user_registrations via the dual-backend repo (best-effort, outside the
+    // raw-lock scope so the Postgres path can .await).
+    {
+        let repo = state.read().unwrap().repo.clone();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let _ = repo
+            .insert_user_registration(&payload.site_name, &user_ki, "kyc_retrieval", ts)
+            .await;
+    }
 
     // ── Ring membership verification ─────────────────────────────────────────
     // Verify human is in user_group ring.
     // If consent was issued by an agent, also verify agent is in agent_group ring.
     // Agent inherits human's ring membership — site sees BOTH proofs.
+    // Resolve the human public key via the dual-backend repo before the
+    // in-memory ring checks (which still need the raw handle for `agents`).
+    let human_pub_hex: Option<String> = {
+        let repo = state.read().unwrap().repo.clone();
+        repo.get_user(&user_ki)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| u.public_key_hex)
+    };
     let (human_in_user_ring, agent_in_agent_ring, agent_pub_key_hex, agent_assurance_level) = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
-
-        // Resolve human public key from DB
-        let human_pub_hex: Option<String> = db
-            .query_row(
-                "SELECT public_key_hex FROM users WHERE key_image_hex = ?1",
-                params![user_ki],
-                |r| r.get(0),
-            )
-            .ok();
 
         let human_in_ring = if let Some(ref hex) = human_pub_hex {
             if let Ok(bytes) = hex::decode(hex) {
@@ -3361,10 +3404,7 @@ async fn agent_payment_authorize(
     tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     Json(payload): Json<AgentPaymentAuthorizeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tenant_id = tenant
-        .map(|axum::Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if payload.ajwt.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "ajwt is required".into()));
     }
@@ -3401,6 +3441,29 @@ async fn agent_payment_authorize(
         .and_then(|v| v.as_str())
         .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing agent_id".into()))?
         .to_string();
+
+    // Global blast-radius ceiling — a hard circuit-breaker that no policy (broad,
+    // missing, or misconfigured) and no enforcement mode can override. Uses the
+    // same minor→major USD-equivalent convention as the policy engine.
+    if let Some(max_usd) = sauron_core::runtime_mode::global_max_action_usd() {
+        let amount_usd = payload.amount_minor as f64 / 100.0;
+        if amount_usd > max_usd {
+            tracing::warn!(
+                target: "sauron::policy::blast_radius",
+                %agent_id,
+                amount_usd,
+                max_usd,
+                "payment refused by global per-action ceiling (SAURON_MAX_ACTION_USD)",
+            );
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "payment {amount_usd:.2} exceeds the global per-action ceiling {max_usd:.2} (SAURON_MAX_ACTION_USD)"
+                ),
+            ));
+        }
+    }
+
     let jti = claims
         .get("jti")
         .and_then(|v| v.as_str())
@@ -3418,22 +3481,26 @@ async fn agent_payment_authorize(
         .unwrap()
         .as_secs() as i64;
     let payment_jurisdiction = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        risk::check_and_increment(
-            &db,
-            &risk::bucket_payment_authorize(&tenant_id, &agent_id),
-            now,
-            risk::limit_payment_authorize(),
-        )
-        .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
-        let nationality: String = db
-            .query_row(
-                "SELECT IFNULL(nationality, '') FROM users WHERE key_image_hex = ?1",
-                params![human_key_image],
-                |r| r.get(0),
+        {
+            let st = state.read().unwrap();
+            let db = st.db.lock().unwrap();
+            risk::check_and_increment(
+                &db,
+                &risk::bucket_payment_authorize(&tenant_id, &agent_id),
+                now,
+                risk::limit_payment_authorize(),
             )
-            .unwrap_or_default();
+            .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
+        }
+        let nationality: String = {
+            let repo = state.read().unwrap().repo.clone();
+            repo.get_user(&human_key_image)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map(|u| u.nationality)
+                .unwrap_or_default()
+        };
+        let st = state.read().unwrap();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?
     };
@@ -3534,10 +3601,9 @@ async fn agent_payment_authorize(
         bound_action
             .metadata
             .insert("currency".into(), serde_json::json!(currency.clone()));
-        bound_action.metadata.insert(
-            "merchant_id".into(),
-            serde_json::json!(merchant_id.clone()),
-        );
+        bound_action
+            .metadata
+            .insert("merchant_id".into(), serde_json::json!(merchant_id.clone()));
         match sauron_core::policy::handlers::enforce_bound_policy_for_action(
             &state,
             &tenant_id,
@@ -3570,13 +3636,57 @@ async fn agent_payment_authorize(
                 ) {
                     return Err((
                         StatusCode::FORBIDDEN,
-                        format!(
-                            "policy {policy_id} denied {check}: {reason}"
-                        ),
+                        format!("policy {policy_id} denied {check}: {reason}"),
                     ));
                 }
             }
-            Ok(_) => {}
+            Ok(sauron_core::policy::handlers::BoundPolicyOutcome::PolicyUnavailable {
+                policy_id,
+            }) => {
+                // A binding exists but its policy is not loadable. Never a
+                // license to allow — fail closed in enforce mode.
+                tracing::error!(
+                    target: "sauron::policy::enforcement",
+                    %tenant_id,
+                    %agent_id,
+                    %policy_id,
+                    enforce = matches!(
+                        enforcement_mode,
+                        sauron_core::runtime_mode::PolicyEnforcementMode::Enforce
+                    ),
+                    "bound policy unavailable (binding exists, policy not loadable) — failing closed",
+                );
+                if matches!(
+                    enforcement_mode,
+                    sauron_core::runtime_mode::PolicyEnforcementMode::Enforce
+                ) {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("bound policy {policy_id} is unavailable (failing closed)"),
+                    ));
+                }
+            }
+            Ok(sauron_core::policy::handlers::BoundPolicyOutcome::NoBinding) => {
+                // Opt-in strict mode: every protected agent must carry a
+                // binding. Deny unmanaged agents when require-binding is set.
+                if matches!(
+                    enforcement_mode,
+                    sauron_core::runtime_mode::PolicyEnforcementMode::Enforce
+                ) && sauron_core::runtime_mode::policy_require_binding()
+                {
+                    tracing::warn!(
+                        target: "sauron::policy::enforcement",
+                        %tenant_id,
+                        %agent_id,
+                        "no bound policy and SAURON_POLICY_REQUIRE_BINDING=1 — denying",
+                    );
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "no bound policy for agent (SAURON_POLICY_REQUIRE_BINDING)".to_string(),
+                    ));
+                }
+            }
+            Ok(sauron_core::policy::handlers::BoundPolicyOutcome::Allow { .. }) => {}
             Err(e) => {
                 // H-7: fail CLOSED in enforce mode. An infra error during policy
                 // evaluation previously fell through and authorised the action —
@@ -3764,14 +3874,12 @@ async fn user_auth(
     }
     let key_image = hex::encode(identity.key_image().compress().as_bytes());
     let profile: Option<(String, String)> = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.query_row(
-            "SELECT first_name, last_name FROM users WHERE key_image_hex = ?1",
-            params![key_image],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )
-        .ok()
+        let repo = state.read().unwrap().repo.clone();
+        repo.get_user(&key_image)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| (u.first_name, u.last_name))
     };
     let (session, expires_at) = issue_user_session(&jwt_secret, &key_image);
     Ok(Json(serde_json::json!({
@@ -3796,26 +3904,21 @@ async fn user_consents(
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
     ))?;
-    let st = state.read().unwrap();
-    let db = st.db.lock().unwrap();
-    let mut stmt = db
-        .prepare(
-            "SELECT request_id, site_name, granted_at, token_used, revoked FROM consent_log
-         WHERE user_key_image = ?1 ORDER BY granted_at DESC LIMIT 100",
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map(params![key_image], |r| {
-            Ok(serde_json::json!({
-                "request_id":  r.get::<_, String>(0)?,
-                "site_name":   r.get::<_, String>(1)?,
-                "granted_at":  r.get::<_, i64>(2)?,
-                "used":        r.get::<_, i64>(3)? != 0,
-                "revoked":     r.get::<_, i64>(4)? != 0,
-            }))
-        })
+    let repo = state.read().unwrap().repo.clone();
+    let rows: Vec<serde_json::Value> = repo
+        .list_user_consents(&key_image)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .filter_map(|r| r.ok())
+        .into_iter()
+        .map(|(request_id, site_name, granted_at, token_used, revoked)| {
+            serde_json::json!({
+                "request_id": request_id,
+                "site_name":  site_name,
+                "granted_at": granted_at,
+                "used":       token_used != 0,
+                "revoked":    revoked != 0,
+            })
+        })
         .collect();
     Ok(Json(serde_json::json!({ "consents": rows })))
 }
@@ -3834,13 +3937,10 @@ async fn user_revoke_consent(
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
     ))?;
-    let st = state.read().unwrap();
-    let db = st.db.lock().unwrap();
-    let n = db
-        .execute(
-            "UPDATE consent_log SET revoked = 1 WHERE request_id = ?1 AND user_key_image = ?2",
-            params![request_id, key_image],
-        )
+    let repo = state.read().unwrap().repo.clone();
+    let n = repo
+        .revoke_consent(&request_id, &key_image)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if n == 0 {
         return Err((
@@ -3874,60 +3974,55 @@ async fn user_get_credential(
         "Invalid or expired session".into(),
     ))?;
 
-    // Look up pre-auth code (no claimed flag yet — we'll claim atomically below)
-    // TODO M2-callsite-sweep: SELECT-only paths — Repo::select_credential_code
-    // / Repo::select_user_credential exist for the Postgres backend; keeping
-    // the sync SQLite reads here for backwards compatibility until the
-    // handler is refactored to be uniformly async.
-    let (pre_auth_code, subject_did) = {
+    // Plan-2 call-site sweep: these credential lookups now go through the `Repo`
+    // abstraction instead of a sync `MutexGuard<Connection>` + inline rusqlite.
+    // The SQLite branch runs the identical query (verified locally); the same
+    // call routes to Postgres under `SAURON_DB_BACKEND=postgres`. Obtained once
+    // and reused for the claim below (also removes two blocking reads from the
+    // async runtime).
+    let repo = {
         let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.query_row(
-            "SELECT pre_auth_code, subject_did FROM credential_codes WHERE key_image_hex = ?1",
-            params![key_image],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        ).map_err(|_| (StatusCode::NOT_FOUND, "No credential registered. Register via a bank or enroll first.".into()))?
+        st.repo.clone()
     };
 
+    // Look up pre-auth code (no claimed flag yet — we claim atomically below).
+    let (pre_auth_code, subject_did) = repo
+        .select_credential_code(&key_image)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "No credential registered. Register via a bank or enroll first.".into(),
+        ))?;
+
     // Fast path: return cached VC if already issued.
+    if let Some(vc_json) = repo
+        .select_user_credential(&key_image)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        if let Ok(vc_json) = db.query_row(
-            "SELECT credential_json FROM user_credentials WHERE key_image_hex = ?1",
-            params![key_image],
-            |r| r.get::<_, String>(0),
-        ) {
-            let vc: serde_json::Value =
-                serde_json::from_str(&vc_json).unwrap_or(serde_json::json!({ "raw": vc_json }));
-            return Ok(Json(
-                serde_json::json!({ "credential": vc, "cached": true }),
-            ));
-        }
+        let vc: serde_json::Value =
+            serde_json::from_str(&vc_json).unwrap_or(serde_json::json!({ "raw": vc_json }));
+        return Ok(Json(
+            serde_json::json!({ "credential": vc, "cached": true }),
+        ));
     }
 
     // M3 port: atomic credential-code claim via dual-backend repo helper.
     // Same TOCTOU pattern as payment_auth: conditional UPDATE under
     // serialisable isolation, RETURNING confirms the flip.
-    let claimed_now = {
-        let repo = {
-            let st = state.read().unwrap();
-            st.repo.clone()
-        };
-        repo.claim_credential_code(&key_image)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    };
+    let claimed_now = repo
+        .claim_credential_code(&key_image)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !claimed_now {
         // Lost the race — another request is mid-flight or just finished. Re-check cache.
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        if let Ok(vc_json) = db.query_row(
-            "SELECT credential_json FROM user_credentials WHERE key_image_hex = ?1",
-            params![key_image],
-            |r| r.get::<_, String>(0),
-        ) {
+        if let Some(vc_json) = repo
+            .select_user_credential(&key_image)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
             let vc: serde_json::Value =
                 serde_json::from_str(&vc_json).unwrap_or(serde_json::json!({ "raw": vc_json }));
             return Ok(Json(
@@ -3940,21 +4035,9 @@ async fn user_get_credential(
         ));
     }
 
-    // We won the race — release the claim on any failure path so the user can retry.
-    // TODO M2-callsite-sweep: the sync release_claim closure is called from
-    // multiple await branches below; converting to async would require closure
-    // capture restructuring. The single-statement UPDATE is intrinsically
-    // atomic on SQLite (no TOCTOU window) — leave on legacy path until M5
-    // rewrites the function shape. Repo::release_credential_code exists for
-    // future Postgres routing.
-    let release_claim = || {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        let _ = db.execute(
-            "UPDATE credential_codes SET claimed = 0 WHERE key_image_hex = ?1 AND claimed = 1",
-            params![key_image],
-        );
-    };
+    // We won the race — release the claim on any failure path so the user can
+    // retry. Routed through the dual-backend repo (Postgres when enabled); the
+    // conditional single-statement UPDATE is atomic on both backends.
 
     // Claim from issuer
     let (issuer_url, client) = {
@@ -3974,13 +4057,13 @@ async fn user_get_credential(
     let resp = match request.send().await {
         Ok(r) => r,
         Err(e) => {
-            release_claim();
+            let _ = repo.release_credential_code(&key_image).await;
             return Err((StatusCode::BAD_GATEWAY, format!("Issuer unreachable: {e}")));
         }
     };
 
     if !resp.status().is_success() {
-        release_claim();
+        let _ = repo.release_credential_code(&key_image).await;
         return Err((
             StatusCode::BAD_GATEWAY,
             "Issuer returned error during credential claim".into(),
@@ -3990,7 +4073,7 @@ async fn user_get_credential(
     let vc: serde_json::Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
-            release_claim();
+            let _ = repo.release_credential_code(&key_image).await;
             return Err((
                 StatusCode::BAD_GATEWAY,
                 format!("Issuer response parse error: {e}"),
@@ -3998,18 +4081,16 @@ async fn user_get_credential(
         }
     };
 
-    // Cache the credential. The claimed=1 flag was set atomically above, no need to re-UPDATE.
+    // Cache the credential via the dual-backend repo. The claimed=1 flag was
+    // set atomically above, no need to re-UPDATE.
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        let _ = db.execute(
-            "INSERT OR REPLACE INTO user_credentials (key_image_hex, credential_json, issued_at) VALUES (?1,?2,?3)",
-            params![key_image, vc.to_string(), ts],
-        );
+        let _ = repo
+            .upsert_user_credential(&key_image, &vc.to_string(), ts)
+            .await;
     }
 
     Ok(Json(
@@ -4076,12 +4157,11 @@ struct AgentEgressLogBody {
 
 async fn agent_egress_log(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     Json(payload): Json<AgentEgressLogBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if payload.agent_id.is_empty()
-        || payload.target_host.is_empty()
-        || payload.method.is_empty()
-    {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
+    if payload.agent_id.is_empty() || payload.target_host.is_empty() || payload.method.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             "agent_id, target_host, method are required".into(),
@@ -4094,52 +4174,21 @@ async fn agent_egress_log(
     let id = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
-        db.execute(
-            "INSERT INTO agent_egress_log
-             (agent_id, target_host, target_path, method, body_hash_hex, status_code, ts, allowed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
-            params![
-                payload.agent_id,
-                payload.target_host,
-                payload.target_path,
-                payload.method,
-                payload.body_hash_hex,
-                payload.status_code,
-                now,
-            ],
+        // Shared with the enforcing proxy (/agent/egress/proxy) so both log +
+        // anchor identically. Voluntary reports are always `allowed = true`.
+        sauron_core::egress_gateway::record_egress(
+            &db,
+            &tenant_id,
+            &payload.agent_id,
+            &payload.target_host,
+            &payload.target_path,
+            &payload.method,
+            &payload.body_hash_hex,
+            payload.status_code,
+            true,
+            now,
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let egress_id = db.last_insert_rowid();
-
-        // Commit this accepted action to the anchorable ledger, so "Seal into
-        // Bitcoin" covers the agent's REAL calls (the live agent reports its
-        // actions here, not via the heavier /agent/action flow). Each accepted
-        // egress event becomes one receipt; the anchor batches these into a
-        // Merkle root committed to Bitcoin via OpenTimestamps. Best-effort —
-        // a receipt-write failure must not fail the egress report itself.
-        let action_hash = {
-            let mut h = Sha256::new();
-            h.update(payload.agent_id.as_bytes());
-            h.update(b"|");
-            h.update(payload.target_host.as_bytes());
-            h.update(b"|");
-            h.update(payload.target_path.as_bytes());
-            h.update(b"|");
-            h.update(payload.method.as_bytes());
-            h.update(b"|");
-            h.update(egress_id.to_string().as_bytes());
-            h.update(b"|");
-            h.update(now.to_string().as_bytes());
-            hex::encode(h.finalize())
-        };
-        let receipt_id = format!("rcp_egr_{egress_id}");
-        let _ = db.execute(
-            "INSERT INTO agent_action_receipts
-             (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at)
-             VALUES (?1, ?2, ?3, '', 'egress', '', '', 'accepted', '', ?4)",
-            params![receipt_id, action_hash, payload.agent_id, now],
-        );
-        egress_id
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
     Ok(Json(serde_json::json!({ "id": id, "ts": now })))
 }
@@ -4181,22 +4230,26 @@ async fn agent_kyc_consent(
         .unwrap()
         .as_secs() as i64;
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        risk::check_and_increment(
-            &db,
-            &risk::bucket_agent_kyc_consent(&tenant_id, &payload.site_name, &human_key_image),
-            consent_guard_ts,
-            risk::limit_agent_kyc_consent(),
-        )
-        .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
-        let nationality: String = db
-            .query_row(
-                "SELECT IFNULL(nationality, '') FROM users WHERE key_image_hex = ?1",
-                params![human_key_image],
-                |r| r.get(0),
+        {
+            let st = state.read().unwrap();
+            let db = st.db.lock().unwrap();
+            risk::check_and_increment(
+                &db,
+                &risk::bucket_agent_kyc_consent(&tenant_id, &payload.site_name, &human_key_image),
+                consent_guard_ts,
+                risk::limit_agent_kyc_consent(),
             )
-            .unwrap_or_default();
+            .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
+        }
+        let nationality: String = {
+            let repo = state.read().unwrap().repo.clone();
+            repo.get_user(&human_key_image)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map(|u| u.nationality)
+                .unwrap_or_default()
+        };
+        let st = state.read().unwrap();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?;
     }
@@ -4322,13 +4375,14 @@ async fn agent_kyc_consent(
 
     // 3. Verify consent request exists + is for this site + not yet claimed
     let stored_site: String = {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.query_row(
-            "SELECT site_name FROM consent_log WHERE request_id = ?1 AND token_used = 0 AND revoked = 0 AND consent_token IS NULL",
-            params![payload.request_id],
-            |r| r.get(0),
-        ).map_err(|_| (StatusCode::NOT_FOUND, "Consent request not found, already claimed, or already used".into()))?
+        let repo = state.read().unwrap().repo.clone();
+        repo.pending_consent_site(&payload.request_id, true)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                "Consent request not found, already claimed, or already used".to_string(),
+            ))?
     };
     if stored_site != payload.site_name {
         return Err((
@@ -4381,22 +4435,26 @@ async fn agent_kyc_consent(
     let expires_at = now + 300;
 
     {
-        let st = state.read().unwrap();
+        let repo = state.read().unwrap().repo.clone();
         // Atomic: only update if consent_token is still NULL (race-safe)
-        let rows = {
-            let db = st.db.lock().unwrap();
-            db.execute(
-                "UPDATE consent_log SET consent_token = ?1, user_key_image = ?2, granted_at = ?3, consent_expires_at = ?4, issuing_agent_id = ?5 WHERE request_id = ?6 AND consent_token IS NULL",
-                params![consent_token, human_key_image, now, expires_at, agent_id, payload.request_id],
+        let rows = repo
+            .grant_consent_token(
+                &payload.request_id,
+                &human_key_image,
+                now,
+                expires_at,
+                &consent_token,
+                Some(agent_id.as_str()),
             )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        };
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if rows == 0 {
             return Err((
                 StatusCode::CONFLICT,
                 "Consent already claimed by another agent".into(),
             ));
         }
+        let st = state.read().unwrap();
         st.log(
             "AGENT_KYC_CONSENT",
             "OK",
@@ -4557,22 +4615,21 @@ async fn agent_vc_issue(
     }
 
     // 1. Verify authenticated human exists and resolve trust source.
+    let human_pub_hex: String = {
+        let repo = state.read().unwrap().repo.clone();
+        repo.get_user(&human_key_image)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map(|u| u.public_key_hex)
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                "Human user not found — must be registered in trusted user directory first"
+                    .to_string(),
+            ))?
+    };
     let (human_in_user_ring, has_bank_link) = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
-        let human_pub_hex: String = db
-            .query_row(
-                "SELECT public_key_hex FROM users WHERE key_image_hex = ?1",
-                params![human_key_image],
-                |r| r.get(0),
-            )
-            .map_err(|_| {
-                (
-                    StatusCode::NOT_FOUND,
-                    "Human user not found — must be registered in trusted user directory first"
-                        .into(),
-                )
-            })?;
 
         let has_bank_link: bool = db
             .query_row(
@@ -4608,22 +4665,26 @@ async fn agent_vc_issue(
         .unwrap()
         .as_secs() as i64;
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        risk::check_and_increment(
-            &db,
-            &risk::bucket_agent_vc_issue(&tenant_id, &human_key_image),
-            vc_issue_ts,
-            risk::limit_agent_vc_issue(),
-        )
-        .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
-        let nationality: String = db
-            .query_row(
-                "SELECT IFNULL(nationality, '') FROM users WHERE key_image_hex = ?1",
-                params![human_key_image],
-                |r| r.get(0),
+        {
+            let st = state.read().unwrap();
+            let db = st.db.lock().unwrap();
+            risk::check_and_increment(
+                &db,
+                &risk::bucket_agent_vc_issue(&tenant_id, &human_key_image),
+                vc_issue_ts,
+                risk::limit_agent_vc_issue(),
             )
-            .unwrap_or_default();
+            .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
+        }
+        let nationality: String = {
+            let repo = state.read().unwrap().repo.clone();
+            repo.get_user(&human_key_image)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map(|u| u.nationality)
+                .unwrap_or_default()
+        };
+        let st = state.read().unwrap();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?;
     }

@@ -213,9 +213,7 @@ mod tests {
         let mut last_root = String::new();
         for i in 0..1000 {
             let r = ledger
-                .add_commitment(&commitment_hex_for(
-                    format!("bulk-leaf-{i}").as_bytes(),
-                ))
+                .add_commitment(&commitment_hex_for(format!("bulk-leaf-{i}").as_bytes()))
                 .expect("insert");
             assert_eq!(r.leaf_index, i);
             assert_eq!(r.total_leaves, i + 1);

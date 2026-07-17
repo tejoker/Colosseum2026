@@ -116,8 +116,18 @@ impl BitcoinAnchorService {
         let calendars: Vec<String> = std::env::var("SAURON_OTS_CALENDARS")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-            .unwrap_or_else(|| DEFAULT_OTS_CALENDARS.iter().map(|s| s.to_string()).collect());
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                DEFAULT_OTS_CALENDARS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            });
 
         Some(Self {
             provider: provider_enum,
@@ -219,10 +229,16 @@ impl BitcoinAnchorService {
                         accepted = Some((cal.clone(), b.to_vec()));
                         break;
                     }
-                    Err(e) => tracing::warn!(target: "sauron::bitcoin_anchor", calendar = %cal, error = %e, "OTS calendar response read error"),
+                    Err(e) => {
+                        tracing::warn!(target: "sauron::bitcoin_anchor", calendar = %cal, error = %e, "OTS calendar response read error")
+                    }
                 },
-                Ok(r) => tracing::warn!(target: "sauron::bitcoin_anchor", calendar = %cal, status = r.status().as_u16(), "OTS calendar rejected digest"),
-                Err(e) => tracing::warn!(target: "sauron::bitcoin_anchor", calendar = %cal, error = %e, "OTS calendar unreachable"),
+                Ok(r) => {
+                    tracing::warn!(target: "sauron::bitcoin_anchor", calendar = %cal, status = r.status().as_u16(), "OTS calendar rejected digest")
+                }
+                Err(e) => {
+                    tracing::warn!(target: "sauron::bitcoin_anchor", calendar = %cal, error = %e, "OTS calendar unreachable")
+                }
             }
         }
 
@@ -304,9 +320,16 @@ pub fn spawn_ots_upgrader(db: Arc<DbHandle>) {
                         Err(_) => continue,
                     };
                     let rows = stmt
-                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                        .query_map([], |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        })
                         .ok();
-                    rows.map(|it| it.flatten().collect::<Vec<_>>()).unwrap_or_default()
+                    rows.map(|it| it.flatten().collect::<Vec<_>>())
+                        .unwrap_or_default()
                 }
                 Err(_) => continue,
             };
@@ -339,13 +362,19 @@ pub fn spawn_ots_upgrader(db: Arc<DbHandle>) {
                             // becomes used downstream (kept for protocol completeness).
                             let _ = root_bytes.len();
                         }
-                        Err(e) => tracing::warn!(target: "sauron::bitcoin_anchor", error = %e, "ots upgrade response read error"),
+                        Err(e) => {
+                            tracing::warn!(target: "sauron::bitcoin_anchor", error = %e, "ots upgrade response read error")
+                        }
                     },
                     Ok(r) if r.status().as_u16() == 404 => {
                         // Calendar hasn't included the digest in a block yet; try again next tick.
                     }
-                    Ok(r) => tracing::warn!(target: "sauron::bitcoin_anchor", status = r.status().as_u16(), calendar = %calendar, "ots upgrade unexpected status"),
-                    Err(e) => tracing::warn!(target: "sauron::bitcoin_anchor", error = %e, "ots upgrade request failed"),
+                    Ok(r) => {
+                        tracing::warn!(target: "sauron::bitcoin_anchor", status = r.status().as_u16(), calendar = %calendar, "ots upgrade unexpected status")
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "sauron::bitcoin_anchor", error = %e, "ots upgrade request failed")
+                    }
                 }
             }
         }

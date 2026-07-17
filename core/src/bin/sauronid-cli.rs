@@ -192,14 +192,14 @@ fn cmd_register(args: &[String]) -> Result<(), String> {
     let session = require_arg(args, "session").map_err(|_| {
         "--session is required (get it from POST /user/auth in the live core)".to_string()
     })?;
-    let core_url = std::env::var("SAURON_CORE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3001".to_string());
+    let core_url =
+        std::env::var("SAURON_CORE_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".to_string());
 
     eprintln!(
         "Interactive agent registration → POST {core_url}/agent/register\n\
          Run `sauronid-cli keypair` first to generate the PoP key.\n"
     );
-    let mut readln = |q: &str| {
+    let readln = |q: &str| {
         eprint!("{q}: ");
         let _ = io::stderr().flush();
         let mut buf = String::new();
@@ -208,7 +208,11 @@ fn cmd_register(args: &[String]) -> Result<(), String> {
     };
 
     let kind = readln("agent_type [llm]");
-    let kind = if kind.is_empty() { "llm".to_string() } else { kind };
+    let kind = if kind.is_empty() {
+        "llm".to_string()
+    } else {
+        kind
+    };
     let human_ki = readln("human_key_image (from /user/auth)");
     let pop_b64 = readln("pop_public_key_b64u (from `sauronid-cli keypair`'s public output)");
     let pop_jkt = readln("pop_jkt (operator label, any string)");
@@ -291,13 +295,13 @@ fn cmd_rotate(args: &[String]) -> Result<(), String> {
         "--session is required (get it from POST /user/auth in the live core)".to_string()
     })?;
     let reason = arg_value(args, "reason").unwrap_or_default();
-    let core_url = std::env::var("SAURON_CORE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3001".to_string());
+    let core_url =
+        std::env::var("SAURON_CORE_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".to_string());
 
-    let inputs_raw = fs::read_to_string(&inputs_path)
-        .map_err(|e| format!("read {inputs_path}: {e}"))?;
-    let inputs: serde_json::Value = serde_json::from_str(&inputs_raw)
-        .map_err(|e| format!("inputs not JSON: {e}"))?;
+    let inputs_raw =
+        fs::read_to_string(&inputs_path).map_err(|e| format!("read {inputs_path}: {e}"))?;
+    let inputs: serde_json::Value =
+        serde_json::from_str(&inputs_raw).map_err(|e| format!("inputs not JSON: {e}"))?;
 
     let body = serde_json::json!({
         "agent_type": kind,
@@ -305,7 +309,11 @@ fn cmd_rotate(args: &[String]) -> Result<(), String> {
         "reason": reason,
     });
 
-    let url = format!("{}/agent/{}/checksum/update", core_url.trim_end_matches('/'), agent_id);
+    let url = format!(
+        "{}/agent/{}/checksum/update",
+        core_url.trim_end_matches('/'),
+        agent_id
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -429,8 +437,8 @@ fn cmd_policy_validate(args: &[String]) -> Result<(), String> {
 // ─── health ───────────────────────────────────────────────────────────────
 
 fn cmd_health() -> Result<(), String> {
-    let url = std::env::var("SAURON_CORE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3001".to_string());
+    let url =
+        std::env::var("SAURON_CORE_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".to_string());
     let url = format!("{}/health", url.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))

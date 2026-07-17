@@ -62,9 +62,7 @@ pub async fn upload(
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<UploadResponse>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -82,19 +80,25 @@ pub async fn upload(
         envelope.raw_yaml
     };
 
-    let policy = parse_or_yaml(&raw)
-        .map_err(|e| AppError::BadRequest(format!("policy parse: {e}")))?;
-    let compiled = compile(policy)
-        .map_err(|e| AppError::BadRequest(format!("policy compile: {e}")))?;
+    let policy =
+        parse_or_yaml(&raw).map_err(|e| AppError::BadRequest(format!("policy parse: {e}")))?;
+    let compiled =
+        compile(policy).map_err(|e| AppError::BadRequest(format!("policy compile: {e}")))?;
 
     let resp = UploadResponse {
         policy_id: compiled.policy_id.clone(),
         agent: compiled.agent.clone(),
-        checks: compiled.checks.iter().map(|c| c.name().to_string()).collect(),
+        checks: compiled
+            .checks
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect(),
     };
 
     let store = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         Arc::clone(&st.policy_store)
     };
     store
@@ -123,11 +127,11 @@ pub async fn list(
     State(state): State<Arc<RwLock<ServerState>>>,
     tenant: Option<Extension<TenantId>>,
 ) -> Result<Json<Vec<super::store::PolicySummary>>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let store = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         Arc::clone(&st.policy_store)
     };
     Ok(Json(store.list_for_tenant(tenant_id.as_str())))
@@ -142,11 +146,11 @@ pub async fn get_one(
     tenant: Option<Extension<TenantId>>,
     Path(id): Path<String>,
 ) -> Result<Json<super::ast::Policy>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let store = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         Arc::clone(&st.policy_store)
     };
     let compiled = store
@@ -163,11 +167,11 @@ pub async fn delete_one(
     tenant: Option<Extension<TenantId>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let store = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         Arc::clone(&st.policy_store)
     };
     store
@@ -269,11 +273,11 @@ pub async fn evaluate_action(
     tenant: Option<Extension<TenantId>>,
     Json(payload): Json<EvaluateBody>,
 ) -> Result<Json<EvaluateResponse>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let (store, repo) = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         (Arc::clone(&st.policy_store), st.repo.clone())
     };
     let compiled = store
@@ -358,11 +362,11 @@ pub async fn record_spend(
     Path(agent_id): Path<String>,
     Json(body): Json<RecordSpendBody>,
 ) -> Result<Json<RecordSpendResponse>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let repo = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         st.repo.clone()
     };
     record_spend_inner_tenant(&repo, tenant_id.as_str(), &agent_id, body).await
@@ -471,11 +475,11 @@ pub async fn get_spend(
     Path(agent_id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<SpendQuery>,
 ) -> Result<Json<SpendSummary>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let repo = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         st.repo.clone()
     };
     get_spend_inner_tenant(&repo, tenant_id.as_str(), &agent_id, q).await
@@ -541,11 +545,11 @@ pub async fn list_spend_log_handler(
     Path(agent_id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<SpendLogQuery>,
 ) -> Result<Json<Vec<SpendLogEntry>>, AppError> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default();
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default();
     let repo = {
-        let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
+        let st = state
+            .read()
+            .map_err(|_| AppError::Internal("state lock".into()))?;
         st.repo.clone()
     };
     list_spend_log_inner_tenant(&repo, tenant_id.as_str(), &agent_id, q).await
@@ -671,12 +675,15 @@ fn compute_tz_hhmm(policy: &super::ast::Policy, now_epoch: i64) -> String {
 /// Outcome of `enforce_bound_policy_for_action`.
 #[derive(Debug, Clone)]
 pub enum BoundPolicyOutcome {
-    /// No policy was bound to the agent → nothing to enforce.
+    /// No policy was bound to the agent → nothing to enforce (unless
+    /// `SAURON_POLICY_REQUIRE_BINDING` is set, in which case the caller denies).
     NoBinding,
+    /// A binding row EXISTS but its policy could not be loaded from the store
+    /// (missing / failed to compile). This is a misconfiguration, never a
+    /// license to allow: the caller MUST fail closed in `Enforce` mode.
+    PolicyUnavailable { policy_id: String },
     /// Policy was bound and evaluated to `Allow`.
-    Allow {
-        policy_id: String,
-    },
+    Allow { policy_id: String },
     /// Policy was bound and evaluated to `Deny`. Caller must:
     /// - in `Enforce` mode: short-circuit with 403 + `reason`.
     /// - in `Advisory`/`Off` modes: log and continue.
@@ -727,34 +734,35 @@ pub async fn enforce_bound_policy_with_handles(
     agent_id: &str,
     action: &Action,
 ) -> Result<BoundPolicyOutcome, AppError> {
-    let policy_id =
-        match crate::policy::binding_handlers::lookup_bound_policy_id(db_handle, tenant_id, agent_id)? {
-            Some(pid) => pid,
-            None => return Ok(BoundPolicyOutcome::NoBinding),
-        };
+    let policy_id = match crate::policy::binding_handlers::lookup_bound_policy_id(
+        db_handle, tenant_id, agent_id,
+    )? {
+        Some(pid) => pid,
+        None => return Ok(BoundPolicyOutcome::NoBinding),
+    };
     let compiled = match store.get_by_id_tenant(tenant_id, &policy_id) {
         Some(c) => c,
         None => {
-            tracing::warn!(
+            // A binding EXISTS but its policy is not loadable. Previously this
+            // returned NoBinding (silently allowed) — a fail-open. Surface it as
+            // PolicyUnavailable so Enforce-mode callers refuse the action.
+            tracing::error!(
                 target: "sauron::policy::enforcement",
                 %tenant_id,
                 %agent_id,
                 %policy_id,
-                "bound policy not present in store — skipping enforcement",
+                "bound policy not present in store — failing closed (PolicyUnavailable)",
             );
-            return Ok(BoundPolicyOutcome::NoBinding);
+            return Ok(BoundPolicyOutcome::PolicyUnavailable {
+                policy_id: policy_id.clone(),
+            });
         }
     };
 
-    let (spend, _simulator, _warning) = resolve_spend_for_evaluation_tenant(
-        repo,
-        tenant_id,
-        &policy_id,
-        Some(agent_id),
-        None,
-    )
-    .await
-    .map_err(map_repo_err)?;
+    let (spend, _simulator, _warning) =
+        resolve_spend_for_evaluation_tenant(repo, tenant_id, &policy_id, Some(agent_id), None)
+            .await
+            .map_err(map_repo_err)?;
 
     let now_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -780,4 +788,3 @@ pub async fn enforce_bound_policy_with_handles(
         }),
     }
 }
-

@@ -76,10 +76,40 @@ fn leaf_hash(receipt_id: &str, action_hash: &str, created_at: i64) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Trigger one anchor batch. Returns the new anchor row's id, or `None` if
-/// there were no new receipts since the last anchor.
+/// Anchor each tenant's pending receipts independently. A mixed-tenant Merkle
+/// batch would leak aggregate counts and make a tenant-scoped proof endpoint
+/// impossible to enforce, so the background worker deliberately creates one
+/// batch per tenant.
 pub async fn anchor_pending_actions(
     state: &Arc<RwLock<ServerState>>,
+) -> Result<Option<String>, String> {
+    let tenants: Vec<String> = {
+        let st = state.read().unwrap();
+        let conn = st.db.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT tenant_id FROM agent_action_receipts ORDER BY tenant_id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .collect();
+        rows
+    };
+    let mut first = None;
+    for tenant_id in tenants {
+        if let Some(anchor_id) = anchor_pending_actions_for_tenant(state, &tenant_id).await? {
+            first.get_or_insert(anchor_id);
+        }
+    }
+    Ok(first)
+}
+
+/// Trigger one tenant-scoped anchor batch. Returns the new anchor row's id, or
+/// `None` if that tenant has no new receipts since its last anchor.
+pub async fn anchor_pending_actions_for_tenant(
+    state: &Arc<RwLock<ServerState>>,
+    tenant_id: &str,
 ) -> Result<Option<String>, String> {
     // 1. Determine the high-water mark from the previous anchor batch.
     // Receipts are anchored in created_at order; we resume from the max
@@ -89,8 +119,8 @@ pub async fn anchor_pending_actions(
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT to_created_at, to_receipt_id FROM agent_action_anchors
-             ORDER BY to_created_at DESC LIMIT 1",
-            [],
+             WHERE tenant_id = ?1 ORDER BY to_created_at DESC LIMIT 1",
+            params![tenant_id],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
         )
         .unwrap_or((0i64, String::new()))
@@ -104,14 +134,20 @@ pub async fn anchor_pending_actions(
             .prepare(
                 "SELECT receipt_id, action_hash, created_at
                  FROM agent_action_receipts
-                 WHERE created_at > ?1 OR (created_at = ?1 AND receipt_id > ?2)
+                 WHERE tenant_id = ?1
+                   AND (created_at > ?2 OR (created_at = ?2 AND receipt_id > ?3))
                  ORDER BY created_at ASC, receipt_id ASC
-                 LIMIT ?3",
+                 LIMIT ?4",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(
-                params![last_to, last_receipt_id, MAX_RECEIPTS_PER_BATCH as i64],
+                params![
+                    tenant_id,
+                    last_to,
+                    last_receipt_id,
+                    MAX_RECEIPTS_PER_BATCH as i64
+                ],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -152,8 +188,8 @@ pub async fn anchor_pending_actions(
         conn.execute(
             "INSERT INTO agent_action_anchors
              (anchor_id, batch_root_hex, n_actions, from_receipt_id, to_receipt_id,
-              from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', ?8)",
+             from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, created_at, tenant_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', ?8, ?9)",
             params![
                 anchor_id,
                 batch_root_hex,
@@ -163,6 +199,7 @@ pub async fn anchor_pending_actions(
                 from_created_at,
                 to_created_at,
                 now_secs(),
+                tenant_id,
             ],
         )
         .map_err(|e| format!("DB insert agent_action_anchors: {e}"))?;
@@ -176,7 +213,9 @@ pub async fn anchor_pending_actions(
     let btc_handle = if let Some(svc) = bitcoin_anchor {
         let db = Arc::clone(&db);
         let r = root;
-        Some(tokio::spawn(async move { svc.publish_new_root(&db, r).await }))
+        Some(tokio::spawn(
+            async move { svc.publish_new_root(&db, r).await },
+        ))
     } else {
         None
     };
@@ -202,8 +241,12 @@ pub async fn anchor_pending_actions(
                     "agent action root anchored on Bitcoin"
                 );
             }
-            Ok(Err(e)) => tracing::warn!(target: "sauron::action_anchor", error = %e, "BTC anchor failed (non-fatal)"),
-            Err(e) => tracing::warn!(target: "sauron::action_anchor", error = %e, "BTC anchor task join error"),
+            Ok(Err(e)) => {
+                tracing::warn!(target: "sauron::action_anchor", error = %e, "BTC anchor failed (non-fatal)")
+            }
+            Err(e) => {
+                tracing::warn!(target: "sauron::action_anchor", error = %e, "BTC anchor task join error")
+            }
         }
     }
     if let Some(h) = sol_handle {
@@ -219,8 +262,12 @@ pub async fn anchor_pending_actions(
                     "agent action root anchored on Solana"
                 );
             }
-            Ok(Err(e)) => tracing::warn!(target: "sauron::action_anchor", error = %e, "Solana anchor failed (non-fatal)"),
-            Err(e) => tracing::warn!(target: "sauron::action_anchor", error = %e, "Solana anchor task join error"),
+            Ok(Err(e)) => {
+                tracing::warn!(target: "sauron::action_anchor", error = %e, "Solana anchor failed (non-fatal)")
+            }
+            Err(e) => {
+                tracing::warn!(target: "sauron::action_anchor", error = %e, "Solana anchor task join error")
+            }
         }
     }
 
@@ -228,6 +275,21 @@ pub async fn anchor_pending_actions(
     {
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
+        // Anchor providers predate tenant partitioning and insert their local
+        // receipt with the legacy `default` tenant. Re-stamp the rows here so
+        // proof/status queries cannot cross a tenant boundary.
+        if !btc_id.is_empty() {
+            let _ = conn.execute(
+                "UPDATE bitcoin_merkle_anchors SET tenant_id = ?1 WHERE anchor_id = ?2",
+                params![tenant_id, btc_id],
+            );
+        }
+        if !sol_id.is_empty() {
+            let _ = conn.execute(
+                "UPDATE solana_merkle_anchors SET tenant_id = ?1 WHERE anchor_id = ?2",
+                params![tenant_id, sol_id],
+            );
+        }
         conn.execute(
             "UPDATE agent_action_anchors SET btc_anchor_id = ?1, sol_anchor_id = ?2 WHERE anchor_id = ?3",
             params![btc_id, sol_id, anchor_id],
@@ -252,9 +314,15 @@ pub fn spawn_action_anchor_task(state: Arc<RwLock<ServerState>>) {
         loop {
             ticker.tick().await;
             match anchor_pending_actions(&state).await {
-                Ok(Some(id)) => tracing::debug!(target: "sauron::action_anchor", anchor_id = %id, "batch anchored"),
-                Ok(None) => tracing::trace!(target: "sauron::action_anchor", "no new actions to anchor"),
-                Err(e) => tracing::warn!(target: "sauron::action_anchor", error = %e, "anchor batch failed"),
+                Ok(Some(id)) => {
+                    tracing::debug!(target: "sauron::action_anchor", anchor_id = %id, "batch anchored")
+                }
+                Ok(None) => {
+                    tracing::trace!(target: "sauron::action_anchor", "no new actions to anchor")
+                }
+                Err(e) => {
+                    tracing::warn!(target: "sauron::action_anchor", error = %e, "anchor batch failed")
+                }
             }
         }
     });
@@ -265,6 +333,16 @@ pub fn spawn_action_anchor_task(state: Arc<RwLock<ServerState>>) {
 pub fn proof_for_receipt(
     state: &Arc<RwLock<ServerState>>,
     receipt_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    proof_for_receipt_for_tenant(state, receipt_id, "*")
+}
+
+/// Tenant-scoped variant used by admin routes. The wildcard is retained only
+/// for the internal/background compatibility helper above.
+pub fn proof_for_receipt_for_tenant(
+    state: &Arc<RwLock<ServerState>>,
+    receipt_id: &str,
+    tenant_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
     // 1. Find which batch covers this receipt.
     //
@@ -279,8 +357,9 @@ pub fn proof_for_receipt(
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         match conn.query_row(
-            "SELECT created_at FROM agent_action_receipts WHERE receipt_id = ?1",
-            params![receipt_id],
+            "SELECT created_at FROM agent_action_receipts
+             WHERE receipt_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
+            params![receipt_id, tenant_id],
             |r| r.get::<_, i64>(0),
         ) {
             Ok(v) => v,
@@ -295,8 +374,9 @@ pub fn proof_for_receipt(
             "SELECT anchor_id, batch_root_hex, from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, from_receipt_id, to_receipt_id
              FROM agent_action_anchors
              WHERE from_created_at <= ?1 AND to_created_at >= ?1
+               AND (?2 = '*' OR tenant_id = ?2)
              ORDER BY created_at ASC LIMIT 1",
-            params![receipt_created_at],
+            params![receipt_created_at, tenant_id],
             |r| Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -327,13 +407,16 @@ pub fn proof_for_receipt(
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT confirmed, slot, signature FROM solana_merkle_anchors WHERE anchor_id = ?1",
-            params![sol],
-            |r| Ok((
-                r.get::<_, i64>(0)? == 1,
-                Some(r.get::<_, i64>(1)?),
-                Some(r.get::<_, String>(2)?),
-            )),
+            "SELECT confirmed, slot, signature FROM solana_merkle_anchors
+             WHERE anchor_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
+            params![sol, tenant_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)? == 1,
+                    Some(r.get::<_, i64>(1)?),
+                    Some(r.get::<_, String>(2)?),
+                ))
+            },
         )
         .unwrap_or((false, None, None))
     };
@@ -343,12 +426,10 @@ pub fn proof_for_receipt(
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors WHERE anchor_id = ?1",
-            params![btc],
-            |r| Ok((
-                r.get::<_, i64>(0)? == 1,
-                r.get::<_, String>(1)?,
-            )),
+            "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors
+             WHERE anchor_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
+            params![btc, tenant_id],
+            |r| Ok((r.get::<_, i64>(0)? == 1, r.get::<_, String>(1)?)),
         )
         .unwrap_or((false, "opentimestamps".to_string()))
     };
@@ -380,13 +461,14 @@ pub fn proof_for_receipt(
             .prepare(
                 "SELECT receipt_id, action_hash, created_at
                  FROM agent_action_receipts
-                 WHERE (created_at > ?1 OR (created_at = ?1 AND receipt_id >= ?2))
+                 WHERE (?5 = '*' OR tenant_id = ?5)
+                   AND (created_at > ?1 OR (created_at = ?1 AND receipt_id >= ?2))
                    AND (created_at < ?3 OR (created_at = ?3 AND receipt_id <= ?4))
                  ORDER BY created_at ASC, receipt_id ASC",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![from_ts, from_rid, to_ts, to_rid], |r| {
+            .query_map(params![from_ts, from_rid, to_ts, to_rid, tenant_id], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -408,11 +490,7 @@ pub fn proof_for_receipt(
 
     let tree = MerkleTree::<MerkleSha256>::from_leaves(&leaves);
     let proof = tree.proof(&[leaf_index]);
-    let proof_hashes: Vec<String> = proof
-        .proof_hashes()
-        .iter()
-        .map(hex::encode)
-        .collect();
+    let proof_hashes: Vec<String> = proof.proof_hashes().iter().map(hex::encode).collect();
 
     Ok(Some(serde_json::json!({
         "anchor_id": anchor_id,
@@ -452,18 +530,28 @@ pub fn recent_batches(
     state: &Arc<RwLock<ServerState>>,
     limit: i64,
 ) -> Result<Vec<serde_json::Value>, String> {
+    recent_batches_for_tenant(state, limit, "*")
+}
+
+/// Tenant-scoped batch listing used by admin routes.
+pub fn recent_batches_for_tenant(
+    state: &Arc<RwLock<ServerState>>,
+    limit: i64,
+    tenant_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     let st = state.read().unwrap();
     let conn = st.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT anchor_id, batch_root_hex, n_actions, btc_anchor_id, sol_anchor_id, created_at
              FROM agent_action_anchors
+             WHERE (?2 = '*' OR tenant_id = ?2)
              ORDER BY created_at DESC
              LIMIT ?1",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![limit], |r| {
+        .query_map(params![limit, tenant_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -487,13 +575,16 @@ pub fn recent_batches(
             let st = state.read().unwrap();
             let conn = st.db.lock().map_err(|e| e.to_string())?;
             conn.query_row(
-                "SELECT confirmed, slot, signature FROM solana_merkle_anchors WHERE anchor_id = ?1",
-                params![sol],
-                |r| Ok((
-                    r.get::<_, i64>(0)? == 1,
-                    Some(r.get::<_, i64>(1)?),
-                    Some(r.get::<_, String>(2)?),
-                )),
+                "SELECT confirmed, slot, signature FROM solana_merkle_anchors
+                     WHERE anchor_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
+                params![sol, tenant_id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)? == 1,
+                        Some(r.get::<_, i64>(1)?),
+                        Some(r.get::<_, String>(2)?),
+                    ))
+                },
             )
             .unwrap_or((false, None, None))
         };
@@ -503,12 +594,10 @@ pub fn recent_batches(
             let st = state.read().unwrap();
             let conn = st.db.lock().map_err(|e| e.to_string())?;
             conn.query_row(
-                "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors WHERE anchor_id = ?1",
-                params![btc],
-                |r| Ok((
-                    r.get::<_, i64>(0)? == 1,
-                    r.get::<_, String>(1)?,
-                )),
+                "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors
+                 WHERE anchor_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
+                params![btc, tenant_id],
+                |r| Ok((r.get::<_, i64>(0)? == 1, r.get::<_, String>(1)?)),
             )
             .unwrap_or((false, "opentimestamps".to_string()))
         };

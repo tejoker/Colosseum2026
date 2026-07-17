@@ -67,7 +67,7 @@ Honest table. Re-verifiable from the source.
 
 ### Partial — works but operator must complete
 
-- **Postgres swap**: 3 modules ported (`agent_call_nonces`, `risk_rate_counters`, `ajwt_used_jtis`). 9 modules still rusqlite. Single-node SQLite is the default; switch via `SAURON_DB_BACKEND=postgres` for the ported modules.
+- **Postgres swap**: 3 modules have a live Postgres path (`agent_call_nonces`, `risk_rate_counters`, `ajwt_used_jtis`). The other 9 still run synchronous rusqlite (call-site sweep incomplete — `M2-callsite-sweep` TODOs). Single-node SQLite is the default; `SAURON_DB_BACKEND=postgres` only reroutes the 3 ported modules. **Data-layer positioning:** this is a **single-node pilot appliance** — sync SQLite access on the async runtime, one DB file, **no HA / failover / replication / multi-region**. Fine for a dedicated pilot; **not yet a shared multi-tenant control plane** (that's the roadmap's "Plan 2 — Postgres backend completion"). Don't co-locate unrelated customers on one node.
 - **OpenTimestamps confirmation latency**: receipts are submitted instantly to public calendars; **Bitcoin block inclusion takes ~1 hour**. Solana memo finalisation is ~30 s. Dashboard surfaces three honest states per batch (ADR-001): Solana-confirmed (≤30 s), BTC-pending (≤1 h), Dually anchored. No single false "anchored" summary — both chains are reported independently on `/admin/anchor/batches` and the `/anchors` console page. Operators with stricter timing pick the Solana path or run their own calendar.
 - **ZKP issuer / KYC consent / bank-KYC ingest**: feature-flagged off by default. Available behind `SAURON_DISABLE_*=0` for legacy deployments. SauronID does NOT ship a sanctions/PEP screening provider — wire your own data into `compliance_screening`.
 - **Vault Transit envelope encryption**: the `secret_provider` abstraction is shipped and resolves `<NAME>_WRAPPED` env vars through `POST /v1/transit/decrypt/<key>` when `SAURON_VAULT_TRANSIT_ENABLED=1`. The call path is **not yet wired into server init** for `jwt_secret` / `token_secret` / `oprf_seed` / `admin_key` — today those secrets are still loaded from plain env vars (or sit unencrypted in the DB for derived keys). Roadmap: wire the Vault path through `core/src/secret_provider.rs` into init before the first production customer. Source: [`core/src/secret_provider.rs`](core/src/secret_provider.rs).
@@ -158,18 +158,28 @@ After `simulate_real_actions.py`, the dashboard's Anchors page populates with re
 ```python
 from sauronid_client import SauronIDClient, register_llm_agent
 
-# Register an agent (server computes checksum from typed config)
+# `user_session` + `user_key_image` come from your end-user auth flow — the
+# human owner delegating to this agent. Requires the `agent-action-tool` binary
+# on PATH (or set $SAURONID_AGENT_ACTION_TOOL) for default keypair generation.
 client = SauronIDClient(base_url="https://sauronid.your-company.internal")
 agent = register_llm_agent(
     client,
-    user_session=...,
-    model_id="claude-opus-4-7",
+    user_session=user_session,
+    user_key_image=user_key_image,
+    model_id="claude-opus-4-8",
     system_prompt=open("prompts/research_agent.md").read(),
     tools=["search", "fetch"],
 )
 
-# Every call routed through `agent.call(...)` is signed + leashed + audit-anchored
-result = agent.call("/internal/api/search", {"query": "..."})
+# agent.call(method, path, ...) signs every request with the agent's per-call
+# key (DPoP-style) and binds the config digest — a tampered body, replayed
+# nonce, or drifted config is rejected server-side.
+result = agent.call("POST", "/internal/api/search", json_body={"query": "..."})
+
+# For leashed + on-chain-anchored actions (payments, KYC consent): request a
+# challenge, ring-sign it with the agent's ring secret, then submit the proof.
+#   proof = agent.sign_action_challenge(challenge_json)
+#   agent.call("POST", "/agent/payment/authorize", json_body={..., "agent_action": proof})
 ```
 
 LangChain wrapper, OpenAI Assistants wrapper, and Anthropic Computer Use wrapper in [`clients/python/sauronid_client/`](clients/python/sauronid_client/).

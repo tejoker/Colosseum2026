@@ -63,11 +63,10 @@ pub struct HeAggregationRow {
 /// individual contributions. Production deployments may want to append
 /// each (encrypted_value, customer_attestation) into a separate audit
 /// table for forensic review.
-pub fn upsert_he_aggregation(
-    db: &DbHandle,
-    row: &HeAggregationRow,
-) -> Result<(), HeStoreError> {
-    let conn = db.lock().map_err(|e| HeStoreError::Storage(e.to_string()))?;
+pub fn upsert_he_aggregation(db: &DbHandle, row: &HeAggregationRow) -> Result<(), HeStoreError> {
+    let conn = db
+        .lock()
+        .map_err(|e| HeStoreError::Storage(e.to_string()))?;
     conn.execute(
         r#"INSERT INTO he_aggregations
            (aggregation_id, cohort_id, metric_id, period_start, pk_id,
@@ -106,7 +105,9 @@ pub fn conflicting_cohort_for_pk(
     pk_id: &str,
     expected_cohort: &str,
 ) -> Result<Option<String>, HeStoreError> {
-    let conn = db.lock().map_err(|e| HeStoreError::Storage(e.to_string()))?;
+    let conn = db
+        .lock()
+        .map_err(|e| HeStoreError::Storage(e.to_string()))?;
     let row: Option<String> = conn
         .query_row(
             "SELECT cohort_id FROM he_aggregations \
@@ -124,7 +125,9 @@ pub fn get_he_aggregation(
     db: &DbHandle,
     aggregation_id: &str,
 ) -> Result<Option<HeAggregationRow>, HeStoreError> {
-    let conn = db.lock().map_err(|e| HeStoreError::Storage(e.to_string()))?;
+    let conn = db
+        .lock()
+        .map_err(|e| HeStoreError::Storage(e.to_string()))?;
     let row = conn
         .query_row(
             r#"SELECT aggregation_id, cohort_id, metric_id, period_start, pk_id,
@@ -162,8 +165,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("sauron-he-store-{pid}-{nanos}.db"));
+        let path = std::env::temp_dir().join(format!("sauron-he-store-{pid}-{nanos}.db"));
         let _ = std::fs::remove_file(&path);
         Arc::new(open_db_at(path.to_str().unwrap(), 2))
     }

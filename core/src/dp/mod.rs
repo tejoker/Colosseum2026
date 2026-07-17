@@ -28,9 +28,7 @@ pub mod ledger;
 pub use budget::{EpsilonBudget, EpsilonChargeEntry};
 pub use composition::{advanced_composition, basic_composition, RdpAccountant};
 pub use gaussian::GaussianMechanism;
-pub use k_anonymity::{
-    cohort_membership_count, suppress_small_cohorts, DEFAULT_K_THRESHOLD,
-};
+pub use k_anonymity::{cohort_membership_count, suppress_small_cohorts, DEFAULT_K_THRESHOLD};
 pub use laplace::LaplaceMechanism;
 pub use ledger::{BudgetDecision, DpBudgetLedger, LedgerEntry, LedgerError};
 

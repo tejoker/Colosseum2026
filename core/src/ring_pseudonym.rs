@@ -43,13 +43,19 @@ fn hash_to_point(p: &RistrettoPoint) -> RistrettoPoint {
 }
 
 /// ECDH shared secret as seen by the **agent**: `a·T`.
-pub fn shared_secret_agent(agent_master_secret: &Scalar, operator_pub_t: &RistrettoPoint) -> RistrettoPoint {
+pub fn shared_secret_agent(
+    agent_master_secret: &Scalar,
+    operator_pub_t: &RistrettoPoint,
+) -> RistrettoPoint {
     agent_master_secret * operator_pub_t
 }
 
 /// ECDH shared secret as seen by the **operator**: `t·A`. Equal to
 /// [`shared_secret_agent`] for the same pair.
-pub fn shared_secret_operator(operator_trapdoor_t: &Scalar, agent_master_pub_a: &RistrettoPoint) -> RistrettoPoint {
+pub fn shared_secret_operator(
+    operator_trapdoor_t: &Scalar,
+    agent_master_pub_a: &RistrettoPoint,
+) -> RistrettoPoint {
     operator_trapdoor_t * agent_master_pub_a
 }
 
@@ -85,7 +91,10 @@ pub fn per_ring_public(
 }
 
 /// Per-ring linkable key image `I_R = x_R · H_to_point(P_R)`.
-pub fn per_ring_key_image(per_ring_secret: &Scalar, per_ring_public: &RistrettoPoint) -> RistrettoPoint {
+pub fn per_ring_key_image(
+    per_ring_secret: &Scalar,
+    per_ring_public: &RistrettoPoint,
+) -> RistrettoPoint {
     per_ring_secret * hash_to_point(per_ring_public)
 }
 
@@ -108,10 +117,9 @@ mod tests {
     fn keypair(seed: &[u8]) -> (Scalar, RistrettoPoint) {
         let id = Identity::from_seed(seed);
         // Identity exposes secret only via accessor; rebuild from its hex.
-        let s = Scalar::from_canonical_bytes(
-            hex::decode(id.secret_hex()).unwrap().try_into().unwrap(),
-        )
-        .unwrap();
+        let s =
+            Scalar::from_canonical_bytes(hex::decode(id.secret_hex()).unwrap().try_into().unwrap())
+                .unwrap();
         (s, &s * RISTRETTO_BASEPOINT_TABLE)
     }
 
@@ -154,7 +162,10 @@ mod tests {
         let p_a = per_ring_public(&big_a, &shared, "ring:A");
         let p_b = per_ring_public(&big_a, &shared, "ring:B");
         assert_ne!(p_a, p_b, "different rings → different pseudonyms");
-        assert_ne!(p_a, big_a, "pseudonym must differ from the master public key");
+        assert_ne!(
+            p_a, big_a,
+            "pseudonym must differ from the master public key"
+        );
 
         let x_a = agent_per_ring_secret(&a, &shared, "ring:A");
         let x_b = agent_per_ring_secret(&a, &shared, "ring:B");
@@ -178,7 +189,10 @@ mod tests {
 
         let real = per_ring_public(&big_a, &real_shared, "ring:X");
         let guessed = per_ring_public(&big_a, &wrong_shared, "ring:X");
-        assert_ne!(real, guessed, "without the true shared secret P_R is unguessable");
+        assert_ne!(
+            real, guessed,
+            "without the true shared secret P_R is unguessable"
+        );
     }
 
     #[test]
@@ -199,7 +213,10 @@ mod tests {
 
         let msg = b"envelope-bytes";
         let sig = ring::sign(msg, &ring_members, &signer_id, 1);
-        assert!(ring::verify(msg, &ring_members, &sig), "ring sig must verify");
+        assert!(
+            ring::verify(msg, &ring_members, &sig),
+            "ring sig must verify"
+        );
         assert_eq!(
             sig.key_image,
             per_ring_key_image(&x_r, &p_r),

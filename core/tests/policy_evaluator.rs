@@ -30,8 +30,7 @@ fn ctx<'a>(
     c
 }
 
-const FX_BANKING: &str =
-    include_str!("../../schemas/fixtures/policy_banking_payment_agent.yaml");
+const FX_BANKING: &str = include_str!("../../schemas/fixtures/policy_banking_payment_agent.yaml");
 const FX_HEALTHCARE: &str = include_str!("../../schemas/fixtures/policy_healthcare_records.yaml");
 const FX_DEVTOOLS: &str = include_str!("../../schemas/fixtures/policy_devtools_codegen.yaml");
 const FX_RESEARCH: &str = include_str!("../../schemas/fixtures/policy_research_assistant.yaml");
@@ -161,7 +160,13 @@ fn research_allows_within_constraints() {
 #[test]
 fn support_rate_limit_denies_burst() {
     let c = compile(parse(FX_SUPPORT).unwrap()).unwrap();
-    let rpm = c.raw.binding.rate_limit.as_ref().unwrap().requests_per_minute as i64;
+    let rpm = c
+        .raw
+        .binding
+        .rate_limit
+        .as_ref()
+        .unwrap()
+        .requests_per_minute as i64;
     let now = 10_000;
     // RateCheck counts only timestamps in (now-60, now]. Pack `rpm` events into
     // that 60-second window so the burst is actually observed.
@@ -261,7 +266,11 @@ fn treasury_denies_over_budget() {
         .binding
         .required_signatures
         .as_ref()
-        .map(|v| v.iter().flat_map(|r| std::iter::repeat(r.role.clone()).take(r.threshold as usize)).collect())
+        .map(|v| {
+            v.iter()
+                .flat_map(|r| std::iter::repeat_n(r.role.clone(), r.threshold as usize))
+                .collect()
+        })
         .unwrap_or_default();
     let a = Action {
         action_id: "a1".into(),
@@ -282,7 +291,10 @@ fn minimal_policy_allows_anything() {
         ..Default::default()
     };
     // No binding fields → no checks → allow.
-    assert_eq!(evaluate(&c, &ctx(&a, 0.0, &[], 1000, "12:00")), Verdict::Allow);
+    assert_eq!(
+        evaluate(&c, &ctx(&a, 0.0, &[], 1000, "12:00")),
+        Verdict::Allow
+    );
 }
 
 // ─── Sprint 3+: authoritative-ledger lookup vs simulator-mode ─────────────
@@ -293,9 +305,7 @@ fn build_ledger_repo(label: &str) -> Repo {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "sauron-eval-{pid}-{nanos}-{label}.db"
-    ));
+    let path = std::env::temp_dir().join(format!("sauron-eval-{pid}-{nanos}-{label}.db"));
     let _ = std::fs::remove_file(&path);
     Repo::Sqlite(Arc::new(open_db_at(path.to_str().unwrap(), 2)))
 }
@@ -319,14 +329,10 @@ fn evaluator_uses_authoritative_ledger_when_agent_id_present() {
             .expect("seed ok");
 
         // Client lies: override says $0.
-        let (spend, simulator, warning) = resolve_spend_for_evaluation(
-            &repo,
-            "pol_A",
-            Some("agent-1"),
-            Some(0.0),
-        )
-        .await
-        .expect("resolve ok");
+        let (spend, simulator, warning) =
+            resolve_spend_for_evaluation(&repo, "pol_A", Some("agent-1"), Some(0.0))
+                .await
+                .expect("resolve ok");
         assert!((spend - 80.0).abs() < 1e-9, "ledger wins, got {spend}");
         assert!(!simulator, "agent_id present -> authoritative mode");
         assert!(warning.is_none());
@@ -370,7 +376,10 @@ fn evaluator_honours_client_override_in_simulator_mode() {
             resolve_spend_for_evaluation(&repo, "pol_A", None, Some(42.0))
                 .await
                 .unwrap();
-        assert!((spend - 42.0).abs() < 1e-9, "override honoured, got {spend}");
+        assert!(
+            (spend - 42.0).abs() < 1e-9,
+            "override honoured, got {spend}"
+        );
         assert!(simulator);
         assert!(warning.is_some());
 

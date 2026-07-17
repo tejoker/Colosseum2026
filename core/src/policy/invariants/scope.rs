@@ -54,10 +54,7 @@ impl RuntimeCheck for ScopeCheck {
         if !self.allow.is_empty() && !self.allow.iter().any(|a| a == &tag) {
             return Verdict::Deny {
                 check: self.name().to_string(),
-                reason: format!(
-                    "classification '{tag}' not in allow list {:?}",
-                    self.allow
-                ),
+                reason: format!("classification '{tag}' not in allow list {:?}", self.allow),
             };
         }
         Verdict::Allow

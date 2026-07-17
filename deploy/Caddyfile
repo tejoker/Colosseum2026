@@ -3,13 +3,13 @@
 # Caddy terminates TLS (auto Let's Encrypt) and fronts two upstreams:
 #   - core.<domain>  -> the SauronID core API (every endpoint self-authenticates;
 #                       safe to expose publicly — the remote agent needs it).
-#   - dash.<domain>  -> the Next.js dashboard, gated behind HTTP basic auth
-#                       because the dashboard itself has no user auth yet
-#                       (roadmap B5). This is the demo-grade mitigation.
+#   - dash.<domain>  -> the Next.js dashboard, with an optional outer HTTP
+#                       basic-auth defense-in-depth layer in addition to the
+#                       dashboard's signed operator sessions.
 #
 # Requirements: both hostnames must resolve (A record) to this VM, and ports
 # 80 + 443 must be open. Substituted from the environment (docker-compose
-# passes them through); generate DASH_BASICAUTH_HASH with:
+# passes them through); generate DASH_BASICAUTH_HASH with (optional):
 #     docker run --rm caddy caddy hash-password --plaintext '<your-password>'
 
 {

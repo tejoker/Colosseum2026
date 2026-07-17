@@ -25,7 +25,5 @@ pub use audit_log::{
     audit_log_middleware, ensure_security_audit_schema, init_audit_sink, query_audit_events,
     record, AuditEvent, AuditQuery, AuditRecord,
 };
-pub use rate_limit::{
-    global_rate_limit_middleware, GlobalRateLimitConfig, GlobalRateLimiter,
-};
+pub use rate_limit::{global_rate_limit_middleware, GlobalRateLimitConfig, GlobalRateLimiter};
 pub use security_headers::security_headers_middleware;

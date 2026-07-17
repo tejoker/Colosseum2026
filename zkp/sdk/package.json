@@ -17,5 +17,11 @@
     "devDependencies": {
         "typescript": "^5.4.0",
         "@types/node": "^20.0.0"
+    },
+    "comment_overrides": "Pin patched versions of snarkjs's vulnerable transitive deps without force-bumping snarkjs itself (RUSTSEC-equivalent GHSA advisories). jsonpath has NO patched release (unmaintained) — see note below.",
+    "overrides": {
+        "ws": "^8.18.3",
+        "elliptic": "^6.6.1",
+        "underscore": "^1.13.7"
     }
 }

@@ -5,10 +5,10 @@ import {
   type CoreHealthResponse,
 } from "../_adapters";
 
-export async function GET(_req: Request) {
+export async function GET(req: Request) {
   const [healthR, agentsR] = await Promise.all([
-    fetchCoreJson<CoreHealthResponse>("health/detailed"),
-    fetchCoreJson<CoreAgentRecord[]>("agents"),
+    fetchCoreJson<CoreHealthResponse>("health/detailed", "", req),
+    fetchCoreJson<CoreAgentRecord[]>("agents", "", req),
   ]);
 
   if (!healthR.ok) return healthR.response;

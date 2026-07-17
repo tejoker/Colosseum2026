@@ -27,9 +27,18 @@ function parseEnvTenants(): string[] {
     .filter((s) => s.length > 0);
 }
 
-export async function GET(_req: Request) {
+export async function GET(req: Request) {
   const envTenants = parseEnvTenants();
-  const tenants = Array.from(new Set([DEFAULT_TENANT, ...envTenants]));
+  const isSuper = req.headers.get("x-sauron-admin-super") === "1";
+  const authorized = new Set(
+    (req.headers.get("x-sauron-admin-tenants") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  const tenants = isSuper
+    ? Array.from(new Set([DEFAULT_TENANT, ...envTenants]))
+    : Array.from(new Set([DEFAULT_TENANT, ...envTenants])).filter((t) => authorized.has(t));
   return Response.json(
     { tenants },
     {

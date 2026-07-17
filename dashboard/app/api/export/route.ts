@@ -23,8 +23,8 @@ export async function POST(req: NextRequest) {
   // and /api/agents/[id]/audit handlers use) so export is consistent with what
   // the user sees in the UI.
   const [receiptsR, agentsR] = await Promise.all([
-    fetchCoreJson<CoreActionReceipt[]>("agent_actions/recent", "?limit=1000"),
-    fetchCoreJson<CoreAgentRecord[]>("agents"),
+    fetchCoreJson<CoreActionReceipt[]>("agent_actions/recent", "?limit=1000", req),
+    fetchCoreJson<CoreAgentRecord[]>("agents", "", req),
   ]);
   if (!receiptsR.ok) return receiptsR.response;
   const agents = agentsR.ok ? agentsR.data : [];

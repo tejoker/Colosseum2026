@@ -44,7 +44,10 @@ impl RuntimeCheck for VersionPinCheck {
         } else {
             Verdict::Deny {
                 check: self.name().to_string(),
-                reason: format!("agent_version '{v}' does not match pinned '{}'", self.pinned),
+                reason: format!(
+                    "agent_version '{v}' does not match pinned '{}'",
+                    self.pinned
+                ),
             }
         }
     }

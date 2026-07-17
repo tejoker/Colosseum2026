@@ -218,10 +218,7 @@ mod tests {
         let s1 = sign_report(&r, b"k1");
         r.generated_at = 999_999;
         let s2 = sign_report(&r, b"k1");
-        assert_eq!(
-            s1, s2,
-            "generated_at must be excluded from canonical form"
-        );
+        assert_eq!(s1, s2, "generated_at must be excluded from canonical form");
         // Different key → different signature.
         let s3 = sign_report(&r, b"k2");
         assert_ne!(s1, s3);

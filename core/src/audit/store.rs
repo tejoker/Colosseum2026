@@ -62,10 +62,10 @@ pub fn store_report(
 ) -> Result<(), StoreError> {
     ensure_audit_reports_schema(db)?;
     let conn = db.lock().map_err(|e| StoreError::Db(e.to_string()))?;
-    let agent_ids_json = serde_json::to_string(&report.agent_ids)
-        .map_err(|e| StoreError::Decode(e.to_string()))?;
-    let report_json = serde_json::to_string(report)
-        .map_err(|e| StoreError::Decode(e.to_string()))?;
+    let agent_ids_json =
+        serde_json::to_string(&report.agent_ids).map_err(|e| StoreError::Decode(e.to_string()))?;
+    let report_json =
+        serde_json::to_string(report).map_err(|e| StoreError::Decode(e.to_string()))?;
     conn.execute(
         "INSERT OR IGNORE INTO audit_reports
          (report_id, tenant_id, agent_ids_json, period_start, period_end,
@@ -134,8 +134,8 @@ pub fn list_reports(
     let mut out = Vec::new();
     for r in rows {
         let json = r.map_err(|e| StoreError::Db(e.to_string()))?;
-        let report: AuditReport = serde_json::from_str(&json)
-            .map_err(|e| StoreError::Decode(e.to_string()))?;
+        let report: AuditReport =
+            serde_json::from_str(&json).map_err(|e| StoreError::Decode(e.to_string()))?;
         out.push(report);
     }
     Ok(out)
@@ -155,8 +155,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("sauron-audit-store-{pid}-{nanos}-{label}.db"));
+        let path =
+            std::env::temp_dir().join(format!("sauron-audit-store-{pid}-{nanos}-{label}.db"));
         let _ = std::fs::remove_file(&path);
         Arc::new(open_db_at(path.to_str().unwrap(), 2))
     }

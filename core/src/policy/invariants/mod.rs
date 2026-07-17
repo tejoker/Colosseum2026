@@ -198,6 +198,7 @@ impl<'a> EvaluationContext<'a> {
 /// extend the key set without changing the [`Action`] struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct Action {
     /// Caller-supplied unique identifier (used in receipts + audit).
     pub action_id: String,
@@ -224,19 +225,4 @@ pub struct Action {
     /// individual `*_check.rs` modules for the keys each reads.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
-}
-
-impl Default for Action {
-    fn default() -> Self {
-        Self {
-            action_id: String::new(),
-            tool: String::new(),
-            amount_usd: None,
-            data_classification: None,
-            signatures: Vec::new(),
-            delegation_depth: 0,
-            timestamp: 0,
-            metadata: HashMap::new(),
-        }
-    }
 }

@@ -40,7 +40,9 @@ services:
       - NEXT_PUBLIC_API_URL=http://backend:3001
       - SAURON_CORE_INTERNAL_URL=http://backend:3001
       - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
-      - SAURONID_ALLOW_UNAUTHENTICATED_ADMIN_PROXY=1
+      # Dashboard API routes require the signed dev/dev operator session (or
+      # SAURON_DASHBOARD_OPERATORS in a shared environment). Never enable the
+      # removed unauthenticated proxy compatibility switch.
     restart: unless-stopped
 
   # ── Hardhat Local EVM Node (port 8545) ──────────────────────────────────────

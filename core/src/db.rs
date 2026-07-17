@@ -745,10 +745,7 @@ pub fn init_schema(conn: &Connection) {
     // Hardware-attestation slot: TPM2 quote / AWS Nitro attestation document /
     // Apple Secure Enclave attestation. Stored verbatim; SauronID does not
     // cryptographically verify the attestation (see threat-model.md).
-    let _ = conn.execute(
-        "ALTER TABLE agents ADD COLUMN attestation_blob TEXT",
-        [],
-    );
+    let _ = conn.execute("ALTER TABLE agents ADD COLUMN attestation_blob TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE agents ADD COLUMN attestation_kind TEXT NOT NULL DEFAULT ''",
         [],
@@ -770,10 +767,7 @@ pub fn init_schema(conn: &Connection) {
         "ALTER TABLE agents ADD COLUMN attestation_pubkey_b64u TEXT",
         [],
     );
-    let _ = conn.execute(
-        "ALTER TABLE agents ADD COLUMN attestation_pcr_set TEXT",
-        [],
-    );
+    let _ = conn.execute("ALTER TABLE agents ADD COLUMN attestation_pcr_set TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE agents ADD COLUMN attestation_ek_cert_chain_pem TEXT",
         [],
@@ -781,7 +775,10 @@ pub fn init_schema(conn: &Connection) {
 
     // Anonymous ring path (phase 3): receipts from the anon flow carry ring_id +
     // config_digest instead of an agent identity. Nullable; legacy rows untouched.
-    let _ = conn.execute("ALTER TABLE agent_action_receipts ADD COLUMN ring_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_receipts ADD COLUMN ring_id TEXT",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE agent_action_receipts ADD COLUMN config_digest TEXT",
         [],
@@ -855,9 +852,7 @@ pub fn init_schema(conn: &Connection) {
     ];
     for tbl in tenant_scoped_tables {
         let _ = conn.execute(
-            &format!(
-                "ALTER TABLE {tbl} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
-            ),
+            &format!("ALTER TABLE {tbl} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"),
             [],
         );
     }

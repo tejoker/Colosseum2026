@@ -62,11 +62,14 @@ impl Default for RdpAccountant {
 impl RdpAccountant {
     pub fn new() -> Self {
         let orders: Vec<f64> = vec![
-            1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0,
-            20.0, 24.0, 28.0, 32.0, 48.0, 64.0,
+            1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 24.0,
+            28.0, 32.0, 48.0, 64.0,
         ];
         let rdp_at_order = vec![0.0; orders.len()];
-        Self { orders, rdp_at_order }
+        Self {
+            orders,
+            rdp_at_order,
+        }
     }
 
     /// α-RDP of Gaussian mechanism with σ and L2 sensitivity:
@@ -136,7 +139,12 @@ mod tests {
         let cs = vec![(0.1, 1e-7); 20];
         let (basic_eps, _) = basic_composition(&cs);
         let (adv_eps, _) = advanced_composition(&cs, 0.01).unwrap();
-        assert!(adv_eps < basic_eps, "adv {} not tighter than basic {}", adv_eps, basic_eps);
+        assert!(
+            adv_eps < basic_eps,
+            "adv {} not tighter than basic {}",
+            adv_eps,
+            basic_eps
+        );
     }
 
     #[test]

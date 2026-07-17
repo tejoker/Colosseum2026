@@ -6,14 +6,14 @@ import {
 } from "../../_adapters";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   const [agentsR, metricsR] = await Promise.all([
-    fetchCoreJson<CoreAgentRecord[]>("agents"),
-    fetchCoreJson<CorePerAgentMetric[]>("per_agent_metrics", "?limit=500"),
+    fetchCoreJson<CoreAgentRecord[]>("agents", "", req),
+    fetchCoreJson<CorePerAgentMetric[]>("per_agent_metrics", "?limit=500", req),
   ]);
 
   if (!agentsR.ok) return agentsR.response;

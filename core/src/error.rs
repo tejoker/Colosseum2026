@@ -55,7 +55,10 @@ impl IntoResponse for AppError {
             // to avoid leaking implementation details to pentesters.
             AppError::Internal(m) => {
                 tracing::error!(target: "sauron::error", detail = %m, "internal handler error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
             }
         };
         (code, msg).into_response()

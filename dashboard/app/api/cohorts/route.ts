@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
   // endpoint and project each into the dashboard CohortSummary shape.
   // The summary needs a period window; the listing view uses the last
   // calendar week (rolling) which the detail page can refine.
-  const result = await fetchCoreV1Json<CoreCohortDefinition[]>("cohort");
+  const result = await fetchCoreV1Json<CoreCohortDefinition[]>("cohort", "", req);
   if (!result.ok) {
     return result.response;
   }

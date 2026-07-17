@@ -18,9 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sauron_core::aggregation::{
-    list_cohort, list_for_cohort, publish_cohort, publish_cohort_with_ledger,
-    upsert_submission, verify_stats_submission, AggError, CohortDefinition, CohortStore,
-    StatsSubmission,
+    list_cohort, list_for_cohort, publish_cohort, publish_cohort_with_ledger, upsert_submission,
+    verify_stats_submission, AggError, CohortDefinition, CohortStore, StatsSubmission,
 };
 use sauron_core::db::{open_db_at, DbHandle};
 use sauron_core::dp::DpBudgetLedger;
@@ -43,8 +42,7 @@ fn build_test_db(label: &str) -> Arc<DbHandle> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir()
-        .join(format!("sauron-aggroutes-{pid}-{nanos}-{label}.db"));
+    let path = std::env::temp_dir().join(format!("sauron-aggroutes-{pid}-{nanos}-{label}.db"));
     let _ = std::fs::remove_file(&path);
     Arc::new(open_db_at(path.to_str().unwrap(), 2))
 }
@@ -69,13 +67,13 @@ fn good_submission(tenant: &str, agent: Option<&str>, claimed: i64) -> StatsSubm
         proof_b64: "e30=".into(),
         vk_id: "StatsHonestComputation.dev.vk@v0".into(),
         public_inputs: vec![
-            "1".into(),                  // valid
-            "0".into(),                  // root (decimal 0 → 0x00..00 hex)
-            "0".into(),                  // metric_id 0 = success_rate
-            claimed.to_string(),         // claimed_value
-            "4".into(),                  // n_records
-            "0".into(),                  // period_start
-            "60".into(),                 // period_end
+            "1".into(),          // valid
+            "0".into(),          // root (decimal 0 → 0x00..00 hex)
+            "0".into(),          // metric_id 0 = success_rate
+            claimed.to_string(), // claimed_value
+            "4".into(),          // n_records
+            "0".into(),          // period_start
+            "60".into(),         // period_end
         ],
     }
 }
@@ -89,9 +87,9 @@ fn submit_valid_passes_binding_then_keynotfound_at_vkey_lookup() {
             .expect_err("stub loader must fail at vkey lookup");
         match err {
             AggError::KeyNotFound(_) => {} // expected — we reached snarkjs path
-            other => panic!(
-                "expected KeyNotFound (envelope binding OK; vkey load fails); got {other:?}"
-            ),
+            other => {
+                panic!("expected KeyNotFound (envelope binding OK; vkey load fails); got {other:?}")
+            }
         }
     });
 }
@@ -149,12 +147,10 @@ fn tenant_isolation_in_get_one() {
     let db = build_test_db("iso");
     upsert_submission(&db, &good_submission("t1", None, 950), 100).unwrap();
     // Cross-tenant get_one yields None.
-    let got =
-        sauron_core::aggregation::get_one(&db, "t2", None, "success_rate", 0).unwrap();
+    let got = sauron_core::aggregation::get_one(&db, "t2", None, "success_rate", 0).unwrap();
     assert!(got.is_none(), "tenant isolation broken");
     // Same tenant resolves the row.
-    let got =
-        sauron_core::aggregation::get_one(&db, "t1", None, "success_rate", 0).unwrap();
+    let got = sauron_core::aggregation::get_one(&db, "t1", None, "success_rate", 0).unwrap();
     assert!(got.is_some(), "same tenant must resolve");
 }
 
@@ -184,12 +180,7 @@ fn sample_cohort(id: &str, tenants: &[&str], k: usize, eps: f64) -> CohortDefini
 fn publish_end_to_end_aggregates_across_cohort_tenants() {
     let db = build_test_db("publish_e2e");
     let store = CohortStore::new(std::sync::Arc::clone(&db));
-    let cohort = sample_cohort(
-        "coh_e2e",
-        &["t1", "t2", "t3", "t4", "t5"],
-        3,
-        1.0,
-    );
+    let cohort = sample_cohort("coh_e2e", &["t1", "t2", "t3", "t4", "t5"], 3, 1.0);
     store.upsert(cohort.clone()).unwrap();
 
     // Seed customer_stats for every cohort tenant.
@@ -213,12 +204,7 @@ fn publish_end_to_end_aggregates_across_cohort_tenants() {
 #[test]
 fn publish_suppresses_when_below_k_anonymity_threshold() {
     let db = build_test_db("publish_k_anon");
-    let cohort = sample_cohort(
-        "coh_small",
-        &["t1", "t2", "t3", "t4", "t5"],
-        5,
-        1.0,
-    );
+    let cohort = sample_cohort("coh_small", &["t1", "t2", "t3", "t4", "t5"], 5, 1.0);
     // Only 2 of 5 cohort tenants submit.
     upsert_submission(&db, &good_submission("t1", None, 900), 1).unwrap();
     upsert_submission(&db, &good_submission("t2", None, 920), 1).unwrap();
@@ -236,12 +222,7 @@ fn publish_suppresses_when_below_k_anonymity_threshold() {
 #[test]
 fn publish_privacy_notice_exposes_epsilon_budget() {
     let db = build_test_db("publish_eps");
-    let cohort = sample_cohort(
-        "coh_eps",
-        &["t1", "t2", "t3", "t4"],
-        3,
-        0.5,
-    );
+    let cohort = sample_cohort("coh_eps", &["t1", "t2", "t3", "t4"], 3, 0.5);
     for (i, t) in cohort.tenant_ids.iter().enumerate() {
         upsert_submission(&db, &good_submission(t, None, 900 + (i as i64)), 1).unwrap();
     }
@@ -346,17 +327,14 @@ fn ledger_publication_exhausts_budget_and_second_call_suppresses() {
     let now = 1_700_000_000_i64;
 
     // Pub 1: ε=1 → spend 1 of 2.
-    let out1 =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
+    let out1 = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
     assert!(!out1.metrics[0].suppressed, "first publish must succeed");
     // Pub 2: ε=1 → spend 2 of 2.
-    let out2 =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
+    let out2 = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
     assert!(!out2.metrics[0].suppressed, "second publish exactly at cap");
     // Pub 3: would push ε to 3 → DENIED, metric suppressed with reason
     // citing the budget.
-    let out3 =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
+    let out3 = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
     assert!(
         out3.metrics[0].suppressed,
         "third publish must be suppressed (budget exhausted)"
@@ -389,10 +367,8 @@ fn ledger_rotate_cycle_unblocks_publication() {
     let now = 1_700_000_000_i64;
 
     // Exhaust the budget on the current cycle.
-    let _ =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
-    let denied =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
+    let _ = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
+    let denied = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now, &mut rng).unwrap();
     assert!(denied.metrics[0].suppressed);
 
     // Rotate to a new cycle 30 days later with a fresh cap.
@@ -403,8 +379,7 @@ fn ledger_rotate_cycle_unblocks_publication() {
 
     // Now publish again, anchored to a timestamp inside the new cycle.
     let later = new_cycle_start + 3_600;
-    let out =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, later, &mut rng).unwrap();
+    let out = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, later, &mut rng).unwrap();
     assert!(
         !out.metrics[0].suppressed,
         "post-rotate publish must succeed"
@@ -427,24 +402,14 @@ fn ledger_get_returns_per_cycle_audit_rows() {
 
     // Two publications in cycle 0.
     let now0 = 0_i64;
-    let _ =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now0, &mut rng).unwrap();
-    let _ =
-        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now0, &mut rng).unwrap();
+    let _ = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now0, &mut rng).unwrap();
+    let _ = publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, now0, &mut rng).unwrap();
     // Rotate explicitly to cycle 1 with a small cap.
     ledger
         .rotate_cycle("coh_get", "success_rate", 86_400, 1.0, 1e-5)
         .unwrap();
-    let _ = publish_cohort_with_ledger(
-        &cohort,
-        &raw,
-        0,
-        60,
-        &ledger,
-        86_400 + 100,
-        &mut rng,
-    )
-    .unwrap();
+    let _ =
+        publish_cohort_with_ledger(&cohort, &raw, 0, 60, &ledger, 86_400 + 100, &mut rng).unwrap();
 
     let entries = ledger.get_ledger("coh_get").unwrap();
     assert_eq!(entries.len(), 2, "two cycle rows for the metric");

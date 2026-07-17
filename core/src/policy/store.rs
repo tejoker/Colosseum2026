@@ -121,9 +121,8 @@ impl PolicyStore {
     /// tenant via the column DEFAULT and round-trip transparently.
     pub fn hydrate(&self) -> Result<usize, StoreError> {
         let conn = self.db.lock().map_err(|e| StoreError::Db(e.to_string()))?;
-        let mut stmt = conn.prepare(
-            "SELECT policy_id, raw_yaml, updated_at, tenant_id FROM policies",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT policy_id, raw_yaml, updated_at, tenant_id FROM policies")?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -176,7 +175,7 @@ impl PolicyStore {
         let id = compiled.policy_id.clone();
         let agent = compiled.agent.clone();
         let version = compiled.raw.version.clone();
-        let raw_yaml = serde_yml::to_string(&compiled.raw)
+        let raw_yaml = serde_yaml_ng::to_string(&compiled.raw)
             .map_err(|e| StoreError::Db(format!("serialize: {e}")))?;
 
         {
@@ -225,16 +224,12 @@ impl PolicyStore {
     }
 
     /// Tenant-scoped agent-based lookup (most recent upsert wins).
-    pub fn get_by_agent_tenant(
-        &self,
-        tenant_id: &str,
-        agent: &str,
-    ) -> Option<Arc<CompiledPolicy>> {
+    pub fn get_by_agent_tenant(&self, tenant_id: &str, agent: &str) -> Option<Arc<CompiledPolicy>> {
         let idx = self.inner.read().ok()?;
-        let id = idx.by_agent.get(&(tenant_id.to_string(), agent.to_string()))?;
-        idx.by_id
-            .get(&(tenant_id.to_string(), id.clone()))
-            .cloned()
+        let id = idx
+            .by_agent
+            .get(&(tenant_id.to_string(), agent.to_string()))?;
+        idx.by_id.get(&(tenant_id.to_string(), id.clone())).cloned()
     }
 
     /// All policies across every tenant. Back-compat — for new admin

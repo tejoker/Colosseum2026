@@ -30,7 +30,7 @@ impl EpsilonBudget {
         if total_epsilon <= 0.0 {
             return Err(DpError::InvalidEpsilon(total_epsilon));
         }
-        if total_delta < 0.0 || total_delta >= 1.0 {
+        if !(0.0..1.0).contains(&total_delta) {
             return Err(DpError::InvalidDelta(total_delta));
         }
         Ok(Self {
@@ -155,7 +155,8 @@ mod tests {
     fn audit_log_preserves_order() {
         let mut b = EpsilonBudget::new(10.0, 1e-3).unwrap();
         for i in 0..5 {
-            b.charge(0.1, 1e-5, &format!("q{}", i), i as i64 * 10).unwrap();
+            b.charge(0.1, 1e-5, &format!("q{}", i), i as i64 * 10)
+                .unwrap();
         }
         let log = b.audit_log();
         for (i, e) in log.iter().enumerate() {

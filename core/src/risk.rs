@@ -33,31 +33,51 @@ fn hash_bucket(prefix: &[u8], parts: &[&[u8]]) -> String {
 pub fn bucket_kyc_retrieve(tenant_id: &str, site: &str, user_key_image: &str) -> String {
     hash_bucket(
         b"kyc_retrieve",
-        &[tenant_id.as_bytes(), site.as_bytes(), user_key_image.as_bytes()],
+        &[
+            tenant_id.as_bytes(),
+            site.as_bytes(),
+            user_key_image.as_bytes(),
+        ],
     )
 }
 
 pub fn bucket_agent_kyc_consent(tenant_id: &str, site: &str, user_key_image: &str) -> String {
     hash_bucket(
         b"agent_kyc_consent",
-        &[tenant_id.as_bytes(), site.as_bytes(), user_key_image.as_bytes()],
+        &[
+            tenant_id.as_bytes(),
+            site.as_bytes(),
+            user_key_image.as_bytes(),
+        ],
     )
 }
 
 pub fn bucket_payment_authorize(tenant_id: &str, agent_id: &str) -> String {
-    hash_bucket(b"payment_authorize", &[tenant_id.as_bytes(), agent_id.as_bytes()])
+    hash_bucket(
+        b"payment_authorize",
+        &[tenant_id.as_bytes(), agent_id.as_bytes()],
+    )
 }
 
 pub fn bucket_agent_vc_issue(tenant_id: &str, human_key_image: &str) -> String {
-    hash_bucket(b"agent_vc_issue", &[tenant_id.as_bytes(), human_key_image.as_bytes()])
+    hash_bucket(
+        b"agent_vc_issue",
+        &[tenant_id.as_bytes(), human_key_image.as_bytes()],
+    )
 }
 
 pub fn bucket_agent_register(tenant_id: &str, human_key_image: &str) -> String {
-    hash_bucket(b"agent_register", &[tenant_id.as_bytes(), human_key_image.as_bytes()])
+    hash_bucket(
+        b"agent_register",
+        &[tenant_id.as_bytes(), human_key_image.as_bytes()],
+    )
 }
 
 pub fn bucket_agent_verify(tenant_id: &str, agent_id: &str) -> String {
-    hash_bucket(b"agent_verify", &[tenant_id.as_bytes(), agent_id.as_bytes()])
+    hash_bucket(
+        b"agent_verify",
+        &[tenant_id.as_bytes(), agent_id.as_bytes()],
+    )
 }
 
 fn parse_limit(name: &str, production_default: i64) -> i64 {

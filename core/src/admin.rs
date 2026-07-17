@@ -60,9 +60,7 @@ fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
         Ok(_) => {}
         Err(crate::secret_provider::ResolveError::NotFound(_)) => {}
         Err(e) => {
-            return Err(format!(
-                "admin auth: SAURON_ADMIN_KEY resolver error: {e}"
-            ));
+            return Err(format!("admin auth: SAURON_ADMIN_KEY resolver error: {e}"));
         }
     }
 
@@ -135,36 +133,35 @@ fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
     // to sit in plaintext env. Falls back to plain `SAURON_ADMIN_JWT_HS256_SECRET`
     // when no backend is enabled. A configured-but-unreachable backend is
     // fatal (fail-closed), matching the SAURON_ADMIN_KEYS handling above.
-    let jwt_hs256_secret = match crate::secret_provider::try_resolve_secret(
-        "SAURON_ADMIN_JWT_HS256_SECRET",
-    ) {
-        Ok(Some(bytes)) => {
-            // Trim ASCII whitespace at the ends (parity with the previous
-            // env-only path, which trimmed the string). Works on raw bytes so
-            // a binary Vault plaintext is left intact in the middle.
-            let start = bytes
-                .iter()
-                .position(|b| !b.is_ascii_whitespace())
-                .unwrap_or(bytes.len());
-            let end = bytes
-                .iter()
-                .rposition(|b| !b.is_ascii_whitespace())
-                .map(|i| i + 1)
-                .unwrap_or(start);
-            let trimmed = bytes[start..end].to_vec();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
+    let jwt_hs256_secret =
+        match crate::secret_provider::try_resolve_secret("SAURON_ADMIN_JWT_HS256_SECRET") {
+            Ok(Some(bytes)) => {
+                // Trim ASCII whitespace at the ends (parity with the previous
+                // env-only path, which trimmed the string). Works on raw bytes so
+                // a binary Vault plaintext is left intact in the middle.
+                let start = bytes
+                    .iter()
+                    .position(|b| !b.is_ascii_whitespace())
+                    .unwrap_or(bytes.len());
+                let end = bytes
+                    .iter()
+                    .rposition(|b| !b.is_ascii_whitespace())
+                    .map(|i| i + 1)
+                    .unwrap_or(start);
+                let trimmed = bytes[start..end].to_vec();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
             }
-        }
-        Ok(None) => None,
-        Err(e) => {
-            return Err(format!(
-                "admin auth: failed to resolve SAURON_ADMIN_JWT_HS256_SECRET: {e}"
-            ))
-        }
-    };
+            Ok(None) => None,
+            Err(e) => {
+                return Err(format!(
+                    "admin auth: failed to resolve SAURON_ADMIN_JWT_HS256_SECRET: {e}"
+                ))
+            }
+        };
 
     if !is_development_runtime() {
         if full_write_keys.is_empty() {
@@ -224,17 +221,49 @@ fn build_admin_auth_config() -> Result<AdminAuthConfig, String> {
 struct AdminJwtClaims {
     #[serde(default)]
     scp: Vec<String>,
+    /// Optional tenant allowlist. When non-empty (and the token is not
+    /// `admin:super`), this operator may ONLY act on these tenants — the core
+    /// enforces it regardless of the global `SAURON_ADMIN_CROSS_TENANT` flag.
+    /// Empty ⇒ legacy behaviour (global flag decides cross-tenant scope).
+    #[serde(default)]
+    tnt: Vec<String>,
     /// Handled by `jsonwebtoken` expiry validation.
     #[allow(dead_code)]
     exp: i64,
 }
 
-fn verify_admin_jwt(token: &str, secret: &[u8]) -> Option<Vec<String>> {
+/// Per-request admin authorization context, inserted by [`auth_middleware`] and
+/// consumed by [`admin_scope`]. Decides whether the principal may query across
+/// all tenants (`*`) or is pinned to the request's tenant.
+#[derive(Clone, Debug)]
+pub struct AdminAuthz {
+    pub cross_tenant: bool,
+}
+
+fn verify_admin_jwt(token: &str, secret: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     let data =
         decode::<AdminJwtClaims>(token, &DecodingKey::from_secret(secret), &validation).ok()?;
-    Some(data.claims.scp)
+    Some((data.claims.scp, data.claims.tnt))
+}
+
+fn scopes_are_super(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .any(|s| s == "admin:super" || s == "*" || s == "admin:full")
+}
+
+/// Tenant on the incoming request (same header the tenancy middleware reads).
+fn request_tenant(request: &Request) -> String {
+    request
+        .headers()
+        .get(crate::tenancy::TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::tenancy::DEFAULT_TENANT.to_string())
 }
 
 fn jwt_auth_ok(scopes: &[String], method: &Method) -> bool {
@@ -288,34 +317,58 @@ fn extract_x_admin_key_bytes(request: &Request) -> Vec<u8> {
 }
 
 pub async fn auth_middleware(
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
     let cfg = admin_cfg();
     let method = request.method().clone();
 
+    // 1. Admin JWT (Bearer) — carries scopes (read/write/super) + optional
+    //    tenant allowlist for per-operator least-privilege.
     if let Some(token) = extract_bearer_token(&request) {
         if let Some(ref sec) = cfg.jwt_hs256_secret {
-            if let Some(scopes) = verify_admin_jwt(&token, sec) {
-                if jwt_auth_ok(&scopes, &method) {
-                    return Ok(next.run(request).await);
+            if let Some((scopes, tnt)) = verify_admin_jwt(&token, sec) {
+                if !jwt_auth_ok(&scopes, &method) {
+                    return Err(StatusCode::UNAUTHORIZED);
                 }
-                return Err(StatusCode::UNAUTHORIZED);
+                let is_super = scopes_are_super(&scopes);
+                let cross_tenant = if !is_super && !tnt.is_empty() {
+                    // Tenant-locked operator: may act ONLY on an allowlisted
+                    // tenant, regardless of the global cross-tenant flag.
+                    let rt = request_tenant(&request);
+                    if !tnt.iter().any(|t| t == &rt) {
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    false
+                } else {
+                    // super ⇒ cross-tenant; otherwise the legacy global flag.
+                    is_super || cross_tenant_admin()
+                };
+                request.extensions_mut().insert(AdminAuthz { cross_tenant });
+                return Ok(next.run(request).await);
             }
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
 
+    // 2. Static x-admin-key. Legacy scope: the global SAURON_ADMIN_CROSS_TENANT
+    //    flag decides cross-tenant reach (per-operator scoping uses JWTs above).
     let key_bytes = extract_x_admin_key_bytes(&request);
     if key_bytes.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
     if key_matches_any(&key_bytes, &cfg.full_write_keys) {
+        request.extensions_mut().insert(AdminAuthz {
+            cross_tenant: cross_tenant_admin(),
+        });
         return Ok(next.run(request).await);
     }
     if key_matches_any(&key_bytes, &cfg.read_only_keys) {
         if method == Method::GET || method == Method::HEAD {
+            request.extensions_mut().insert(AdminAuthz {
+                cross_tenant: cross_tenant_admin(),
+            });
             return Ok(next.run(request).await);
         }
         return Err(StatusCode::FORBIDDEN);
@@ -370,8 +423,12 @@ pub async fn add_client(
         // pub_hex is server-generated via Identity::random() so decoding is
         // expected to succeed, but we defensively avoid panic on any future
         // refactor that pipes user-influenced hex through this path.
-        let pub_bytes = hex::decode(&pub_hex)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("hex decode: {e}")))?;
+        let pub_bytes = hex::decode(&pub_hex).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("hex decode: {e}"),
+            )
+        })?;
         if let Some(pt) = CompressedRistretto::from_slice(&pub_bytes)
             .ok()
             .and_then(|c| c.decompress())
@@ -417,9 +474,12 @@ pub struct ActionAnchorProofQuery {
 
 pub async fn get_action_anchor_proof(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     axum::extract::Query(q): axum::extract::Query<ActionAnchorProofQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match crate::agent_action_anchor::proof_for_receipt(&state, &q.receipt_id) {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
+    match crate::agent_action_anchor::proof_for_receipt_for_tenant(&state, &q.receipt_id, &scope) {
         Ok(Some(v)) => Ok(Json(v)),
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
@@ -454,10 +514,13 @@ pub struct AnchorBatchesQuery {
 
 pub async fn get_anchor_batches(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     axum::extract::Query(q): axum::extract::Query<AnchorBatchesQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    match crate::agent_action_anchor::recent_batches(&state, limit) {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
+    match crate::agent_action_anchor::recent_batches_for_tenant(&state, limit, &scope) {
         Ok(v) => Ok(Json(v)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
@@ -476,9 +539,8 @@ pub async fn get_anchor_batches(
 // bytes below are verbatim from the OpenTimestamps spec
 // (DetachedTimestampFile.HEADER_MAGIC).
 const OTS_HEADER_MAGIC: [u8; 31] = [
-    0x00, b'O', b'p', b'e', b'n', b'T', b'i', b'm', b'e', b's', b't', b'a', b'm', b'p', b's',
-    0x00, 0x00, b'P', b'r', b'o', b'o', b'f', 0x00, 0xbf, 0x89, 0xe2, 0xe8, 0x84, 0xe8, 0x92,
-    0x94,
+    0x00, b'O', b'p', b'e', b'n', b'T', b'i', b'm', b'e', b's', b't', b'a', b'm', b'p', b's', 0x00,
+    0x00, b'P', b'r', b'o', b'o', b'f', 0x00, 0xbf, 0x89, 0xe2, 0xe8, 0x84, 0xe8, 0x92, 0x94,
 ];
 const OTS_MAJOR_VERSION: u8 = 0x01;
 const OTS_OP_SHA256_TAG: u8 = 0x08;
@@ -504,23 +566,25 @@ fn build_ots_detached(root: &[u8; 32], timestamp_blob: &[u8]) -> Vec<u8> {
 /// reviewer can verify the root is committed to Bitcoin with the stock tool.
 pub async fn get_anchor_ots(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     Path(anchor_id): Path<String>,
 ) -> axum::response::Response {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 
     let row: Option<(String, Vec<u8>)> = {
         let st = state.read().unwrap();
         let conn = match st.db.lock() {
             Ok(c) => c,
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-            }
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
         conn.query_row(
             "SELECT merkle_root_hex, ots_receipt_blob
              FROM bitcoin_merkle_anchors
-             WHERE anchor_id = ?1 AND provider = 'opentimestamps'",
-            params![anchor_id],
+             WHERE anchor_id = ?1 AND provider = 'opentimestamps'
+               AND (?2 = '*' OR tenant_id = ?2)",
+            params![anchor_id, scope],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )
         .ok()
@@ -528,13 +592,11 @@ pub async fn get_anchor_ots(
 
     let (root_hex, blob) = match row {
         Some(v) => v,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                "no OpenTimestamps proof for this anchor (not Bitcoin-anchored, or unknown anchor_id)",
-            )
-                .into_response()
-        }
+        None => return (
+            StatusCode::NOT_FOUND,
+            "no OpenTimestamps proof for this anchor (not Bitcoin-anchored, or unknown anchor_id)",
+        )
+            .into_response(),
     };
     if blob.is_empty() {
         return (
@@ -550,7 +612,10 @@ pub async fn get_anchor_ots(
             a
         }
         _ => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "stored merkle root is not 32 bytes")
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stored merkle root is not 32 bytes",
+            )
                 .into_response()
         }
     };
@@ -577,10 +642,24 @@ pub async fn get_anchor_ots(
 /// Useful for tests and one-shot CI verification.
 pub async fn force_action_anchor_run(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    match crate::agent_action_anchor::anchor_pending_actions(&state).await {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
+    // A cross-tenant operator may still trigger one batch per tenant; the
+    // endpoint returns only the batch for the requested tenant unless the
+    // caller explicitly requests a tenant through the normal tenant context.
+    let target_tenant = if scope == "*" {
+        tenant.as_str()
+    } else {
+        &scope
+    };
+    match crate::agent_action_anchor::anchor_pending_actions_for_tenant(&state, target_tenant).await
+    {
         Ok(Some(anchor_id)) => Ok(Json(serde_json::json!({ "anchor_id": anchor_id }))),
-        Ok(None) => Ok(Json(serde_json::json!({ "anchor_id": null, "reason": "no new receipts" }))),
+        Ok(None) => Ok(Json(
+            serde_json::json!({ "anchor_id": null, "reason": "no new receipts" }),
+        )),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
 }
@@ -624,6 +703,9 @@ pub struct HealthResponse {
     pub bitcoin_anchor: HealthComponent,
     pub solana_anchor: HealthComponent,
     pub database: HealthComponent,
+    /// Durability of the security-audit sinks. `ok=false` (and a warning) once
+    /// any audit event failed to persist — regulated deployments alert on this.
+    pub audit: HealthComponent,
     pub feature_flags: HealthFlags,
     pub warnings: Vec<String>,
 }
@@ -642,9 +724,7 @@ pub struct HealthFlags {
     pub compliance_enabled: bool,
 }
 
-pub async fn health(
-    State(state): State<Arc<RwLock<ServerState>>>,
-) -> Json<HealthResponse> {
+pub async fn health(State(state): State<Arc<RwLock<ServerState>>>) -> Json<HealthResponse> {
     let runtime = if crate::runtime_mode::is_development_runtime() {
         "development"
     } else {
@@ -662,16 +742,10 @@ pub async fn health(
     };
 
     // Sprint 1: shared runtime_mode helper. Dev defaults advisory, prod enforce.
-    let call_sig_enforce = crate::runtime_mode::require_or_default(
-        "SAURON_REQUIRE_CALL_SIG",
-        false,
-        true,
-    );
-    let require_agent_type = crate::runtime_mode::require_or_default(
-        "SAURON_REQUIRE_AGENT_TYPE",
-        false,
-        true,
-    );
+    let call_sig_enforce =
+        crate::runtime_mode::require_or_default("SAURON_REQUIRE_CALL_SIG", false, true);
+    let require_agent_type =
+        crate::runtime_mode::require_or_default("SAURON_REQUIRE_AGENT_TYPE", false, true);
     let policy_enforcement_mode = crate::runtime_mode::policy_enforcement_mode();
 
     let mut warnings: Vec<String> = Vec::new();
@@ -683,8 +757,13 @@ pub async fn health(
             detail: format!("provider={:?}", svc.provider()),
         },
         None => {
-            warnings.push("Bitcoin anchor disabled — audit log is not externally verifiable on BTC".into());
-            HealthComponent { ok: false, detail: "disabled".into() }
+            warnings.push(
+                "Bitcoin anchor disabled — audit log is not externally verifiable on BTC".into(),
+            );
+            HealthComponent {
+                ok: false,
+                detail: "disabled".into(),
+            }
         }
     };
     let solana_anchor = match state.read().unwrap().solana_anchor.as_ref() {
@@ -693,8 +772,13 @@ pub async fn health(
             detail: format!("signer={}", &svc.signer_pubkey_b58()[..20]),
         },
         None => {
-            warnings.push("Solana anchor disabled — audit log is not externally verifiable on Solana".into());
-            HealthComponent { ok: false, detail: "disabled (set SAURON_SOLANA_ENABLED=1)".into() }
+            warnings.push(
+                "Solana anchor disabled — audit log is not externally verifiable on Solana".into(),
+            );
+            HealthComponent {
+                ok: false,
+                detail: "disabled (set SAURON_SOLANA_ENABLED=1)".into(),
+            }
         }
     };
 
@@ -703,10 +787,19 @@ pub async fn health(
         let st = state.read().unwrap();
         match st.db.lock() {
             Ok(conn) => match conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)) {
-                Ok(_) => HealthComponent { ok: true, detail: "sqlite".into() },
-                Err(e) => HealthComponent { ok: false, detail: format!("sqlite query failed: {e}") },
+                Ok(_) => HealthComponent {
+                    ok: true,
+                    detail: "sqlite".into(),
+                },
+                Err(e) => HealthComponent {
+                    ok: false,
+                    detail: format!("sqlite query failed: {e}"),
+                },
             },
-            Err(e) => HealthComponent { ok: false, detail: format!("db lock: {e}") },
+            Err(e) => HealthComponent {
+                ok: false,
+                detail: format!("db lock: {e}"),
+            },
         }
     };
 
@@ -735,11 +828,32 @@ pub async fn health(
             policy_enforcement_mode.as_str()
         ));
     }
-    if flag("SAURON_VAULT_TRANSIT_ENABLED") == false && runtime == "production" {
-        warnings.push("Production runtime but Vault Transit is not enabled — root secrets in plain env".into());
+    if !flag("SAURON_VAULT_TRANSIT_ENABLED") && runtime == "production" {
+        warnings.push(
+            "Production runtime but Vault Transit is not enabled — root secrets in plain env"
+                .into(),
+        );
     }
 
-    let ok = database.ok && warnings.is_empty();
+    // Audit-sink durability: a non-zero failure count means at least one
+    // security event may not have been durably recorded → health failure.
+    let audit_failures = crate::middleware::audit_log::audit_sink_failure_count();
+    let audit = if audit_failures == 0 {
+        HealthComponent {
+            ok: true,
+            detail: "0 sink failures".into(),
+        }
+    } else {
+        warnings.push(format!(
+            "{audit_failures} security-audit sink write failure(s) — events may be missing from the tamper-evident log"
+        ));
+        HealthComponent {
+            ok: false,
+            detail: format!("{audit_failures} sink failures"),
+        }
+    };
+
+    let ok = database.ok && audit.ok && warnings.is_empty();
 
     Json(HealthResponse {
         ok,
@@ -750,6 +864,7 @@ pub async fn health(
         bitcoin_anchor,
         solana_anchor,
         database,
+        audit,
         feature_flags,
         warnings,
     })
@@ -781,16 +896,65 @@ pub struct AdminAgentRecord {
 /// to the human key image that owns the agent. The dashboard runs in an admin
 /// context (no end-user session), so it uses this admin variant to revoke any
 /// agent by id. Records an audit log entry under "AGENT_REVOKE_ADMIN".
+/// Admin cross-tenant aggregate view. OFF by default (fail-closed: every admin
+/// query is scoped to the request's resolved tenant). A single trusted
+/// super-admin operator sets `SAURON_ADMIN_CROSS_TENANT=1` to see all tenants.
+/// Multi-customer deployments MUST leave it off — this is the boundary that
+/// prevents one tenant's admin from reading another's agents/receipts/PII.
+fn cross_tenant_admin() -> bool {
+    matches!(
+        std::env::var("SAURON_ADMIN_CROSS_TENANT").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+/// Scope token for admin queries: the request's tenant, or the `*` sentinel
+/// (match-all — never a valid tenant id) when the authenticated principal is
+/// allowed cross-tenant. Use in SQL as `(?N = '*' OR tenant_id = ?N)`.
+///
+/// The decision comes from the per-request [`AdminAuthz`] (set by
+/// `auth_middleware` from the JWT scope/tenant-lock); when absent it falls back
+/// to the legacy global `SAURON_ADMIN_CROSS_TENANT` flag.
+fn admin_scope(authz: Option<&AdminAuthz>, tenant: &crate::tenancy::TenantId) -> String {
+    let cross = authz
+        .map(|a| a.cross_tenant)
+        .unwrap_or_else(cross_tenant_admin);
+    if cross {
+        "*".to_string()
+    } else {
+        tenant.as_str().to_string()
+    }
+}
+
+/// Deployment-global tables must never be returned to a tenant-locked admin.
+/// These legacy tables do not carry tenant_id, so refusing the request is the
+/// only safe behavior until they are migrated and backfilled.
+fn require_cross_tenant_admin(authz: Option<&AdminAuthz>) -> Result<(), AppError> {
+    let cross = authz
+        .map(|a| a.cross_tenant)
+        .unwrap_or_else(cross_tenant_admin);
+    if cross {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized(
+            "this admin view is deployment-global; use a cross-tenant super-admin".into(),
+        ))
+    }
+}
+
 pub async fn revoke_agent_admin(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let rows = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.execute(
-            "UPDATE agents SET revoked = 1 WHERE agent_id = ?1",
-            params![agent_id],
+            "UPDATE agents SET revoked = 1 WHERE agent_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
+            params![agent_id, scope],
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
@@ -802,8 +966,8 @@ pub async fn revoke_agent_admin(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.query_row(
-            "SELECT public_key_hex FROM agents WHERE agent_id = ?1",
-            params![agent_id],
+            "SELECT public_key_hex FROM agents WHERE agent_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
+            params![agent_id, scope],
             |r| r.get(0),
         )
         .ok()
@@ -815,27 +979,32 @@ pub async fn revoke_agent_admin(
         let st = state.read().unwrap();
         st.log("AGENT_REVOKE_ADMIN", "OK", &agent_id);
     }
-    Ok(Json(serde_json::json!({ "revoked": true, "agent_id": agent_id })))
+    Ok(Json(
+        serde_json::json!({ "revoked": true, "agent_id": agent_id }),
+    ))
 }
 
 /// GET /admin/agents — list every registered agent + checksum + revocation status.
 pub async fn get_agents(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<Vec<AdminAgentRecord>>, AppError> {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let mut stmt = db
-        .prepare(
-            "SELECT a.agent_id, a.human_key_image, a.agent_checksum, a.assurance_level,
+    let mut stmt = db.prepare(
+        "SELECT a.agent_id, a.human_key_image, a.agent_checksum, a.assurance_level,
                     a.issued_at, a.expires_at, a.revoked,
                     IFNULL(LENGTH(a.pop_public_key_b64u), 0),
                     IFNULL(ci.agent_type, '')
              FROM agents a
              LEFT JOIN agent_checksum_inputs ci ON ci.agent_id = a.agent_id
+             WHERE (?1 = '*' OR a.tenant_id = ?1)
              ORDER BY a.issued_at DESC",
-        )?;
+    )?;
     let records: Vec<AdminAgentRecord> = stmt
-        .query_map([], |row| {
+        .query_map(rusqlite::params![scope], |row| {
             let pop_len: i64 = row.get(7)?;
             Ok(AdminAgentRecord {
                 agent_id: row.get(0)?,
@@ -867,20 +1036,23 @@ pub struct AdminActionReceiptRecord {
 /// GET /admin/agent_actions/recent?limit=N — last N agent action receipts.
 pub async fn get_recent_actions(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     axum::extract::Query(q): axum::extract::Query<RecentLimitQuery>,
 ) -> Result<Json<Vec<AdminActionReceiptRecord>>, AppError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let mut stmt = db
-        .prepare(
-            "SELECT receipt_id, action_hash, agent_id, status, policy_version, created_at
+    let mut stmt = db.prepare(
+        "SELECT receipt_id, action_hash, agent_id, status, policy_version, created_at
              FROM agent_action_receipts
+             WHERE (?1 = '*' OR tenant_id = ?1)
              ORDER BY created_at DESC
-             LIMIT ?1",
-        )?;
+             LIMIT ?2",
+    )?;
     let records: Vec<AdminActionReceiptRecord> = stmt
-        .query_map(rusqlite::params![limit], |row| {
+        .query_map(rusqlite::params![scope, limit], |row| {
             Ok(AdminActionReceiptRecord {
                 receipt_id: row.get(0)?,
                 action_hash: row.get(1)?,
@@ -920,7 +1092,10 @@ pub async fn run_demo_scenario(
         // Valid, in-scope action — the real allowlist invariant permits it.
         "normal" => {
             let check = AllowlistCheck::tools(allowed_tools.clone());
-            let action = Action { tool: "web_fetch".into(), ..Default::default() };
+            let action = Action {
+                tool: "web_fetch".into(),
+                ..Default::default()
+            };
             let ctx = EvaluationContext::with_defaults(&action);
             let allowed = matches!(check.evaluate(&ctx), Verdict::Allow);
             Ok(Json(DemoScenarioOut {
@@ -937,7 +1112,10 @@ pub async fn run_demo_scenario(
         // Out-of-scope tool — the real allowlist invariant denies it.
         "scope" => {
             let check = AllowlistCheck::tools(allowed_tools.clone());
-            let action = Action { tool: "transfer_funds".into(), ..Default::default() };
+            let action = Action {
+                tool: "transfer_funds".into(),
+                ..Default::default()
+            };
             let ctx = EvaluationContext::with_defaults(&action);
             let reason = match check.evaluate(&ctx) {
                 Verdict::Deny { check, reason } => format!("{check}: {reason}"),
@@ -956,8 +1134,13 @@ pub async fn run_demo_scenario(
         }
         // Replay — consume the SAME single-use nonce twice against the live store.
         "replay" => {
-            let st = state.read().map_err(|_| AppError::Internal("state lock".into()))?;
-            let db = st.db.lock().map_err(|_| AppError::Internal("db lock".into()))?;
+            let st = state
+                .read()
+                .map_err(|_| AppError::Internal("state lock".into()))?;
+            let db = st
+                .db
+                .lock()
+                .map_err(|_| AppError::Internal("db lock".into()))?;
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -982,7 +1165,9 @@ pub async fn run_demo_scenario(
                 }),
             }))
         }
-        other => Err(AppError::BadRequest(format!("unknown demo scenario: {other}"))),
+        other => Err(AppError::BadRequest(format!(
+            "unknown demo scenario: {other}"
+        ))),
     }
 }
 
@@ -1005,58 +1190,83 @@ pub struct AdminAnchorStatus {
 }
 
 /// GET /admin/anchor/status — current state of the on-chain anchor pipeline.
+// Clearer as default-then-assign-per-query than a struct literal with a dozen
+// inline query_row calls.
+#[allow(clippy::field_reassign_with_default)]
 pub async fn get_anchor_status(
     State(state): State<Arc<RwLock<ServerState>>>,
-) -> Json<AdminAnchorStatus> {
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
+) -> Result<Json<AdminAnchorStatus>, AppError> {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut s = AdminAnchorStatus::default();
     s.bitcoin_total = db
-        .query_row("SELECT COUNT(*) FROM bitcoin_merkle_anchors", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM bitcoin_merkle_anchors WHERE (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     s.bitcoin_pending_upgrade = db
         .query_row(
-            "SELECT COUNT(*) FROM bitcoin_merkle_anchors WHERE provider = 'opentimestamps' AND ots_upgraded = 0",
-            [],
+            "SELECT COUNT(*) FROM bitcoin_merkle_anchors
+             WHERE provider = 'opentimestamps' AND ots_upgraded = 0
+               AND (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
             |r| r.get(0),
         )
         .unwrap_or(0);
     s.bitcoin_upgraded = db
         .query_row(
-            "SELECT COUNT(*) FROM bitcoin_merkle_anchors WHERE ots_upgraded = 1",
-            [],
+            "SELECT COUNT(*) FROM bitcoin_merkle_anchors
+             WHERE ots_upgraded = 1 AND (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
             |r| r.get(0),
         )
         .unwrap_or(0);
     s.solana_total = db
-        .query_row("SELECT COUNT(*) FROM solana_merkle_anchors", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM solana_merkle_anchors WHERE (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     s.solana_unconfirmed = db
         .query_row(
-            "SELECT COUNT(*) FROM solana_merkle_anchors WHERE confirmed = 0",
-            [],
+            "SELECT COUNT(*) FROM solana_merkle_anchors
+             WHERE confirmed = 0 AND (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
             |r| r.get(0),
         )
         .unwrap_or(0);
     s.solana_confirmed = db
         .query_row(
-            "SELECT COUNT(*) FROM solana_merkle_anchors WHERE confirmed = 1",
-            [],
+            "SELECT COUNT(*) FROM solana_merkle_anchors
+             WHERE confirmed = 1 AND (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
             |r| r.get(0),
         )
         .unwrap_or(0);
     s.agent_action_batches = db
-        .query_row("SELECT COUNT(*) FROM agent_action_anchors", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM agent_action_anchors WHERE (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     if let Ok(row) = db.query_row(
-        "SELECT created_at, n_actions FROM agent_action_anchors ORDER BY created_at DESC LIMIT 1",
-        [],
+        "SELECT created_at, n_actions FROM agent_action_anchors
+         WHERE (?1 = '*' OR tenant_id = ?1)
+         ORDER BY created_at DESC LIMIT 1",
+        params![scope],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
     ) {
         s.last_batch_at = row.0;
         s.last_batch_n_actions = row.1;
     }
-    Json(s)
+    Ok(Json(s))
 }
 
 #[derive(Serialize)]
@@ -1070,9 +1280,12 @@ pub struct AdminPerAgentMetric {
 /// GET /admin/per_agent_metrics?limit=N — per-agent action + egress counts, sorted by activity.
 pub async fn get_per_agent_metrics(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     axum::extract::Query(q): axum::extract::Query<RecentLimitQuery>,
 ) -> Result<Json<Vec<AdminPerAgentMetric>>, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db
@@ -1082,11 +1295,12 @@ pub async fn get_per_agent_metrics(
                     (SELECT COUNT(*) FROM agent_egress_log e WHERE e.agent_id = a.agent_id)      AS egress_count,
                     (SELECT IFNULL(MAX(created_at),0) FROM agent_action_receipts r WHERE r.agent_id = a.agent_id) AS last_at
              FROM agents a
+             WHERE (?1 = '*' OR a.tenant_id = ?1)
              ORDER BY act_count DESC, egress_count DESC
-             LIMIT ?1",
+             LIMIT ?2",
         )?;
     let records: Vec<AdminPerAgentMetric> = stmt
-        .query_map(rusqlite::params![limit], |row| {
+        .query_map(rusqlite::params![scope, limit], |row| {
             Ok(AdminPerAgentMetric {
                 agent_id: row.get(0)?,
                 action_count: row.get(1)?,
@@ -1114,19 +1328,22 @@ pub struct AdminEgressEntry {
 /// GET /admin/egress/recent?limit=N — recent agent egress events.
 pub async fn get_recent_egress(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     axum::extract::Query(q): axum::extract::Query<RecentLimitQuery>,
 ) -> Result<Json<Vec<AdminEgressEntry>>, AppError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let mut stmt = db
-        .prepare(
-            "SELECT id, agent_id, target_host, target_path, method, status_code, ts, allowed
+    let mut stmt = db.prepare(
+        "SELECT id, agent_id, target_host, target_path, method, status_code, ts, allowed
              FROM agent_egress_log
-             ORDER BY ts DESC LIMIT ?1",
-        )?;
+             WHERE (?1 = '*' OR tenant_id = ?1)
+             ORDER BY ts DESC LIMIT ?2",
+    )?;
     let records: Vec<AdminEgressEntry> = stmt
-        .query_map(rusqlite::params![limit], |row| {
+        .query_map(rusqlite::params![scope, limit], |row| {
             Ok(AdminEgressEntry {
                 id: row.get(0)?,
                 agent_id: row.get(1)?,
@@ -1155,19 +1372,22 @@ pub struct AdminChecksumAudit {
 
 pub async fn get_checksum_audit(
     State(state): State<Arc<RwLock<ServerState>>>,
+    axum::Extension(tenant): axum::Extension<crate::tenancy::TenantId>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<Vec<AdminChecksumAudit>>, AppError> {
+    let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let mut stmt = db
-        .prepare(
-            "SELECT from_checksum, to_checksum, reason, actor, ts
-             FROM agent_checksum_audit
-             WHERE agent_id = ?1
+    let mut stmt = db.prepare(
+        "SELECT c.from_checksum, c.to_checksum, c.reason, c.actor, c.ts
+             FROM agent_checksum_audit c
+             JOIN agents a ON a.agent_id = c.agent_id
+             WHERE c.agent_id = ?1 AND (?2 = '*' OR a.tenant_id = ?2)
              ORDER BY ts DESC",
-        )?;
+    )?;
     let records: Vec<AdminChecksumAudit> = stmt
-        .query_map(rusqlite::params![agent_id], |row| {
+        .query_map(rusqlite::params![agent_id, scope], |row| {
             Ok(AdminChecksumAudit {
                 from_checksum: row.get(0)?,
                 to_checksum: row.get(1)?,
@@ -1183,21 +1403,26 @@ pub async fn get_checksum_audit(
 
 pub async fn get_users(
     State(state): State<Arc<RwLock<ServerState>>>,
+    authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<Vec<AdminUserRecord>>, AppError> {
-    let st = state.read().unwrap();
-    let db = st.db.lock().unwrap();
-    let mut stmt = db
-        .prepare("SELECT key_image_hex, first_name, last_name, nationality FROM users")?;
-    let records: Vec<AdminUserRecord> = stmt
-        .query_map([], |row| {
-            Ok(AdminUserRecord {
-                key_image_hex: row.get(0)?,
-                first_name: row.get(1)?,
-                last_name: row.get(2)?,
-                nationality: row.get(3)?,
-            })
-        })?
-        .flatten()
+    // The `users` table (human identities + PII) is NOT tenant-scoped, so it
+    // cannot be filtered per tenant. Listing it is therefore a cross-tenant
+    // super-admin operation: refuse unless SAURON_ADMIN_CROSS_TENANT is set.
+    require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
+    let repo = state.read().unwrap().repo.clone();
+    let records: Vec<AdminUserRecord> = repo
+        .list_users()
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .into_iter()
+        .map(
+            |(key_image_hex, first_name, last_name, nationality)| AdminUserRecord {
+                key_image_hex,
+                first_name,
+                last_name,
+                nationality,
+            },
+        )
         .collect();
     Ok(Json(records))
 }
@@ -1217,7 +1442,9 @@ pub struct AdminClientRecord {
 
 pub async fn get_clients(
     State(state): State<Arc<RwLock<ServerState>>>,
+    authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<Vec<AdminClientRecord>>, AppError> {
+    require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
@@ -1254,31 +1481,26 @@ pub struct SiteUserRecord {
 
 pub async fn get_site_users(
     State(state): State<Arc<RwLock<ServerState>>>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     Path(name): Path<String>,
 ) -> Result<Json<Vec<SiteUserRecord>>, AppError> {
-    let st = state.read().unwrap();
-    let db = st.db.lock().unwrap();
-    let mut stmt = db
-        .prepare(
-            "SELECT u.first_name, u.last_name, u.email, u.nationality, r.source, r.timestamp
-             FROM user_registrations r
-             JOIN users u ON u.key_image_hex = r.user_key_image_hex
-             WHERE r.client_name = ?1
-             ORDER BY r.timestamp DESC
-             LIMIT 500",
-        )?;
-    let records: Vec<SiteUserRecord> = stmt
-        .query_map(params![name], |row| {
-            Ok(SiteUserRecord {
-                first_name: row.get(0)?,
-                last_name: row.get(1)?,
-                email: row.get(2)?,
-                nationality: row.get(3)?,
-                source: row.get(4)?,
-                timestamp: row.get(5)?,
-            })
-        })?
-        .flatten()
+    require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
+    let repo = state.read().unwrap().repo.clone();
+    let records: Vec<SiteUserRecord> = repo
+        .list_site_users(&name)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .into_iter()
+        .map(
+            |(first_name, last_name, email, nationality, source, timestamp)| SiteUserRecord {
+                first_name,
+                last_name,
+                email,
+                nationality,
+                source,
+                timestamp,
+            },
+        )
         .collect();
     Ok(Json(records))
 }
@@ -1298,17 +1520,18 @@ pub struct SiteZkpProofRecord {
 
 pub async fn get_site_zkp_proofs(
     State(state): State<Arc<RwLock<ServerState>>>,
+    authz: Option<axum::Extension<AdminAuthz>>,
     Path(name): Path<String>,
 ) -> Result<Json<Vec<SiteZkpProofRecord>>, AppError> {
+    require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let pattern = format!("site={} %", name);
-    let mut stmt = db
-        .prepare(
-            "SELECT id, timestamp, detail FROM requests_log \
+    let mut stmt = db.prepare(
+        "SELECT id, timestamp, detail FROM requests_log \
          WHERE action_type = 'ZKP_VERIFY' AND status = 'OK' AND detail LIKE ?1 \
          ORDER BY id DESC LIMIT 200",
-        )?;
+    )?;
     let records: Vec<SiteZkpProofRecord> = stmt
         .query_map(rusqlite::params![pattern], |row| {
             let id: i64 = row.get(0)?;
@@ -1358,7 +1581,9 @@ pub struct RequestLogRecord {
 
 pub async fn get_requests(
     State(state): State<Arc<RwLock<ServerState>>>,
+    authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<Vec<RequestLogRecord>>, AppError> {
+    require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
@@ -1397,13 +1622,19 @@ pub struct StatsResponse {
     pub controls: serde_json::Value,
 }
 
-pub async fn get_stats(State(state): State<Arc<RwLock<ServerState>>>) -> Json<StatsResponse> {
+pub async fn get_stats(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    authz: Option<axum::Extension<AdminAuthz>>,
+) -> Result<Json<StatsResponse>, AppError> {
+    require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
+    // `users` is read through the dual-backend repo (Postgres when enabled);
+    // `clients`/`api_usage` are SQLite-only tables, so they stay on the raw
+    // handle below — each table is read from where it is written.
+    let repo = state.read().unwrap().repo.clone();
+    let total_users: i64 = repo.count_users().await.unwrap_or(0);
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
 
-    let total_users: i64 = db
-        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
-        .unwrap_or(0);
     let total_clients: i64 = db
         .query_row("SELECT COUNT(*) FROM clients", [], |r| r.get(0))
         .unwrap_or(0);
@@ -1444,7 +1675,7 @@ pub async fn get_stats(State(state): State<Arc<RwLock<ServerState>>>) -> Json<St
         "risk": { "window_secs": risk::window_secs() },
     });
 
-    Json(StatsResponse {
+    Ok(Json(StatsResponse {
         total_users,
         total_clients,
         total_api_calls,
@@ -1454,7 +1685,7 @@ pub async fn get_stats(State(state): State<Arc<RwLock<ServerState>>>) -> Json<St
         total_tokens_b_spent,
         exchange_rate: 1,
         controls,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -1470,7 +1701,8 @@ mod tests {
         let out = build_ots_detached(&root, &blob);
 
         // Header magic verbatim from the OpenTimestamps spec.
-        let expected_magic: &[u8] = b"\x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94";
+        let expected_magic: &[u8] =
+            b"\x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94";
         assert_eq!(expected_magic.len(), 31);
         assert_eq!(&out[..31], expected_magic, "header magic must match spec");
 

@@ -227,7 +227,7 @@ mod tests {
 
         let mut cert_body = tbs_seq;
         cert_body.extend(der_empty_sequence()); // sig alg
-        // BIT STRING with empty signature (placeholder)
+                                                // BIT STRING with empty signature (placeholder)
         cert_body.extend(vec![0x03, 0x01, 0x00]);
         der_seq(cert_body)
     }
@@ -254,10 +254,7 @@ mod tests {
             ),
             (
                 CborValue::Text("pcrs".to_string()),
-                CborValue::Map(vec![(
-                    CborValue::Uint(0),
-                    CborValue::Bytes(pcr0.to_vec()),
-                )]),
+                CborValue::Map(vec![(CborValue::Uint(0), CborValue::Bytes(pcr0.to_vec()))]),
             ),
             (
                 CborValue::Text("certificate".to_string()),
@@ -338,7 +335,11 @@ mod tests {
             .expect("handler should not 4xx for well-formed body");
         std::env::remove_var("SAURON_NITRO_REQUIRE_ROOT");
         let body = resp.0;
-        assert!(body.valid, "valid blob should report valid=true, got error={:?}", body.error);
+        assert!(
+            body.valid,
+            "valid blob should report valid=true, got error={:?}",
+            body.error
+        );
         assert_eq!(body.module_id, module_id);
         assert_eq!(body.timestamp, 1700);
         assert_eq!(body.pcrs.get(&0).cloned(), Some(hex::encode(pcr0)));
@@ -352,8 +353,7 @@ mod tests {
         let module_id = "i-handler-tampered";
         let pcr0 = [0xaa; 48];
         let pubkey = [0xee; 32];
-        let mut blob =
-            build_attestation_blob(&signer, module_id, 1700, &pcr0, &pubkey);
+        let mut blob = build_attestation_blob(&signer, module_id, 1700, &pcr0, &pubkey);
         // Tamper a byte well inside the signature region.
         let len = blob.len();
         blob[len - 5] ^= 0xff;
@@ -368,7 +368,10 @@ mod tests {
             .expect("handler should 200 with valid=false, not 4xx");
         let body = resp.0;
         assert!(!body.valid, "tampered blob should report valid=false");
-        assert!(body.error.is_some(), "tampered blob should carry an error string");
+        assert!(
+            body.error.is_some(),
+            "tampered blob should carry an error string"
+        );
     }
 
     #[tokio::test]

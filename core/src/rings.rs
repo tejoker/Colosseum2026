@@ -130,7 +130,10 @@ pub fn operator_trapdoor() -> Result<Scalar, String> {
         h.update(b"SAURON_DEV_RING_TRAPDOOR_v1");
         return Ok(Scalar::from_hash(h));
     }
-    Err("SAURON_RING_TRAPDOOR_SECRET is required in production when SAURON_ANON_RINGS is enabled".into())
+    Err(
+        "SAURON_RING_TRAPDOOR_SECRET is required in production when SAURON_ANON_RINGS is enabled"
+            .into(),
+    )
 }
 
 /// Parse a compressed-ristretto point from hex (32 bytes).
@@ -204,9 +207,14 @@ pub fn get_ring(
 }
 
 /// List all rings for a tenant: (ring_id, rule, version).
-pub fn list_rings(db: &Connection, tenant_id: &str) -> Result<Vec<(String, RingRule, i64)>, String> {
+pub fn list_rings(
+    db: &Connection,
+    tenant_id: &str,
+) -> Result<Vec<(String, RingRule, i64)>, String> {
     let mut stmt = db
-        .prepare("SELECT ring_id, rule_json, version FROM rings WHERE tenant_id = ?1 ORDER BY ring_id")
+        .prepare(
+            "SELECT ring_id, rule_json, version FROM rings WHERE tenant_id = ?1 ORDER BY ring_id",
+        )
         .map_err(|e| format!("prepare list_rings: {e}"))?;
     let rows = stmt
         .query_map(params![tenant_id], |r| {
@@ -383,7 +391,11 @@ fn resolve_master_pub(
     tenant_id: &str,
     req: &MembershipRequest,
 ) -> Result<String, (StatusCode, String)> {
-    if let Some(h) = req.agent_public_hex.as_ref().filter(|s| !s.trim().is_empty()) {
+    if let Some(h) = req
+        .agent_public_hex
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+    {
         return Ok(h.trim().to_string());
     }
     let agent_id = req
@@ -426,7 +438,8 @@ pub async fn list_rings_handler(
     require_enabled()?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let rings = list_rings(&db, &q.tenant_id).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let rings =
+        list_rings(&db, &q.tenant_id).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let out: Vec<Value> = rings
         .into_iter()
         .map(|(ring_id, rule, version)| {
@@ -461,7 +474,9 @@ pub async fn subscribe_handler(
         let st = state.read().unwrap();
         st.log("RING_SUBSCRIBE", "OK", &ring_id);
     }
-    Ok(Json(json!({ "ring_id": ring_id, "member_point_hex": point })))
+    Ok(Json(
+        json!({ "ring_id": ring_id, "member_point_hex": point }),
+    ))
 }
 
 /// POST /admin/rings/{ring_id}/revoke — re-derive + remove the agent's pseudonym.
@@ -493,13 +508,15 @@ pub async fn members_handler(
     require_enabled()?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let points =
-        list_member_points(&db, &q.tenant_id, &ring_id).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let points = list_member_points(&db, &q.tenant_id, &ring_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let hexes: Vec<String> = points
         .iter()
         .map(|p| hex::encode(p.compress().as_bytes()))
         .collect();
-    Ok(Json(json!({ "ring_id": ring_id, "count": hexes.len(), "members": hexes })))
+    Ok(Json(
+        json!({ "ring_id": ring_id, "count": hexes.len(), "members": hexes }),
+    ))
 }
 
 #[cfg(test)]
@@ -531,8 +548,14 @@ mod tests {
         };
         assert_eq!(evaluate_rule(&rule, "search", ""), RuleDecision::Allow);
         assert_eq!(evaluate_rule(&rule, "SEARCH", ""), RuleDecision::Allow);
-        assert!(matches!(evaluate_rule(&rule, "transfer", ""), RuleDecision::Deny(_)));
-        assert!(matches!(evaluate_rule(&rule, "", ""), RuleDecision::Deny(_)));
+        assert!(matches!(
+            evaluate_rule(&rule, "transfer", ""),
+            RuleDecision::Deny(_)
+        ));
+        assert!(matches!(
+            evaluate_rule(&rule, "", ""),
+            RuleDecision::Deny(_)
+        ));
     }
 
     #[test]
@@ -542,14 +565,20 @@ mod tests {
             ..Default::default()
         };
         // No pinned digests → any digest accepted.
-        assert_eq!(evaluate_rule(&unpinned, "search", "sha256:anything"), RuleDecision::Allow);
+        assert_eq!(
+            evaluate_rule(&unpinned, "search", "sha256:anything"),
+            RuleDecision::Allow
+        );
 
         let pinned = RingRule {
             allowed_actions: vec!["search".into()],
             allowed_config_digests: vec!["sha256:GOOD".into()],
             ..Default::default()
         };
-        assert_eq!(evaluate_rule(&pinned, "search", "sha256:good"), RuleDecision::Allow);
+        assert_eq!(
+            evaluate_rule(&pinned, "search", "sha256:good"),
+            RuleDecision::Allow
+        );
         assert!(matches!(
             evaluate_rule(&pinned, "search", "sha256:DRIFTED"),
             RuleDecision::Deny(_)
@@ -562,7 +591,11 @@ mod tests {
         let rule = RingRule {
             allowed_actions: vec!["pay".into()],
             allowed_config_digests: vec!["sha256:abc".into()],
-            budgets: RingBudgets { usd: Some(100.0), input_tokens: Some(1000), output_tokens: None },
+            budgets: RingBudgets {
+                usd: Some(100.0),
+                input_tokens: Some(1000),
+                output_tokens: None,
+            },
         };
         upsert_ring(&db, "default", "ring:pay", &rule, 1).unwrap();
         let (got, version) = get_ring(&db, "default", "ring:pay").unwrap().unwrap();
@@ -599,7 +632,10 @@ mod tests {
         let shared_agent = ring_pseudonym::shared_secret_agent(&a, &big_t);
         let x_r = ring_pseudonym::agent_per_ring_secret(&a, &shared_agent, "ring:x");
         let agent_point_hex = hex::encode((&x_r * RISTRETTO_BASEPOINT_TABLE).compress().as_bytes());
-        assert_eq!(p_hex, agent_point_hex, "operator-stored point must equal agent's x_R·G");
+        assert_eq!(
+            p_hex, agent_point_hex,
+            "operator-stored point must equal agent's x_R·G"
+        );
 
         // Member list returns a usable ristretto point.
         let points = list_member_points(&db, "default", "ring:x").unwrap();
@@ -621,6 +657,9 @@ mod tests {
         upsert_ring(&db, "default", "ring:b", &RingRule::default(), 1).unwrap();
         let pa = subscribe(&db, "default", &t, &a_hex, "ring:a", 1).unwrap();
         let pb = subscribe(&db, "default", &t, &a_hex, "ring:b", 1).unwrap();
-        assert_ne!(pa, pb, "same agent must have unlinkable points across rings");
+        assert_ne!(
+            pa, pb,
+            "same agent must have unlinkable points across rings"
+        );
     }
 }

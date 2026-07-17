@@ -66,10 +66,7 @@ impl HeAggregator {
     ///
     /// NEEDS_CRYPTO_REVIEW: the initial ciphertext IS fresh randomness, so
     /// nothing about the cohort leaks through the seed value alone.
-    pub fn new<R: rand::RngCore>(
-        pk: PaillierPublicKey,
-        rng: &mut R,
-    ) -> Result<Self, HeError> {
+    pub fn new<R: rand::RngCore>(pk: PaillierPublicKey, rng: &mut R) -> Result<Self, HeError> {
         let zero = pk.encrypt_zero(rng)?;
         Ok(Self {
             pk,
@@ -136,10 +133,7 @@ impl HeAggregator {
 
     /// Decrypt and return the full plaintext BigUint without truncation.
     /// Use this if your aggregate may exceed u64.
-    pub fn finalize_biguint(
-        self,
-        sk: &PaillierPrivateKey,
-    ) -> Result<num_bigint::BigUint, HeError> {
+    pub fn finalize_biguint(self, sk: &PaillierPrivateKey) -> Result<num_bigint::BigUint, HeError> {
         sk.decrypt(&self.sum_ciphertext)
     }
 }
@@ -181,7 +175,9 @@ mod tests {
         let sk = small_keypair();
         let mut rng = StdRng::seed_from_u64(21);
         let mut agg = HeAggregator::new(sk.public.clone(), &mut rng).unwrap();
-        let bad = Ciphertext { c: BigUint::from(0u32) };
+        let bad = Ciphertext {
+            c: BigUint::from(0u32),
+        };
         assert!(matches!(
             agg.add_encrypted(&bad),
             Err(HeError::InvalidCiphertext)
@@ -204,9 +200,15 @@ mod tests {
         let sk = small_keypair();
         let mut rng = StdRng::seed_from_u64(23);
         let mut agg = HeAggregator::new(sk.public.clone(), &mut rng).unwrap();
-        let bad_p = Ciphertext { c: BigUint::from(17u32) };
-        let bad_q = Ciphertext { c: BigUint::from(19u32) };
-        let bad_pq = Ciphertext { c: BigUint::from(17u32 * 19) };
+        let bad_p = Ciphertext {
+            c: BigUint::from(17u32),
+        };
+        let bad_q = Ciphertext {
+            c: BigUint::from(19u32),
+        };
+        let bad_pq = Ciphertext {
+            c: BigUint::from(17u32 * 19),
+        };
         assert!(matches!(
             agg.add_encrypted(&bad_p),
             Err(HeError::InvalidCiphertext)

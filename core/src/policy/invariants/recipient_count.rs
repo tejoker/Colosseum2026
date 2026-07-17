@@ -39,10 +39,7 @@ impl RuntimeCheck for RecipientCountCheck {
         if n > self.max_recipients as u64 {
             Verdict::Deny {
                 check: self.name().to_string(),
-                reason: format!(
-                    "{} recipients exceeds max {}",
-                    n, self.max_recipients
-                ),
+                reason: format!("{} recipients exceeds max {}", n, self.max_recipients),
             }
         } else {
             Verdict::Allow

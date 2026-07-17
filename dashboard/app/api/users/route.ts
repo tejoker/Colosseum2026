@@ -5,7 +5,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const companyId = url.searchParams.get("company_id");
 
-  const r = await fetchCoreJson<CoreUserRecord[]>("users");
+  const r = await fetchCoreJson<CoreUserRecord[]>("users", "", req);
   if (!r.ok) return r.response;
 
   let people = adaptPeople(r.data);

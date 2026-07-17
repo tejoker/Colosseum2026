@@ -171,11 +171,9 @@ fn resolve_ident(name: &str, env: &EvalEnv) -> Result<Value, EvalError> {
 
         // Action fields — bare + dotted spellings both resolve.
         "tool" | "action.tool" => Ok(Value::Str(env.action.tool.clone())),
-        "amount_usd" | "action.amount_usd" => Ok(env
-            .action
-            .amount_usd
-            .map(Value::Num)
-            .unwrap_or(Value::Null)),
+        "amount_usd" | "action.amount_usd" => {
+            Ok(env.action.amount_usd.map(Value::Num).unwrap_or(Value::Null))
+        }
         "data_classification" | "action.data_classification" => Ok(env
             .action
             .data_classification
@@ -668,11 +666,20 @@ mod tests {
     #[test]
     fn resolves_action_fields_bare_and_dotted() {
         with_env(0.0, |env| {
-            assert_eq!(eval_str("tool", env).unwrap(), Value::Str("sepa_payment_initiate".into()));
-            assert_eq!(eval_str("action.tool", env).unwrap(), Value::Str("sepa_payment_initiate".into()));
+            assert_eq!(
+                eval_str("tool", env).unwrap(),
+                Value::Str("sepa_payment_initiate".into())
+            );
+            assert_eq!(
+                eval_str("action.tool", env).unwrap(),
+                Value::Str("sepa_payment_initiate".into())
+            );
             assert_eq!(eval_str("amount_usd", env).unwrap(), Value::Num(100.0));
             assert_eq!(eval_str("delegation_depth", env).unwrap(), Value::Num(2.0));
-            assert_eq!(eval_str("timestamp", env).unwrap(), Value::Num(1_700_000_000.0));
+            assert_eq!(
+                eval_str("timestamp", env).unwrap(),
+                Value::Num(1_700_000_000.0)
+            );
             assert_eq!(
                 eval_str("data_classification", env).unwrap(),
                 Value::Str("financial".into())
@@ -680,7 +687,10 @@ mod tests {
             let sigs = eval_str("signatures", env).unwrap();
             assert_eq!(
                 sigs,
-                Value::List(vec![Value::Str("human_approver".into()), Value::Str("cfo".into())])
+                Value::List(vec![
+                    Value::Str("human_approver".into()),
+                    Value::Str("cfo".into())
+                ])
             );
         });
     }
@@ -752,7 +762,10 @@ mod tests {
     fn arithmetic_type_error() {
         with_env(0.0, |env| {
             let e = parse("'a' + 1").unwrap();
-            assert!(matches!(eval(&e, env).unwrap_err(), EvalError::TypeError(_)));
+            assert!(matches!(
+                eval(&e, env).unwrap_err(),
+                EvalError::TypeError(_)
+            ));
         });
     }
 
@@ -773,7 +786,10 @@ mod tests {
     fn unary_neg_on_non_num_errors() {
         with_env(0.0, |env| {
             let e = parse("-true").unwrap();
-            assert!(matches!(eval(&e, env).unwrap_err(), EvalError::TypeError(_)));
+            assert!(matches!(
+                eval(&e, env).unwrap_err(),
+                EvalError::TypeError(_)
+            ));
         });
     }
 
@@ -797,16 +813,34 @@ mod tests {
         // allowlist actually denies a disallowed currency.
         let binding = mk_binding();
         let mut deny = mk_action();
-        deny.metadata.insert("currency".into(), serde_json::json!("GBP"));
+        deny.metadata
+            .insert("currency".into(), serde_json::json!("GBP"));
         let ctx = EvaluationContext::with_defaults(&deny);
-        let env = EvalEnv { action: &deny, ctx: &ctx, binding: &binding, now_epoch: 1_700_000_500 };
-        assert!(!pred("payment_currency in ('EUR', 'USD')", &env), "GBP must be denied");
+        let env = EvalEnv {
+            action: &deny,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 1_700_000_500,
+        };
+        assert!(
+            !pred("payment_currency in ('EUR', 'USD')", &env),
+            "GBP must be denied"
+        );
 
         let mut ok = mk_action();
-        ok.metadata.insert("currency".into(), serde_json::json!("EUR"));
+        ok.metadata
+            .insert("currency".into(), serde_json::json!("EUR"));
         let ctx2 = EvaluationContext::with_defaults(&ok);
-        let env2 = EvalEnv { action: &ok, ctx: &ctx2, binding: &binding, now_epoch: 1_700_000_500 };
-        assert!(pred("payment_currency in ('EUR', 'USD')", &env2), "EUR must pass");
+        let env2 = EvalEnv {
+            action: &ok,
+            ctx: &ctx2,
+            binding: &binding,
+            now_epoch: 1_700_000_500,
+        };
+        assert!(
+            pred("payment_currency in ('EUR', 'USD')", &env2),
+            "EUR must pass"
+        );
     }
 
     #[test]
@@ -849,7 +883,12 @@ mod tests {
             .insert("target_domain".into(), serde_json::json!("competitor.com"));
         let binding = mk_binding();
         let ctx = EvaluationContext::with_defaults(&action);
-        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        let env = EvalEnv {
+            action: &action,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 0,
+        };
         assert!(!pred("no_external_call_to(domain: 'competitor.com')", &env));
         assert!(pred("no_external_call_to(domain: 'partner.com')", &env));
     }
@@ -858,7 +897,10 @@ mod tests {
     fn transfer_requires_enforces_roles_on_money_moves() {
         // mk_action() has amount_usd=Some and signatures=[human_approver, cfo].
         with_env(0.0, |env| {
-            assert!(pred("transfer_requires(roles: ['human_approver', 'cfo'])", env));
+            assert!(pred(
+                "transfer_requires(roles: ['human_approver', 'cfo'])",
+                env
+            ));
             // Missing 'treasury_officer' signature on a money-moving action.
             assert!(!pred("transfer_requires(roles: ['treasury_officer'])", env));
         });
@@ -871,7 +913,12 @@ mod tests {
         action.signatures.clear();
         let binding = mk_binding();
         let ctx = EvaluationContext::with_defaults(&action);
-        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        let env = EvalEnv {
+            action: &action,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 0,
+        };
         assert!(pred("transfer_requires(roles: ['cfo'])", &env));
     }
 
@@ -882,9 +929,20 @@ mod tests {
         action.signatures = vec!["clinician:alice".into(), "clinician:bob".into()];
         let binding = mk_binding();
         let ctx = EvaluationContext::with_defaults(&action);
-        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
-        assert!(pred("exports_require_signatures(role: 'clinician', threshold: 2)", &env));
-        assert!(!pred("exports_require_signatures(role: 'clinician', threshold: 3)", &env));
+        let env = EvalEnv {
+            action: &action,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 0,
+        };
+        assert!(pred(
+            "exports_require_signatures(role: 'clinician', threshold: 2)",
+            &env
+        ));
+        assert!(!pred(
+            "exports_require_signatures(role: 'clinician', threshold: 3)",
+            &env
+        ));
     }
 
     #[test]
@@ -893,9 +951,17 @@ mod tests {
         action.signatures = vec!["clinician".into(), "clinician".into()];
         let binding = mk_binding();
         let ctx = EvaluationContext::with_defaults(&action);
-        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        let env = EvalEnv {
+            action: &action,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 0,
+        };
         // One distinct signer → cannot meet threshold 2.
-        assert!(!pred("exports_require_signatures(role: 'clinician', threshold: 2)", &env));
+        assert!(!pred(
+            "exports_require_signatures(role: 'clinician', threshold: 2)",
+            &env
+        ));
     }
 
     #[test]
@@ -910,7 +976,12 @@ mod tests {
             .insert("tool_class".into(), serde_json::json!("read_only"));
         let binding = mk_binding();
         let ctx = EvaluationContext::with_defaults(&action);
-        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        let env = EvalEnv {
+            action: &action,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 0,
+        };
         assert!(pred("tool_class(tool) == 'read_only'", &env));
     }
 
@@ -922,7 +993,12 @@ mod tests {
         // sandbox_mode absent → denied.
         {
             let ctx = EvaluationContext::with_defaults(&action);
-            let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+            let env = EvalEnv {
+                action: &action,
+                ctx: &ctx,
+                binding: &binding,
+                now_epoch: 0,
+            };
             assert!(!pred("sandbox_required(tool: 'run_sandboxed')", &env));
         }
         // sandbox_mode=true → allowed.
@@ -930,7 +1006,12 @@ mod tests {
             .metadata
             .insert("sandbox_mode".into(), serde_json::json!(true));
         let ctx = EvaluationContext::with_defaults(&action);
-        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        let env = EvalEnv {
+            action: &action,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 0,
+        };
         assert!(pred("sandbox_required(tool: 'run_sandboxed')", &env));
     }
 
@@ -940,7 +1021,12 @@ mod tests {
         let mut binding = mk_binding();
         binding.max_budget_usd = Some(f64::NAN);
         let ctx = EvaluationContext::with_defaults(&action);
-        let env = EvalEnv { action: &action, ctx: &ctx, binding: &binding, now_epoch: 0 };
+        let env = EvalEnv {
+            action: &action,
+            ctx: &ctx,
+            binding: &binding,
+            now_epoch: 0,
+        };
         // IEEE would make `100 > NaN` == false (silently allow); we error instead.
         let err = eval_str("amount_usd > max_budget_usd", &env).unwrap_err();
         assert!(matches!(err, EvalError::TypeError(_)), "{err:?}");
@@ -950,7 +1036,10 @@ mod tests {
     fn unknown_function_errors() {
         with_env(0.0, |env| {
             let e = parse("totally_made_up_fn()").unwrap();
-            assert!(matches!(eval(&e, env).unwrap_err(), EvalError::UnknownFunction(_)));
+            assert!(matches!(
+                eval(&e, env).unwrap_err(),
+                EvalError::UnknownFunction(_)
+            ));
         });
     }
 
@@ -958,7 +1047,10 @@ mod tests {
     fn arity_mismatch_errors() {
         with_env(0.0, |env| {
             let e = parse("len('a', 'b')").unwrap();
-            assert!(matches!(eval(&e, env).unwrap_err(), EvalError::BadArgs { .. }));
+            assert!(matches!(
+                eval(&e, env).unwrap_err(),
+                EvalError::BadArgs { .. }
+            ));
         });
     }
 
@@ -966,7 +1058,10 @@ mod tests {
     fn eval_predicate_rejects_non_bool() {
         with_env(0.0, |env| {
             let e = parse("1 + 2").unwrap();
-            assert!(matches!(eval_predicate(&e, env).unwrap_err(), EvalError::TypeError(_)));
+            assert!(matches!(
+                eval_predicate(&e, env).unwrap_err(),
+                EvalError::TypeError(_)
+            ));
         });
     }
 

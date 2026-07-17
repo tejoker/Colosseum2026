@@ -220,10 +220,7 @@ fn build_user_data(public_key: &[u8; 32], nonce: &[u8]) -> Vec<u8> {
 /// `core/Cargo.toml`), we emit a recognisable placeholder + log a warning.
 /// Parent-side `verify_nitro_enclave` will reject this with `Malformed` so
 /// no operator can accidentally trust a stub document.
-fn request_attestation_document(
-    _public_key: &[u8; 32],
-    _user_data: &[u8],
-) -> AttestationDocument {
+fn request_attestation_document(_public_key: &[u8; 32], _user_data: &[u8]) -> AttestationDocument {
     log_warn(
         "NSM access not compiled in (aws-nitro-enclaves-nsm-api not a Cargo dep). \
          Running outside a real enclave — emitting a stub document. \

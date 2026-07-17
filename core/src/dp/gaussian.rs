@@ -124,7 +124,10 @@ mod tests {
     fn rejects_epsilon_above_one() {
         // Dwork-Roth eq. 3.8 σ calibration is only valid for ε ≤ 1.
         // F-1 hardening: constructor must reject larger ε.
-        assert!(GaussianMechanism::new(1.0, 1e-5, 1.0).is_ok(), "ε = 1 boundary inclusive");
+        assert!(
+            GaussianMechanism::new(1.0, 1e-5, 1.0).is_ok(),
+            "ε = 1 boundary inclusive"
+        );
         assert!(GaussianMechanism::new(1.0001, 1e-5, 1.0).is_err());
         assert!(GaussianMechanism::new(2.0, 1e-5, 1.0).is_err());
         assert!(GaussianMechanism::new(10.0, 1e-5, 1.0).is_err());
@@ -164,7 +167,13 @@ mod tests {
         let var = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
         let expected = m.sigma().powi(2);
         let rel_err = (var - expected).abs() / expected;
-        assert!(rel_err < 0.05, "var={} expected={} rel_err={}", var, expected, rel_err);
+        assert!(
+            rel_err < 0.05,
+            "var={} expected={} rel_err={}",
+            var,
+            expected,
+            rel_err
+        );
     }
 
     #[test]

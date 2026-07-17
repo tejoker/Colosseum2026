@@ -245,14 +245,15 @@ impl TestSigner {
     fn new() -> Self {
         let rng = SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, &rng).unwrap();
-        let keypair = EcdsaKeyPair::from_pkcs8(
-            &ECDSA_P384_SHA384_FIXED_SIGNING,
-            pkcs8.as_ref(),
-            &rng,
-        )
-        .unwrap();
+        let keypair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+                .unwrap();
         let pub_point = keypair.public_key().as_ref().to_vec();
-        assert_eq!(pub_point.len(), 97, "P-384 uncompressed point must be 97 bytes");
+        assert_eq!(
+            pub_point.len(),
+            97,
+            "P-384 uncompressed point must be 97 bytes"
+        );
         assert_eq!(pub_point[0], 0x04, "must be uncompressed (0x04 prefix)");
         let leaf_der = build_test_x509(&pub_point, "test-nitro-leaf");
         TestSigner {
@@ -278,9 +279,10 @@ fn build_attestation_payload(
     certificate_der: &[u8],
     public_key: &[u8],
 ) -> Vec<u8> {
-    let mut pcrs_entries = Vec::new();
-    pcrs_entries.push((CborValue::Uint(0), CborValue::Bytes(pcr0.to_vec())));
-    pcrs_entries.push((CborValue::Uint(8), CborValue::Bytes(vec![0xbb; 48])));
+    let pcrs_entries = vec![
+        (CborValue::Uint(0), CborValue::Bytes(pcr0.to_vec())),
+        (CborValue::Uint(8), CborValue::Bytes(vec![0xbb; 48])),
+    ];
     let doc = CborValue::Map(vec![
         (
             CborValue::Text("module_id".to_string()),
@@ -290,8 +292,14 @@ fn build_attestation_payload(
             CborValue::Text("digest".to_string()),
             CborValue::Text("SHA384".to_string()),
         ),
-        (CborValue::Text("timestamp".to_string()), CborValue::Uint(timestamp)),
-        (CborValue::Text("pcrs".to_string()), CborValue::Map(pcrs_entries)),
+        (
+            CborValue::Text("timestamp".to_string()),
+            CborValue::Uint(timestamp),
+        ),
+        (
+            CborValue::Text("pcrs".to_string()),
+            CborValue::Map(pcrs_entries),
+        ),
         (
             CborValue::Text("certificate".to_string()),
             CborValue::Bytes(certificate_der.to_vec()),
@@ -414,10 +422,16 @@ fn verify_attestation_accepts_cbor_blob_with_valid_signature() {
     // H-5: chain validation is now required by default. This test exercises the
     // signature-only path, so it explicitly opts out (REQUIRE_ROOT=0) — the
     // unrooted path the audit flagged is now opt-in, not the default.
-    with_nitro_env(&[("SAURON_NITRO_REQUIRE_ROOT", Some("0")), ("SAURON_NITRO_ROOT_PEM", None)], || {
-        verify_attestation(AttestationKind::NitroEnclave, &blob, &ctx)
-            .expect("CBOR Nitro attestation with valid signature should verify");
-    });
+    with_nitro_env(
+        &[
+            ("SAURON_NITRO_REQUIRE_ROOT", Some("0")),
+            ("SAURON_NITRO_ROOT_PEM", None),
+        ],
+        || {
+            verify_attestation(AttestationKind::NitroEnclave, &blob, &ctx)
+                .expect("CBOR Nitro attestation with valid signature should verify");
+        },
+    );
 }
 
 #[test]
@@ -443,12 +457,19 @@ fn verify_attestation_rejects_tampered_payload() {
     };
     // Opt out of the (now default) require-root gate so we reach the signature
     // check and observe BadSignature on the tampered payload.
-    with_nitro_env(&[("SAURON_NITRO_REQUIRE_ROOT", Some("0")), ("SAURON_NITRO_ROOT_PEM", None)], || {
-        match verify_attestation(AttestationKind::NitroEnclave, &tampered, &ctx) {
+    with_nitro_env(
+        &[
+            ("SAURON_NITRO_REQUIRE_ROOT", Some("0")),
+            ("SAURON_NITRO_ROOT_PEM", None),
+        ],
+        || match verify_attestation(AttestationKind::NitroEnclave, &tampered, &ctx) {
             Err(AttestationError::BadSignature) => {}
-            other => panic!("expected BadSignature for tampered payload, got {:?}", other),
-        }
-    });
+            other => panic!(
+                "expected BadSignature for tampered payload, got {:?}",
+                other
+            ),
+        },
+    );
 }
 
 #[test]
@@ -538,4 +559,3 @@ fn der_to_pem(der: &[u8]) -> String {
     out.push_str("-----END CERTIFICATE-----\n");
     out
 }
-
