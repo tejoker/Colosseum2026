@@ -16,12 +16,13 @@ pub fn verify_nitro_pcrs(
     expected: &std::collections::BTreeMap<u8, String>,
 ) -> Result<(), AttestationError> {
     for (idx, exp_hex) in expected {
-        let obs_hex = doc.pcrs.get(idx).ok_or_else(|| {
-            AttestationError::MeasurementMismatch {
+        let obs_hex = doc
+            .pcrs
+            .get(idx)
+            .ok_or_else(|| AttestationError::MeasurementMismatch {
                 expected: exp_hex.clone(),
                 got: format!("(PCR{} not present)", idx),
-            }
-        })?;
+            })?;
         let exp = hex::decode(exp_hex).map_err(|e| {
             AttestationError::Malformed(format!("expected PCR{} not hex: {}", idx, e))
         })?;
@@ -41,7 +42,9 @@ pub fn verify_nitro_pcrs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attestation::nitro::{parse_nitro_dev, NitroAttestationDoc, NitroAttestationEnvelope};
+    use crate::attestation::nitro::{
+        parse_nitro_dev, NitroAttestationDoc, NitroAttestationEnvelope,
+    };
 
     fn nitro_dev_fixture(pcr0_hex: &str, pubkey_b64: &str, module: &str) -> Vec<u8> {
         let mut pcrs = std::collections::BTreeMap::new();

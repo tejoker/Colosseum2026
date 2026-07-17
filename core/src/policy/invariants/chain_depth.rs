@@ -39,10 +39,7 @@ impl RuntimeCheck for ChainDepthCheck {
         if depth > self.max_chain_depth as u64 {
             Verdict::Deny {
                 check: self.name().to_string(),
-                reason: format!(
-                    "chain_depth {depth} exceeds max {}",
-                    self.max_chain_depth
-                ),
+                reason: format!("chain_depth {depth} exceeds max {}", self.max_chain_depth),
             }
         } else {
             Verdict::Allow

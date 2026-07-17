@@ -24,6 +24,9 @@
 //! Run the full 15-scenario battery via:
 //!   cd redteam && node dist/scenarios/run-all-tenant-isolation.js
 
+// Tests assert DB state / status after handler calls, not the Json bodies.
+#![allow(unused_must_use)]
+
 use std::sync::Arc;
 
 use sauron_core::audit::{ensure_audit_reports_schema, get_report};
@@ -71,15 +74,11 @@ fn cross_tenant_smoke_policy_evaluate_spend_audit() {
     store.upsert_tenant("acme_corp", compiled).unwrap();
 
     assert!(
-        store
-            .get_by_id_tenant("globex_inc", &policy_id)
-            .is_none(),
+        store.get_by_id_tenant("globex_inc", &policy_id).is_none(),
         "cross-tenant policy lookup must miss — handler maps to 404"
     );
     assert!(
-        store
-            .get_by_id_tenant("acme_corp", &policy_id)
-            .is_some(),
+        store.get_by_id_tenant("acme_corp", &policy_id).is_some(),
         "own-tenant lookup must hit"
     );
 

@@ -82,7 +82,11 @@ pub enum ParseError {
     /// Lexer failed before parsing began.
     Lex(LexError),
     /// Expected token kind X but found something else.
-    Expected { what: &'static str, found: String, pos: usize },
+    Expected {
+        what: &'static str,
+        found: String,
+        pos: usize,
+    },
     /// Token stream ended mid-expression.
     UnexpectedEof { pos: usize },
     /// Caller wrote `foo(a:b, c)` — kwargs and positional args may mix only in
@@ -108,7 +112,10 @@ impl fmt::Display for ParseError {
                 "positional argument after keyword argument at byte {pos}"
             ),
             ParseError::InRhsNotList { pos } => {
-                write!(f, "right-hand side of `in` must be a list/tuple at byte {pos}")
+                write!(
+                    f,
+                    "right-hand side of `in` must be a list/tuple at byte {pos}"
+                )
             }
         }
     }
@@ -351,7 +358,10 @@ impl Parser {
         let mut seen_kwarg = false;
         loop {
             // Peek ahead for `IDENT ":"` → kwarg; otherwise positional.
-            let (is_kwarg, kw_name) = match (&self.toks[self.idx].token, self.toks.get(self.idx + 1).map(|t| &t.token)) {
+            let (is_kwarg, kw_name) = match (
+                &self.toks[self.idx].token,
+                self.toks.get(self.idx + 1).map(|t| &t.token),
+            ) {
                 (Token::Ident(n), Some(Token::Colon)) => (true, Some(n.clone())),
                 _ => (false, None),
             };
@@ -410,7 +420,10 @@ mod tests {
 
     #[test]
     fn parses_bare_identifier() {
-        assert_eq!(parse("spend_total").unwrap(), Expr::Ident("spend_total".into()));
+        assert_eq!(
+            parse("spend_total").unwrap(),
+            Expr::Ident("spend_total".into())
+        );
     }
 
     #[test]
@@ -445,15 +458,16 @@ mod tests {
             panic!("expected In, got {e:?}")
         };
         assert_eq!(*lhs, Expr::Ident("payment_currency".into()));
-        assert_eq!(*rhs, Expr::List(vec![Expr::Str("EUR".into()), Expr::Str("USD".into())]));
+        assert_eq!(
+            *rhs,
+            Expr::List(vec![Expr::Str("EUR".into()), Expr::Str("USD".into())])
+        );
     }
 
     #[test]
     fn parses_in_with_bracket_list() {
         let e = parse("x in [1, 2, 3]").unwrap();
-        let Expr::In(_, rhs) = e else {
-            panic!()
-        };
+        let Expr::In(_, rhs) = e else { panic!() };
         assert_eq!(
             *rhs,
             Expr::List(vec![Expr::Num(1.0), Expr::Num(2.0), Expr::Num(3.0)])

@@ -84,10 +84,7 @@ pub struct ChecksumInputs {
 #[derive(Debug)]
 pub enum ChecksumError {
     UnknownType(String),
-    MissingField {
-        agent_type: String,
-        field: String,
-    },
+    MissingField { agent_type: String, field: String },
     NotAnObject,
     Encoding(String),
 }
@@ -135,8 +132,8 @@ pub fn compute_checksum(
     }
 
     let canonical = canonicalize_value(inputs);
-    let canonical_str = serde_json::to_string(&canonical)
-        .map_err(|e| ChecksumError::Encoding(e.to_string()))?;
+    let canonical_str =
+        serde_json::to_string(&canonical).map_err(|e| ChecksumError::Encoding(e.to_string()))?;
     let mut h = Sha256::new();
     h.update(kind.as_str().as_bytes());
     h.update(b"|");
@@ -236,7 +233,13 @@ pub fn rotate_inputs(
             "SELECT computed_checksum, inputs_canonical, version
              FROM agent_checksum_inputs WHERE agent_id = ?1",
             params![agent_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .map_err(|_| "agent has no checksum_inputs row (legacy registration)".to_string())?;
 
@@ -255,7 +258,14 @@ pub fn rotate_inputs(
          SET agent_type = ?1, inputs_canonical = ?2, computed_checksum = ?3,
              version = ?4, updated_at = ?5
          WHERE agent_id = ?6",
-        params![new_agent_type, new_canonical, new_checksum, new_version, now, agent_id],
+        params![
+            new_agent_type,
+            new_canonical,
+            new_checksum,
+            new_version,
+            now,
+            agent_id
+        ],
     )
     .map_err(|e| format!("update agent_checksum_inputs: {e}"))?;
 
@@ -269,7 +279,16 @@ pub fn rotate_inputs(
         "INSERT INTO agent_checksum_audit
          (agent_id, from_checksum, to_checksum, from_inputs_hash, to_inputs_hash, reason, actor, ts)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![agent_id, prev_checksum, new_checksum, prev_inputs_sha, new_inputs_sha, reason, actor, now],
+        params![
+            agent_id,
+            prev_checksum,
+            new_checksum,
+            prev_inputs_sha,
+            new_inputs_sha,
+            reason,
+            actor,
+            now
+        ],
     )
     .map_err(|e| format!("insert agent_checksum_audit: {e}"))?;
 
@@ -329,10 +348,7 @@ mod tests {
 
     #[test]
     fn llm_missing_required_field_rejected() {
-        let r = compute_checksum(
-            "llm",
-            &serde_json::json!({ "model_id": "gpt-5" }),
-        );
+        let r = compute_checksum("llm", &serde_json::json!({ "model_id": "gpt-5" }));
         match r {
             Err(ChecksumError::MissingField { field, .. }) => {
                 assert!(field == "system_prompt" || field == "tools");
@@ -400,7 +416,10 @@ mod tests {
         });
         let (_, h1) = compute_checksum("llm", &tools_ab).unwrap();
         let (_, h2) = compute_checksum("llm", &tools_ba).unwrap();
-        assert_ne!(h1, h2, "tool list order is meaningful — same set in different order is a different agent");
+        assert_ne!(
+            h1, h2,
+            "tool list order is meaningful — same set in different order is a different agent"
+        );
     }
 
     #[test]

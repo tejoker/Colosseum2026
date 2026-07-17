@@ -35,8 +35,7 @@ impl ComplianceConfig {
         let mode = if force_off {
             "off".to_string()
         } else {
-            std::env::var("SAURON_COMPLIANCE_JURISDICTION_MODE")
-            .unwrap_or_else(|_| {
+            std::env::var("SAURON_COMPLIANCE_JURISDICTION_MODE").unwrap_or_else(|_| {
                 if is_development_runtime() {
                     "off".to_string()
                 } else {

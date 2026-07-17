@@ -23,6 +23,7 @@ trap cleanup EXIT
 (cd "${ROOT_DIR}" && cargo build --bins >/dev/null)
 
 ENV=development \
+SAURON_ENABLE_DEV_ENDPOINTS=1 \
 SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
 DATABASE_PATH="${DB_PATH}" \
 PORT="${PORT}" \

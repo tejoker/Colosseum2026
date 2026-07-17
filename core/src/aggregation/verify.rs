@@ -6,9 +6,7 @@
 //! StatsSubmission body before delegating to the snarkjs subprocess.
 
 use crate::aggregation::submission::StatsSubmission;
-use crate::zk_verifier::{
-    self, ActionLogProofPayload, VKeyLoader, ZkVerifyError,
-};
+use crate::zk_verifier::{self, ActionLogProofPayload, VKeyLoader, ZkVerifyError};
 
 /// Aggregation-layer error surface.
 #[derive(Debug)]
@@ -185,13 +183,13 @@ mod tests {
             proof_b64: "e30=".into(), // {}
             vk_id: "StatsHonestComputation.dev.vk@v0".into(),
             public_inputs: vec![
-                "1".into(),     // valid
-                "0".into(),     // root (decimal 0 → 0x00..00)
-                "0".into(),     // metric_id
-                "950".into(),   // claimed_value
-                "4".into(),     // n_records
-                "0".into(),     // period_start
-                "60".into(),    // period_end
+                "1".into(),   // valid
+                "0".into(),   // root (decimal 0 → 0x00..00)
+                "0".into(),   // metric_id
+                "950".into(), // claimed_value
+                "4".into(),   // n_records
+                "0".into(),   // period_start
+                "60".into(),  // period_end
             ],
         }
     }

@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { PageShell } from "@/components/layout/PageShell";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -156,12 +157,12 @@ export default function NewCompliancePage() {
               <Button type="submit" disabled={!periodValid || submitting}>
                 {submitting ? "Generating…" : "Generate report"}
               </Button>
-              <a
+              <Link
                 href="/compliance"
                 className="text-mono-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
               >
                 Cancel
-              </a>
+              </Link>
             </div>
           </form>
         </CardBody>

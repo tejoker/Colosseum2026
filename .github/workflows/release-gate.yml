@@ -1,6 +1,9 @@
 name: Release Gate
 
 on:
+  push:
+    branches: [main, pocv1]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -17,6 +20,10 @@ jobs:
         with:
           node-version: 20
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Rust tests
         working-directory: core
         run: cargo test
@@ -25,17 +32,29 @@ jobs:
         working-directory: core
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Rust formatting
+        working-directory: core
+        run: cargo fmt --all -- --check
+
       - name: Rust dependency audit (cargo-audit)
         working-directory: core
         run: |
-          cargo install --locked cargo-audit || true
-          cargo audit --deny warnings || true   # report-only initially; remove `|| true` once clean
+          cargo install --locked cargo-audit
+          cargo audit --deny warnings   # GATES the build: any advisory (incl. unmaintained/unsound) fails CI
 
       - name: Agentic SDK
         working-directory: agentic
         run: |
           npm ci
           npm test
+          npm run test:enforcement
+          npm run test:stats
+
+      - name: Python SDK
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e clients/python pytest
+          python -m pytest clients/python/tests -q
 
       - name: ZKP circuit audit
         working-directory: zkp
@@ -43,51 +62,70 @@ jobs:
           npm ci
           npm test
 
-      - name: Revocation contracts
-        working-directory: contracts/revocation
-        env:
-          HARDHAT_DISABLE_TELEMETRY_PROMPT: "1"
-          HARDHAT_DISABLE_TELEMETRY_PROMPTS: "1"
+      - name: ZKP SDK
+        working-directory: zkp/sdk
         run: |
           npm ci
+          npm run build
           npm test
 
       - name: Dashboard
         working-directory: dashboard
         run: |
           npm ci
+          npm test -- --run
           npm run lint
           npm run build
 
       - name: Core dev leash smoke
         run: bash core/tests/smoke_dev_leash_demo.sh
 
-      # Empirical 16-attack suite — boots the core in dev mode, runs the
-      # adversarial harness, fails the build on any pass→fail regression.
+      # Empirical 16-attack suite — boots the core, runs the adversarial harness,
+      # fails the build on any pass→fail regression. The suite self-provisions
+      # (registers its own client/agent), so no seed step is needed.
       - name: Empirical attack suite (live)
         working-directory: redteam
         env:
           SAURON_REQUIRE_CALL_SIG: "1"
+          SAURON_CORE_URL: "http://127.0.0.1:3001"
+          # Suite requires an explicit admin key; the server below is booted with
+          # the same one so they match.
+          SAURON_ADMIN_KEY: "ci_empirical_admin_key_0123456789abcdef"
         run: |
-          # Boot core in background
-          (cd ../core && cargo run --release --bin sauron-core) &
+          # Never pass on a stale artifact from a previous run / crash.
+          rm -f empirical-results.json
+          # Boot core: fresh DB, call-sig enforced. Raise the GLOBAL (coarse,
+          # per-IP) rate limiter so the harness's setup burst isn't throttled —
+          # the suite exercises the specific PER-ENDPOINT risk limits via its own
+          # env (A14/A15), which are unaffected by this.
+          ( cd ../core && \
+            ENV=development \
+            SAURON_ENABLE_DEV_ENDPOINTS=1 \
+            SAURON_ADMIN_KEY="$SAURON_ADMIN_KEY" \
+            SAURON_REQUIRE_CALL_SIG=1 \
+            SAURON_RISK_AGENT_REGISTER_PER_WINDOW=60 \
+            SAURON_GLOBAL_RATE_LIMIT_RPS=100000 \
+            SAURON_GLOBAL_RATE_LIMIT_BURST=100000 \
+            DATABASE_PATH="${RUNNER_TEMP:-/tmp}/empirical.db" \
+            PORT=3001 \
+            cargo run --release --bin sauron-core ) &
           CORE_PID=$!
-          # Wait for /health
-          for i in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:3001/health >/dev/null; then break; fi
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:3001/health >/dev/null 2>&1 && break
             sleep 1
           done
-          curl -sf http://127.0.0.1:3001/health || (echo "core never came up" && kill $CORE_PID && exit 1)
-          # Seed users + clients
-          bash ../core/seed.sh || true
-          # Run empirical suite (must stay 16/16)
+          curl -sf http://127.0.0.1:3001/health >/dev/null || { echo "core never came up"; kill "$CORE_PID"; exit 1; }
           npm ci
           npx tsx src/scenarios/empirical-suite.ts
+          kill "$CORE_PID" || true
+          # Freshness guard: a crashed run leaves no file — it MUST NOT pass.
+          test -f empirical-results.json || { echo "empirical-results.json missing — suite did not complete"; exit 1; }
           PASS_COUNT=$(jq '.passed' empirical-results.json)
           TOTAL=$(jq '.total' empirical-results.json)
-          kill $CORE_PID || true
-          if [ "$PASS_COUNT" != "$TOTAL" ]; then
+          DYNAMIC=$(jq '[.results[] | select(.dynamic == true)] | length')
+          if [ "$PASS_COUNT" != "$TOTAL" ] || [ "$TOTAL" -lt 16 ] || [ "$DYNAMIC" -lt 16 ]; then
             echo "Empirical suite regression: $PASS_COUNT / $TOTAL"
+            echo "Dynamic attack count: $DYNAMIC / 16"
             exit 1
           fi
           echo "Empirical suite OK: $PASS_COUNT / $TOTAL"

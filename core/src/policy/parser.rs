@@ -31,7 +31,7 @@ pub fn parse(input: &str) -> Result<Policy, PolicyParseError> {
 /// Parse a YAML policy document.
 pub fn parse_yaml(input: &str) -> Result<Policy, PolicyParseError> {
     let policy: Policy =
-        serde_yml::from_str(input).map_err(|e| PolicyParseError::InvalidYaml(e.to_string()))?;
+        serde_yaml_ng::from_str(input).map_err(|e| PolicyParseError::InvalidYaml(e.to_string()))?;
     validate(&policy)?;
     Ok(policy)
 }
@@ -194,7 +194,8 @@ mod tests {
         include_str!("../../../schemas/fixtures/policy_banking_payment_agent.yaml");
     const FX_HEALTHCARE: &str =
         include_str!("../../../schemas/fixtures/policy_healthcare_records.yaml");
-    const FX_DEVTOOLS: &str = include_str!("../../../schemas/fixtures/policy_devtools_codegen.yaml");
+    const FX_DEVTOOLS: &str =
+        include_str!("../../../schemas/fixtures/policy_devtools_codegen.yaml");
     const FX_RESEARCH: &str =
         include_str!("../../../schemas/fixtures/policy_research_assistant.yaml");
     const FX_SUPPORT: &str =
@@ -214,7 +215,7 @@ mod tests {
         assert_eq!(p.binding.max_budget_usd, Some(5000.0));
         let tw = p.binding.time_window.as_ref().expect("time window set");
         assert_eq!(tw.timezone, "Europe/Paris");
-        assert!(p.binding.allowed_tools.as_ref().unwrap().len() >= 1);
+        assert!(!p.binding.allowed_tools.as_ref().unwrap().is_empty());
     }
 
     #[test]
@@ -405,7 +406,8 @@ binding:
 
     #[test]
     fn json_parser_works() {
-        let json = r#"{ "version": "1", "agent": "json_agent", "invariants": ["spend_total <= 100"] }"#;
+        let json =
+            r#"{ "version": "1", "agent": "json_agent", "invariants": ["spend_total <= 100"] }"#;
         let p = parse(json).expect("json parses");
         assert_eq!(p.agent, "json_agent");
     }
@@ -413,7 +415,7 @@ binding:
     #[test]
     fn round_trip_preserves_ast() {
         let p1 = parse(FX_BANKING).expect("parse 1");
-        let serialised = serde_yml::to_string(&p1).expect("serialise yaml");
+        let serialised = serde_yaml_ng::to_string(&p1).expect("serialise yaml");
         let p2 = parse(&serialised).expect("parse 2");
         assert_eq!(p1, p2, "round trip must preserve AST");
 

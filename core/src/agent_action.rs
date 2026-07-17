@@ -528,10 +528,16 @@ pub fn validate_anon_action(
         return Err((StatusCode::BAD_REQUEST, "ring_id is required".into()));
     }
     if env.nonce.trim().len() < 16 || env.nonce.len() > 128 {
-        return Err((StatusCode::BAD_REQUEST, "nonce must be 16..128 chars".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "nonce must be 16..128 chars".into(),
+        ));
     }
     if env.expires_at < now {
-        return Err((StatusCode::UNAUTHORIZED, "anon action envelope expired".into()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "anon action envelope expired".into(),
+        ));
     }
 
     let canonical = canonical_anon_envelope_bytes(env);
@@ -591,7 +597,10 @@ pub fn validate_anon_action(
     )
     .map_err(|e| {
         if e.to_string().contains("UNIQUE") {
-            (StatusCode::UNAUTHORIZED, "anon action nonce replay".to_string())
+            (
+                StatusCode::UNAUTHORIZED,
+                "anon action nonce replay".to_string(),
+            )
         } else {
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         }
@@ -922,7 +931,12 @@ mod tests {
         crate::db::init_schema(&conn);
         conn
     }
-    fn anon_env(ring_id: &str, action: &str, config_digest: &str, nonce: &str) -> AnonActionEnvelope {
+    fn anon_env(
+        ring_id: &str,
+        action: &str,
+        config_digest: &str,
+        nonce: &str,
+    ) -> AnonActionEnvelope {
         AnonActionEnvelope {
             tenant_id: "default".into(),
             ring_id: ring_id.into(),
@@ -938,7 +952,12 @@ mod tests {
     }
     /// Sign an anon envelope as `a` under its ring, using the CURRENT member set
     /// (exactly as the verifier loads it).
-    fn sign_anon(db: &Connection, a: &Scalar, t: &Scalar, env: &AnonActionEnvelope) -> AnonActionProof {
+    fn sign_anon(
+        db: &Connection,
+        a: &Scalar,
+        t: &Scalar,
+        env: &AnonActionEnvelope,
+    ) -> AnonActionProof {
         let big_t = t * RISTRETTO_BASEPOINT_TABLE;
         let shared = crate::ring_pseudonym::shared_secret_agent(a, &big_t);
         let signer_id = crate::ring_pseudonym::agent_ring_identity(a, &shared, &env.ring_id);
@@ -947,8 +966,16 @@ mod tests {
             .iter()
             .position(|p| *p == signer_id.public)
             .expect("signer must be a ring member");
-        let sig = ring::sign(&canonical_anon_envelope_bytes(env), &members, &signer_id, idx);
-        AnonActionProof { envelope: env.clone(), ring_signature: sig }
+        let sig = ring::sign(
+            &canonical_anon_envelope_bytes(env),
+            &members,
+            &signer_id,
+            idx,
+        );
+        AnonActionProof {
+            envelope: env.clone(),
+            ring_signature: sig,
+        }
     }
     /// Build a ring with `allowed`/`digests` and subscribe agent `a` + a decoy.
     fn setup_ring(db: &Connection, t: &Scalar, a: &Scalar, allowed: &[&str], digests: &[&str]) {
@@ -959,7 +986,15 @@ mod tests {
         };
         crate::rings::upsert_ring(db, "default", "r", &rule, 1).unwrap();
         crate::rings::subscribe(db, "default", t, &anon_pub_hex(a), "r", 1).unwrap();
-        crate::rings::subscribe(db, "default", t, &anon_pub_hex(&anon_scalar(b"decoy")), "r", 1).unwrap();
+        crate::rings::subscribe(
+            db,
+            "default",
+            t,
+            &anon_pub_hex(&anon_scalar(b"decoy")),
+            "r",
+            1,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -969,7 +1004,8 @@ mod tests {
         setup_ring(&db, &t, &a, &["search"], &[]);
         let env = anon_env("r", "search", "", "nonce-abcdef123456");
         let proof = sign_anon(&db, &a, &t, &env);
-        let r = validate_anon_action(&db, b"secret", &proof, 1000).expect("genuine member accepted");
+        let r =
+            validate_anon_action(&db, b"secret", &proof, 1000).expect("genuine member accepted");
         assert_eq!(r.agent_id, "", "anon receipt must carry NO agent identity");
         assert!(r.policy_version.starts_with("ring:r:v"));
         assert!(!r.ring_key_image_hex.is_empty());
@@ -1031,7 +1067,10 @@ mod tests {
         let env = anon_env("ghost", "search", "", "nonce-ghost-0000001");
         let id = crate::identity::Identity::random();
         let sig = ring::sign(&canonical_anon_envelope_bytes(&env), &[id.public], &id, 0);
-        let proof = AnonActionProof { envelope: env, ring_signature: sig };
+        let proof = AnonActionProof {
+            envelope: env,
+            ring_signature: sig,
+        };
         let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
@@ -1051,13 +1090,22 @@ mod tests {
         };
         crate::rings::upsert_ring(&db, "default", "r", &rule, 1).unwrap();
         crate::rings::subscribe(&db, "default", &t, &anon_pub_hex(&a), "r", 1).unwrap();
-        crate::rings::subscribe(&db, "default", &t, &anon_pub_hex(&anon_scalar(b"decoy")), "r", 1).unwrap();
+        crate::rings::subscribe(
+            &db,
+            "default",
+            &t,
+            &anon_pub_hex(&anon_scalar(b"decoy")),
+            "r",
+            1,
+        )
+        .unwrap();
 
         // Pre-load the agent's pseudonym over the input-token cap.
         let big_t = &t * RISTRETTO_BASEPOINT_TABLE;
         let shared = crate::ring_pseudonym::shared_secret_agent(&a, &big_t);
         let x_r = crate::ring_pseudonym::agent_per_ring_secret(&a, &shared, "r");
-        let p_r = crate::ring_pseudonym::per_ring_public(&(&a * RISTRETTO_BASEPOINT_TABLE), &shared, "r");
+        let p_r =
+            crate::ring_pseudonym::per_ring_public(&(&a * RISTRETTO_BASEPOINT_TABLE), &shared, "r");
         let ki = hex::encode(
             crate::ring_pseudonym::per_ring_key_image(&x_r, &p_r)
                 .compress()

@@ -39,7 +39,10 @@ impl LaplaceMechanism {
         if sensitivity < 0.0 {
             return Err(DpError::InvalidSensitivity(sensitivity));
         }
-        Ok(Self { epsilon, sensitivity })
+        Ok(Self {
+            epsilon,
+            sensitivity,
+        })
     }
 
     /// Scale parameter `b = sensitivity / ε`.
@@ -120,7 +123,13 @@ mod tests {
         let var = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
         let expected = 2.0 * m.scale().powi(2);
         let rel_err = (var - expected).abs() / expected;
-        assert!(rel_err < 0.05, "var={} expected={} rel_err={}", var, expected, rel_err);
+        assert!(
+            rel_err < 0.05,
+            "var={} expected={} rel_err={}",
+            var,
+            expected,
+            rel_err
+        );
     }
 
     #[test]

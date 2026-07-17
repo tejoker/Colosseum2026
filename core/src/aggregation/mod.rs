@@ -34,8 +34,8 @@ pub mod verify;
 
 pub use cohorts::{CohortDefinition, CohortError, CohortStore, DEFAULT_CYCLE_SECONDS};
 pub use publish::{
-    publish_cohort, publish_cohort_with_ledger, PrivacyNotice, PublishError,
-    PublishedCohort, PublishedMetric, QUARTILE_SENSITIVITY,
+    publish_cohort, publish_cohort_with_ledger, PrivacyNotice, PublishError, PublishedCohort,
+    PublishedMetric, QUARTILE_SENSITIVITY,
 };
 pub use store::{
     anchor_submission, get_one, list_cohort, list_for_cohort, synthetic_action_hash,
@@ -45,6 +45,4 @@ pub use submission::{CohortRow, StatsSubmission, StatsSubmitResponse};
 pub use verify::{verify_stats_submission, AggError, PROVABLE_METRICS};
 
 pub use he_aggregator::HeAggregator;
-pub use he_store::{
-    get_he_aggregation, upsert_he_aggregation, HeAggregationRow, HeStoreError,
-};
+pub use he_store::{get_he_aggregation, upsert_he_aggregation, HeAggregationRow, HeStoreError};

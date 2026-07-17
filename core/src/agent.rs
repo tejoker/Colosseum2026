@@ -169,6 +169,11 @@ pub fn verify_ajwt(jwt_secret: &[u8], token: &str) -> Option<serde_json::Value> 
     if header.get("alg")?.as_str()? != "EdDSA" {
         return None;
     }
+    // Bind the token TYPE so an EdDSA JWT of a different kind (signed by a
+    // colliding key) cannot be replayed as an A-JWT.
+    if header.get("typ").and_then(|v| v.as_str()) != Some("ajwt+jwt") {
+        return None;
+    }
 
     let payload_bytes = b64url_decode(parts[1])?;
     let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
@@ -176,6 +181,16 @@ pub fn verify_ajwt(jwt_secret: &[u8], token: &str) -> Option<serde_json::Value> 
     let agent_id = payload.get("agent_id")?.as_str()?;
     let human_key_image = payload.get("sub")?.as_str()?;
     let agent_checksum = payload.get("agent_checksum")?.as_str()?;
+
+    // `kid` must name the same agent whose key derives the signature — binds the
+    // header to the claim set.
+    if header.get("kid").and_then(|v| v.as_str()) != Some(agent_id) {
+        return None;
+    }
+    // Issuer binding — reject tokens minted by any other authority.
+    if payload.get("iss").and_then(|v| v.as_str()) != Some("did:sauron:idp") {
+        return None;
+    }
 
     let signing_key =
         derive_agent_signing_key(jwt_secret, agent_id, human_key_image, agent_checksum);
@@ -188,10 +203,28 @@ pub fn verify_ajwt(jwt_secret: &[u8], token: &str) -> Option<serde_json::Value> 
         .verify(signing_input.as_bytes(), &signature)
         .ok()?;
 
-    // Check expiry
+    // Temporal validity: expiry, not-before, no future-dating, and a hard
+    // maximum lifetime so a forged token cannot grant an unbounded window
+    // (the minter clamps ttl to <= 24h; reject anything beyond it).
+    const MAX_AJWT_LIFETIME_SECS: i64 = 86_400;
+    const CLOCK_SKEW_SECS: i64 = 300;
+    let now = now_secs();
     let exp = payload.get("exp")?.as_i64()?;
-    if now_secs() > exp {
+    if now > exp {
         return None;
+    }
+    if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_i64()) {
+        if now + CLOCK_SKEW_SECS < nbf {
+            return None;
+        }
+    }
+    if let Some(iat) = payload.get("iat").and_then(|v| v.as_i64()) {
+        if iat > now + CLOCK_SKEW_SECS {
+            return None; // future-dated
+        }
+        if exp.saturating_sub(iat) > MAX_AJWT_LIFETIME_SECS {
+            return None; // lifetime exceeds the policy ceiling
+        }
     }
 
     Some(payload)
@@ -383,10 +416,7 @@ pub async fn register_agent(
     headers: HeaderMap,
     Json(mut payload): Json<RegisterAgentRequest>,
 ) -> Result<Json<RegisterAgentResponse>, (StatusCode, String)> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     // ── Server-side checksum (Gap 4 fix) ──────────────────────────────────
     //
     // If the caller supplies typed `agent_type` + `checksum_inputs`, we
@@ -440,16 +470,15 @@ pub async fn register_agent(
         }
     }
 
-    let computed_checksum_pair: Option<(String, String, String)> = if !payload.agent_type.is_empty() {
-        let inputs = payload
-            .checksum_inputs
-            .as_ref()
-            .ok_or((
-                StatusCode::BAD_REQUEST,
-                "checksum_inputs required when agent_type is set".into(),
-            ))?;
-        let (canonical, computed) = crate::agent_checksum::compute_checksum(&payload.agent_type, inputs)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let computed_checksum_pair: Option<(String, String, String)> = if !payload.agent_type.is_empty()
+    {
+        let inputs = payload.checksum_inputs.as_ref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "checksum_inputs required when agent_type is set".into(),
+        ))?;
+        let (canonical, computed) =
+            crate::agent_checksum::compute_checksum(&payload.agent_type, inputs)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
         if !payload.agent_checksum.is_empty() && payload.agent_checksum != computed {
             return Err((
@@ -511,10 +540,12 @@ pub async fn register_agent(
     //    operator advertises this kind. The server stores them verbatim;
     //    verification is M2.
     let kind_parsed = crate::attestation::AttestationKind::parse(&payload.attestation_kind);
-    if matches!(kind_parsed, crate::attestation::AttestationKind::ServerDerived) {
-        crate::attestation::check_server_derived_allowed().map_err(|e| {
-            (StatusCode::FORBIDDEN, e.to_string())
-        })?;
+    if matches!(
+        kind_parsed,
+        crate::attestation::AttestationKind::ServerDerived
+    ) {
+        crate::attestation::check_server_derived_allowed()
+            .map_err(|e| (StatusCode::FORBIDDEN, e.to_string()))?;
     }
     if matches!(kind_parsed, crate::attestation::AttestationKind::Tpm2Quote) {
         let missing: Vec<&'static str> = [
@@ -637,7 +668,12 @@ pub async fn register_agent(
         attest_trusted_pubkey,
         attest_expected_measurement,
     )
-    .map_err(|e| (StatusCode::BAD_REQUEST, format!("attestation rejected: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("attestation rejected: {e}"),
+        )
+    })?;
 
     if payload.pop_jkt.trim().is_empty() || payload.pop_public_key_b64u.trim().is_empty() {
         return Err((
@@ -732,18 +768,13 @@ pub async fn register_agent(
         }
     }
 
-    // Validate human exists in DB
+    // Validate human exists in DB (dual-backend repo)
     {
-        let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        let exists: bool = db
-            .query_row(
-                "SELECT COUNT(*) FROM users WHERE key_image_hex = ?1",
-                params![human_key_image],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            > 0;
+        let repo = state.read().unwrap().repo.clone();
+        let exists = repo
+            .user_exists(&human_key_image)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if !exists {
             return Err((
                 StatusCode::NOT_FOUND,
@@ -811,11 +842,15 @@ pub async fn register_agent(
     let now = now_secs();
     let expires_at = now + ttl;
 
-    // Generate a deterministic-ish agent_id from checksum + timestamp
+    // Agent id from checksum + human + timestamp + 32 bytes of randomness. The
+    // random component is REQUIRED for uniqueness: without it, two identical
+    // registrations in the same second derived the same id and the persisting
+    // `INSERT OR REPLACE` silently overwrote the first agent's state.
     let mut h = Sha256::new();
     h.update(payload.agent_checksum.as_bytes());
     h.update(human_key_image.as_bytes());
     h.update(now.to_le_bytes());
+    h.update(ajwt_support::random_hex_32().as_bytes());
     let agent_id = format!("agt_{}", &hex::encode(h.finalize())[..24]);
 
     let delegation_chain: Option<serde_json::Value> =
@@ -879,7 +914,10 @@ pub async fn register_agent(
             .as_deref()
             .filter(|s| !s.is_empty());
         db.execute(
-            "INSERT OR REPLACE INTO agents
+            // Plain INSERT (not OR REPLACE): agent_id is unique per registration,
+            // so a conflict is a real error to surface, never a silent overwrite
+            // of an existing agent's state.
+            "INSERT INTO agents
              (agent_id, human_key_image, agent_checksum, intent_json, assurance_level, public_key_hex, ring_key_image_hex, issued_at, expires_at, revoked, parent_agent_id, delegation_depth, pop_jkt, pop_public_key_b64u, attestation_blob, attestation_kind, attestation_pubkey_b64u, attestation_pcr_set, attestation_ek_cert_chain_pem, tenant_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             params![
@@ -912,8 +950,15 @@ pub async fn register_agent(
         // hash_only mode the raw system prompt / tools never hit the DB.
         if let Some((kind, canonical, _)) = computed_checksum_pair.as_ref() {
             let stored = crate::agent_checksum::storage_payload(canonical, &payload.agent_checksum);
-            crate::agent_checksum::persist_inputs(&db, &agent_id, kind, &stored, &payload.agent_checksum, now)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            crate::agent_checksum::persist_inputs(
+                &db,
+                &agent_id,
+                kind,
+                &stored,
+                &payload.agent_checksum,
+                now,
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         }
     }
 
@@ -958,10 +1003,7 @@ pub async fn issue_agent_token(
     if payload.agent_id.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
     }
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let session_human = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1057,10 +1099,7 @@ pub async fn update_agent_checksum(
     headers: HeaderMap,
     Json(payload): Json<ChecksumUpdateRequest>,
 ) -> Result<Json<ChecksumUpdateResponse>, (StatusCode, String)> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let actor_human_ki = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1143,10 +1182,7 @@ pub async fn get_agent(
     tenant: Option<Extension<TenantId>>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentRecord>, StatusCode> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     db.query_row(
@@ -1174,10 +1210,7 @@ pub async fn revoke_agent(
     headers: HeaderMap,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let human_ki = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1232,10 +1265,7 @@ pub async fn verify_agent_token(
     tenant: Option<Extension<TenantId>>,
     Json(payload): Json<VerifyAjwtRequest>,
 ) -> Json<VerifyAjwtResponse> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
 
     let claims = match verify_ajwt(&jwt_secret, &payload.ajwt) {
@@ -1422,10 +1452,7 @@ pub async fn list_agents(
     headers: HeaderMap,
     Path(human_ki): Path<String>,
 ) -> Result<Json<Vec<AgentRecord>>, (StatusCode, String)> {
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let session_human = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1486,10 +1513,7 @@ pub async fn agent_pop_challenge(
     if payload.agent_id.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
     }
-    let tenant_id = tenant
-        .map(|Extension(t)| t)
-        .unwrap_or_default()
-        .0;
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let human = session_key_image(&headers, &jwt_secret).ok_or((
         StatusCode::UNAUTHORIZED,
@@ -1640,17 +1664,21 @@ async fn try_verify_call_sig(
         .unwrap_or_default()
         .0;
 
-    // Pull both the PoP key and the registered checksum in one shot.
+    // Pull both the PoP key and the registered checksum in one shot. Also
+    // enforce expiry here: an expired agent must not be able to sign calls
+    // (revocation was already checked; expiration was not — an expired lease is
+    // no longer a valid delegation).
+    let now = now_secs();
     let (pop_pk_b64u, registered_checksum): (String, String) = {
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT IFNULL(pop_public_key_b64u, ''), agent_checksum
-             FROM agents WHERE agent_id = ?1 AND revoked = 0 AND tenant_id = ?2",
-            params![agent_id, tenant_id],
+             FROM agents WHERE agent_id = ?1 AND revoked = 0 AND tenant_id = ?2 AND expires_at > ?3",
+            params![agent_id, tenant_id, now],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "unknown or revoked agent".into()))?
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "unknown, revoked, or expired agent".into()))?
     };
     if pop_pk_b64u.is_empty() {
         return Err((
@@ -1679,7 +1707,12 @@ async fn try_verify_call_sig(
             "x-sauron-agent-config-digest header required (Gap 4 enforcement)".into(),
         ))?;
     use subtle::ConstantTimeEq;
-    if claimed_digest.as_bytes().ct_eq(registered_checksum.as_bytes()).unwrap_u8() == 0 {
+    if claimed_digest
+        .as_bytes()
+        .ct_eq(registered_checksum.as_bytes())
+        .unwrap_u8()
+        == 0
+    {
         return Err((
             StatusCode::UNAUTHORIZED,
             "agent runtime config digest does not match registered checksum (config drift; call /agent/<id>/checksum/update to rotate)".into(),
@@ -1695,20 +1728,36 @@ async fn try_verify_call_sig(
         nonce
     );
 
-    let pk_bytes = URL_SAFE_NO_PAD
-        .decode(pop_pk_b64u.trim())
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "agent pop key invalid base64url".into()))?;
-    let pk_arr: [u8; 32] = pk_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "agent pop key wrong length".into()))?;
-    let vk = VerifyingKey::from_bytes(&pk_arr)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "agent pop key not a valid Ed25519 point".into()))?;
-    let sig_bytes = URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "x-sauron-call-sig invalid base64url".into()))?;
-    let sig = Signature::from_slice(&sig_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "x-sauron-call-sig wrong size".into()))?;
+    let pk_bytes = URL_SAFE_NO_PAD.decode(pop_pk_b64u.trim()).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "agent pop key invalid base64url".into(),
+        )
+    })?;
+    let pk_arr: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "agent pop key wrong length".into(),
+        )
+    })?;
+    let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "agent pop key not a valid Ed25519 point".into(),
+        )
+    })?;
+    let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "x-sauron-call-sig invalid base64url".into(),
+        )
+    })?;
+    let sig = Signature::from_slice(&sig_bytes).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "x-sauron-call-sig wrong size".into(),
+        )
+    })?;
     vk.verify(signing_payload.as_bytes(), &sig).map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
@@ -1726,9 +1775,7 @@ async fn try_verify_call_sig(
         .await
         .map_err(|e| match e {
             crate::repository::RepoError::Replay(s) => (StatusCode::CONFLICT, s),
-            crate::repository::RepoError::Backend(s) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, s)
-            }
+            crate::repository::RepoError::Backend(s) => (StatusCode::INTERNAL_SERVER_ERROR, s),
         })?;
 
     Ok(VerifiedCallSig { agent_id })
@@ -1803,11 +1850,17 @@ pub async fn require_call_signature(
     let (parts, body) = req.into_parts();
     let body_bytes = axum::body::to_bytes(body, CALL_SIG_BODY_LIMIT)
         .await
-        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "request body too large".into()))?;
+        .map_err(|_| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large".into(),
+            )
+        })?;
 
     match try_verify_call_sig(&state, &parts, &body_bytes).await {
         Ok(verified) => {
-            let mut req = axum::extract::Request::from_parts(parts, axum::body::Body::from(body_bytes));
+            let mut req =
+                axum::extract::Request::from_parts(parts, axum::body::Body::from(body_bytes));
             req.extensions_mut().insert(verified);
             Ok(next.run(req).await)
         }
@@ -1825,7 +1878,8 @@ pub async fn require_call_signature(
                     %msg,
                     "call signature verification skipped (advisory mode)"
                 );
-                let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(body_bytes));
+                let req =
+                    axum::extract::Request::from_parts(parts, axum::body::Body::from(body_bytes));
                 Ok(next.run(req).await)
             }
         }

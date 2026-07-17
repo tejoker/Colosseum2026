@@ -113,86 +113,146 @@ pub fn lex(input: &str) -> Result<Vec<TokenWithPos>, LexError> {
         let start = i;
         match c {
             '(' => {
-                out.push(TokenWithPos { token: Token::LParen, pos: start });
+                out.push(TokenWithPos {
+                    token: Token::LParen,
+                    pos: start,
+                });
                 i += 1;
             }
             ')' => {
-                out.push(TokenWithPos { token: Token::RParen, pos: start });
+                out.push(TokenWithPos {
+                    token: Token::RParen,
+                    pos: start,
+                });
                 i += 1;
             }
             '[' => {
-                out.push(TokenWithPos { token: Token::LBracket, pos: start });
+                out.push(TokenWithPos {
+                    token: Token::LBracket,
+                    pos: start,
+                });
                 i += 1;
             }
             ']' => {
-                out.push(TokenWithPos { token: Token::RBracket, pos: start });
+                out.push(TokenWithPos {
+                    token: Token::RBracket,
+                    pos: start,
+                });
                 i += 1;
             }
             ',' => {
-                out.push(TokenWithPos { token: Token::Comma, pos: start });
+                out.push(TokenWithPos {
+                    token: Token::Comma,
+                    pos: start,
+                });
                 i += 1;
             }
             ':' => {
-                out.push(TokenWithPos { token: Token::Colon, pos: start });
+                out.push(TokenWithPos {
+                    token: Token::Colon,
+                    pos: start,
+                });
                 i += 1;
             }
             '+' => {
-                out.push(TokenWithPos { token: Token::Op(BinOp::Add), pos: start });
+                out.push(TokenWithPos {
+                    token: Token::Op(BinOp::Add),
+                    pos: start,
+                });
                 i += 1;
             }
             '-' => {
-                out.push(TokenWithPos { token: Token::Op(BinOp::Sub), pos: start });
+                out.push(TokenWithPos {
+                    token: Token::Op(BinOp::Sub),
+                    pos: start,
+                });
                 i += 1;
             }
             '=' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push(TokenWithPos { token: Token::Op(BinOp::Eq), pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Op(BinOp::Eq),
+                        pos: start,
+                    });
                     i += 2;
                 } else {
-                    return Err(LexError::UnexpectedChar { ch: '=', pos: start });
+                    return Err(LexError::UnexpectedChar {
+                        ch: '=',
+                        pos: start,
+                    });
                 }
             }
             '!' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push(TokenWithPos { token: Token::Op(BinOp::Neq), pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Op(BinOp::Neq),
+                        pos: start,
+                    });
                     i += 2;
                 } else {
-                    out.push(TokenWithPos { token: Token::Not, pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Not,
+                        pos: start,
+                    });
                     i += 1;
                 }
             }
             '<' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push(TokenWithPos { token: Token::Op(BinOp::Lte), pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Op(BinOp::Lte),
+                        pos: start,
+                    });
                     i += 2;
                 } else {
-                    out.push(TokenWithPos { token: Token::Op(BinOp::Lt), pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Op(BinOp::Lt),
+                        pos: start,
+                    });
                     i += 1;
                 }
             }
             '>' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push(TokenWithPos { token: Token::Op(BinOp::Gte), pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Op(BinOp::Gte),
+                        pos: start,
+                    });
                     i += 2;
                 } else {
-                    out.push(TokenWithPos { token: Token::Op(BinOp::Gt), pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Op(BinOp::Gt),
+                        pos: start,
+                    });
                     i += 1;
                 }
             }
             '&' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
-                    out.push(TokenWithPos { token: Token::And, pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::And,
+                        pos: start,
+                    });
                     i += 2;
                 } else {
-                    return Err(LexError::UnexpectedChar { ch: '&', pos: start });
+                    return Err(LexError::UnexpectedChar {
+                        ch: '&',
+                        pos: start,
+                    });
                 }
             }
             '|' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
-                    out.push(TokenWithPos { token: Token::Or, pos: start });
+                    out.push(TokenWithPos {
+                        token: Token::Or,
+                        pos: start,
+                    });
                     i += 2;
                 } else {
-                    return Err(LexError::UnexpectedChar { ch: '|', pos: start });
+                    return Err(LexError::UnexpectedChar {
+                        ch: '|',
+                        pos: start,
+                    });
                 }
             }
             '\'' => {
@@ -209,14 +269,15 @@ pub fn lex(input: &str) -> Result<Vec<TokenWithPos>, LexError> {
                 let s = std::str::from_utf8(&bytes[body_start..j])
                     .expect("lexer source is utf-8")
                     .to_string();
-                out.push(TokenWithPos { token: Token::Str(s), pos: start });
+                out.push(TokenWithPos {
+                    token: Token::Str(s),
+                    pos: start,
+                });
                 i = j + 1;
             }
             ch if ch.is_ascii_digit() => {
                 let mut j = i;
-                while j < bytes.len()
-                    && ((bytes[j] as char).is_ascii_digit() || bytes[j] == b'.')
-                {
+                while j < bytes.len() && ((bytes[j] as char).is_ascii_digit() || bytes[j] == b'.') {
                     j += 1;
                 }
                 let raw = &input[i..j];
@@ -224,7 +285,10 @@ pub fn lex(input: &str) -> Result<Vec<TokenWithPos>, LexError> {
                     src: raw.to_string(),
                     pos: start,
                 })?;
-                out.push(TokenWithPos { token: Token::Num(n), pos: start });
+                out.push(TokenWithPos {
+                    token: Token::Num(n),
+                    pos: start,
+                });
                 i = j;
             }
             ch if ch.is_ascii_alphabetic() || ch == '_' => {
@@ -259,13 +323,24 @@ pub fn lex(input: &str) -> Result<Vec<TokenWithPos>, LexError> {
                     "in" => Token::In,
                     _ => Token::Ident(word.to_string()),
                 };
-                out.push(TokenWithPos { token: tok, pos: start });
+                out.push(TokenWithPos {
+                    token: tok,
+                    pos: start,
+                });
                 i = j;
             }
-            other => return Err(LexError::UnexpectedChar { ch: other, pos: start }),
+            other => {
+                return Err(LexError::UnexpectedChar {
+                    ch: other,
+                    pos: start,
+                })
+            }
         }
     }
-    out.push(TokenWithPos { token: Token::Eof, pos: bytes.len() });
+    out.push(TokenWithPos {
+        token: Token::Eof,
+        pos: bytes.len(),
+    });
     Ok(out)
 }
 
@@ -292,7 +367,12 @@ mod tests {
         let toks = lex("1 2.5 0.0").unwrap();
         assert_eq!(
             kinds(&toks),
-            vec![Token::Num(1.0), Token::Num(2.5), Token::Num(0.0), Token::Eof]
+            vec![
+                Token::Num(1.0),
+                Token::Num(2.5),
+                Token::Num(0.0),
+                Token::Eof
+            ]
         );
     }
 

@@ -11,13 +11,13 @@
 
 use std::sync::{Arc, RwLock};
 
+use rusqlite::params;
 use sauron_core::audit::{
     build_audit_report, get_report, list_reports, sign_report, store_report, AuditError,
     BuildRequest,
 };
 use sauron_core::db::{open_db_at, DbHandle};
 use sauron_core::state::ServerState;
-use rusqlite::params;
 
 fn build_test_db(label: &str) -> Arc<DbHandle> {
     let pid = std::process::id();
@@ -25,8 +25,7 @@ fn build_test_db(label: &str) -> Arc<DbHandle> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir()
-        .join(format!("sauron-audit-int-{pid}-{nanos}-{label}.db"));
+    let path = std::env::temp_dir().join(format!("sauron-audit-int-{pid}-{nanos}-{label}.db"));
     let _ = std::fs::remove_file(&path);
     Arc::new(open_db_at(path.to_str().unwrap(), 2))
 }
@@ -65,14 +64,7 @@ fn seed_stats(db: &DbHandle, tenant: &str, metric: &str, claimed: i64, period: (
          (tenant_id, agent_id, metric_id, claimed_value, n_records,
           period_start, period_end, merkle_root, proof_b64, vk_id, submitted_at)
          VALUES (?1, '', ?2, ?3, 10, ?4, ?5, ?6, 'e30=', 'vk@v0', ?5)",
-        params![
-            tenant,
-            metric,
-            claimed,
-            period.0,
-            period.1,
-            "ab".repeat(32),
-        ],
+        params![tenant, metric, claimed, period.0, period.1, "ab".repeat(32),],
     )
     .unwrap();
 }

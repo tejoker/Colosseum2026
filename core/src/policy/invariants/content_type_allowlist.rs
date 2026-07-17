@@ -21,7 +21,10 @@ impl ContentTypeCheck {
     /// Build from a list of allowed content-type strings.
     pub fn new(allowed: Vec<String>) -> Self {
         Self {
-            allowed: allowed.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            allowed: allowed
+                .into_iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect(),
         }
     }
 }

@@ -99,12 +99,10 @@ impl CborValue {
     /// this is the only lookup we need.
     pub fn get_text<'a>(&'a self, key: &str) -> Option<&'a CborValue> {
         match self {
-            CborValue::Map(entries) => entries
-                .iter()
-                .find_map(|(k, v)| match k {
-                    CborValue::Text(s) if s == key => Some(v),
-                    _ => None,
-                }),
+            CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match k {
+                CborValue::Text(s) if s == key => Some(v),
+                _ => None,
+            }),
             _ => None,
         }
     }
@@ -206,8 +204,7 @@ fn parse_one(input: &[u8], cur: &mut usize) -> Result<CborValue, AttestationErro
             Ok(CborValue::Map(out))
         }
         6 => Err(AttestationError::Malformed(
-            "cbor: tagged values (major 6) not supported — AWS Nitro docs do not use tags"
-                .into(),
+            "cbor: tagged values (major 6) not supported — AWS Nitro docs do not use tags".into(),
         )),
         7 => Err(AttestationError::Malformed(
             "cbor: simple/float values (major 7) not supported — AWS Nitro docs do not emit them"
@@ -575,8 +572,11 @@ impl NitroParsedDoc {
     /// path). We re-encode DER certs as PEM so downstream code paths keep
     /// working without branching. PCR digests are hex-encoded.
     pub fn to_attestation_doc(&self) -> NitroAttestationDoc {
-        let pcrs_hex: BTreeMap<u8, String> =
-            self.pcrs.iter().map(|(k, v)| (*k, hex::encode(v))).collect();
+        let pcrs_hex: BTreeMap<u8, String> = self
+            .pcrs
+            .iter()
+            .map(|(k, v)| (*k, hex::encode(v)))
+            .collect();
         let public_key_b64 = self
             .public_key
             .as_ref()
@@ -705,9 +705,18 @@ pub fn parse_attestation_payload(payload_bstr: &[u8]) -> Result<NitroParsedDoc, 
         }
         None => Vec::new(),
     };
-    let public_key = v.get_text("public_key").and_then(|x| x.as_bytes()).map(|b| b.to_vec());
-    let user_data = v.get_text("user_data").and_then(|x| x.as_bytes()).map(|b| b.to_vec());
-    let nonce = v.get_text("nonce").and_then(|x| x.as_bytes()).map(|b| b.to_vec());
+    let public_key = v
+        .get_text("public_key")
+        .and_then(|x| x.as_bytes())
+        .map(|b| b.to_vec());
+    let user_data = v
+        .get_text("user_data")
+        .and_then(|x| x.as_bytes())
+        .map(|b| b.to_vec());
+    let nonce = v
+        .get_text("nonce")
+        .and_then(|x| x.as_bytes())
+        .map(|b| b.to_vec());
 
     Ok(NitroParsedDoc {
         module_id,
@@ -814,7 +823,8 @@ pub fn verify_nitro_cert_chain(
 ) -> Result<(), AttestationError> {
     if trusted_roots_der.is_empty() {
         return Err(AttestationError::BadCertChain(
-            "no AWS Nitro root configured; set SAURON_NITRO_ROOT_PEM to the per-region root PEM".into(),
+            "no AWS Nitro root configured; set SAURON_NITRO_ROOT_PEM to the per-region root PEM"
+                .into(),
         ));
     }
     let trust_anchors: Vec<webpki::TrustAnchor<'_>> = trusted_roots_der
@@ -832,8 +842,7 @@ pub fn verify_nitro_cert_chain(
 
     let end_entity = webpki::EndEntityCert::try_from(leaf_der)
         .map_err(|e| AttestationError::BadCertChain(format!("leaf cert parse: {e:?}")))?;
-    let intermediate_refs: Vec<&[u8]> =
-        intermediate_ders.iter().map(|v| v.as_slice()).collect();
+    let intermediate_refs: Vec<&[u8]> = intermediate_ders.iter().map(|v| v.as_slice()).collect();
 
     // AWS Nitro chain uses ECDSA-P384-SHA384 throughout. We list P256 too for
     // forward-compat with other COSE producers operators might point this code
@@ -901,9 +910,8 @@ pub fn extract_p384_spki_point(cert_der: &[u8]) -> Result<Vec<u8>, AttestationEr
     let cert_seq = der_take_sequence(cert_der, 0).map_err(|e| {
         AttestationError::BadCertChain(format!("cert SPKI extract — outer SEQ: {e}"))
     })?;
-    let tbs = der_take_sequence(cert_seq.body, 0).map_err(|e| {
-        AttestationError::BadCertChain(format!("cert SPKI extract — TBS SEQ: {e}"))
-    })?;
+    let tbs = der_take_sequence(cert_seq.body, 0)
+        .map_err(|e| AttestationError::BadCertChain(format!("cert SPKI extract — TBS SEQ: {e}")))?;
 
     // Walk TBS contents skipping fields until we reach subjectPublicKeyInfo.
     // Order (after optional version `[0]` tag):
@@ -932,9 +940,8 @@ pub fn extract_p384_spki_point(cert_der: &[u8]) -> Result<Vec<u8>, AttestationEr
         AttestationError::BadCertChain(format!("cert SPKI extract — SPKI SEQ: {e}"))
     })?;
     // SPKI body: algorithm (SEQ), subjectPublicKey (BIT STRING)
-    let alg = der_take_sequence(spki.body, 0).map_err(|e| {
-        AttestationError::BadCertChain(format!("cert SPKI extract — alg SEQ: {e}"))
-    })?;
+    let alg = der_take_sequence(spki.body, 0)
+        .map_err(|e| AttestationError::BadCertChain(format!("cert SPKI extract — alg SEQ: {e}")))?;
     // alg body: OID(ecPublicKey) + OID(secp384r1). We validate by checking
     // the secp384r1 OID literally: 1.3.132.0.34 = `06 05 2b 81 04 00 22`.
     const SECP384R1_OID: &[u8] = &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22];
@@ -1226,7 +1233,10 @@ mod tests {
                 CborValue::Text("module_id".to_string()),
                 CborValue::Text("i-test".to_string()),
             ),
-            (CborValue::Text("timestamp".to_string()), CborValue::Uint(42)),
+            (
+                CborValue::Text("timestamp".to_string()),
+                CborValue::Uint(42),
+            ),
         ]);
         let bytes = encode_cbor(&v);
         let (got, _) = parse_cbor(&bytes).unwrap();
@@ -1315,9 +1325,10 @@ mod tests {
 
     #[test]
     fn parse_payload_accepts_well_formed_doc() {
-        let mut pcrs = Vec::new();
-        pcrs.push((CborValue::Uint(0), CborValue::Bytes(vec![0xaa; 48])));
-        pcrs.push((CborValue::Uint(1), CborValue::Bytes(vec![0xbb; 48])));
+        let pcrs = vec![
+            (CborValue::Uint(0), CborValue::Bytes(vec![0xaa; 48])),
+            (CborValue::Uint(1), CborValue::Bytes(vec![0xbb; 48])),
+        ];
         let doc = CborValue::Map(vec![
             (
                 CborValue::Text("module_id".to_string()),

@@ -136,9 +136,8 @@ impl fmt::Display for PolicyParseError {
 
 impl Error for PolicyParseError {}
 
-static HHMM_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?:[01]\d|2[0-3]):[0-5]\d$").expect("HHMM regex must compile")
-});
+static HHMM_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(?:[01]\d|2[0-3]):[0-5]\d$").expect("HHMM regex must compile"));
 
 /// Validate a `HH:MM` 24-hour timestamp string.
 ///

@@ -111,8 +111,11 @@ pub struct ServerState {
     /// rotation policy. Production deployments must back this with HSM /
     /// Vault and treat it as authenticated configuration, not application
     /// state. See `docs/homomorphic-encryption.md` for the full checklist.
-    pub he_pk_registry:
-        Arc<std::sync::RwLock<std::collections::HashMap<String, crate::he::paillier::PaillierPublicKey>>>,
+    pub he_pk_registry: Arc<
+        std::sync::RwLock<
+            std::collections::HashMap<String, crate::he::paillier::PaillierPublicKey>,
+        >,
+    >,
 }
 
 fn derive_dev_secret(name: &str) -> Vec<u8> {
@@ -225,14 +228,22 @@ impl ServerState {
             g
         }
 
-        let (user_hexes, client_hexes, agent_hexes) = {
+        // Phase 3 dual-backend repository, built first so the `users` and
+        // `merkle_leaves` reconstruction below reads whichever backend holds
+        // them. `clients`/`agents` are SQLite-only, so they stay on the raw
+        // handle.
+        let repo = crate::repository::Repo::from_env(Arc::clone(&db))
+            .await
+            .unwrap_or_else(|e| panic!("[FATAL] repository init failed: {e}"));
+
+        let (client_hexes, agent_hexes) = {
             let conn = db.lock().unwrap();
             (
-                load_pubkeys(&conn, "SELECT public_key_hex FROM users"),
                 load_pubkeys(&conn, "SELECT public_key_hex FROM clients"),
                 load_pubkeys(&conn, "SELECT public_key_hex FROM agents WHERE revoked = 0"),
             )
         };
+        let user_hexes = repo.all_user_pubkeys().await.unwrap_or_default();
 
         let user_group = hexes_to_group(user_hexes);
         let client_group = hexes_to_group(client_hexes);
@@ -248,16 +259,7 @@ impl ServerState {
 
         // ── Restore Merkle ledger from DB ─────────────────────────────────────
         let merkle_ledger = {
-            let conn = db.lock().unwrap();
-            let leaves: Vec<String> = conn
-                .prepare("SELECT commitment_hex FROM merkle_leaves ORDER BY seq ASC")
-                .ok()
-                .and_then(|mut stmt| {
-                    stmt.query_map([], |row| row.get::<_, String>(0))
-                        .ok()
-                        .map(|rows| rows.flatten().collect())
-                })
-                .unwrap_or_default();
+            let leaves: Vec<String> = repo.all_merkle_commitments().await.unwrap_or_default();
             let n = leaves.len();
             let ledger = MerkleCommitmentLedger::from_db_leaves(leaves).unwrap_or_else(|e| {
                 tracing::warn!(target: "sauron::startup", error = %e, "merkle restore failed");
@@ -275,28 +277,30 @@ impl ServerState {
             Scalar::from_bytes_mod_order(h.finalize().into())
         };
 
-        // Phase 3 dual-backend repository (built before `db` is moved into Self).
-        let repo = crate::repository::Repo::from_env(Arc::clone(&db))
-            .await
-            .unwrap_or_else(|e| panic!("[FATAL] repository init failed: {e}"));
-
         // Sprint 2: hydrate the policy DSL store from `policies` table.
         let policy_store = Arc::new(crate::policy::PolicyStore::new(Arc::clone(&db)));
         match policy_store.hydrate() {
-            Ok(n) => tracing::info!(target: "sauron::startup", policies = n, "hydrated policy store"),
-            Err(e) => tracing::warn!(target: "sauron::startup", error = %e, "policy store hydrate failed"),
+            Ok(n) => {
+                tracing::info!(target: "sauron::startup", policies = n, "hydrated policy store")
+            }
+            Err(e) => {
+                tracing::warn!(target: "sauron::startup", error = %e, "policy store hydrate failed")
+            }
         }
 
         // Sprint 8: hydrate the cohort definition store from `cohort_definitions`.
         let cohort_store = Arc::new(crate::aggregation::CohortStore::new(Arc::clone(&db)));
         match cohort_store.hydrate() {
-            Ok(n) => tracing::info!(target: "sauron::startup", cohorts = n, "hydrated cohort store"),
-            Err(e) => tracing::warn!(target: "sauron::startup", error = %e, "cohort store hydrate failed"),
+            Ok(n) => {
+                tracing::info!(target: "sauron::startup", cohorts = n, "hydrated cohort store")
+            }
+            Err(e) => {
+                tracing::warn!(target: "sauron::startup", error = %e, "cohort store hydrate failed")
+            }
         }
 
         // S8 ext: build the ε ledger handle. Lazy — no I/O until used.
-        let dp_budget_ledger =
-            Arc::new(crate::dp::DpBudgetLedger::new(Arc::clone(&db)));
+        let dp_budget_ledger = Arc::new(crate::dp::DpBudgetLedger::new(Arc::clone(&db)));
 
         Self {
             db,
@@ -312,14 +316,13 @@ impl ServerState {
             compliance,
             merkle_ledger,
             bitcoin_anchor: BitcoinAnchorService::from_env().map(std::sync::Arc::new),
-            solana_anchor: crate::solana_anchor::SolanaAnchorService::from_env().map(std::sync::Arc::new),
+            solana_anchor: crate::solana_anchor::SolanaAnchorService::from_env()
+                .map(std::sync::Arc::new),
             repo,
             policy_store,
             cohort_store,
             dp_budget_ledger,
-            he_pk_registry: Arc::new(std::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
+            he_pk_registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -406,10 +409,7 @@ pub fn spawn_background_gc(db: Arc<DbHandle>) {
                 )
                 .unwrap_or(0);
             let call_nonce_pruned = conn
-                .execute(
-                    "DELETE FROM agent_call_nonces WHERE exp < ?1",
-                    params![now],
-                )
+                .execute("DELETE FROM agent_call_nonces WHERE exp < ?1", params![now])
                 .unwrap_or(0);
             let risk_pruned = conn
                 .execute(

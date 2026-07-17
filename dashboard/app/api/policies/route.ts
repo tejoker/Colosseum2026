@@ -6,8 +6,8 @@ import { NextRequest } from "next/server";
 import { fetchCoreV1Json, proxyCoreV1 } from "../_proxy";
 import type { PolicySummary } from "@/lib/api";
 
-export async function GET(_req: Request) {
-  const r = await fetchCoreV1Json<PolicySummary[]>("policy/list");
+export async function GET(req: Request) {
+  const r = await fetchCoreV1Json<PolicySummary[]>("policy/list", "", req);
   if (!r.ok) return r.response;
   return Response.json(r.data);
 }

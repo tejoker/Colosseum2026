@@ -17,8 +17,8 @@ export async function GET(req: Request) {
   const limit = limitRaw ? Math.max(1, Math.min(1000, Number(limitRaw))) : 200;
 
   const [egressR, agentsR] = await Promise.all([
-    fetchCoreJson<CoreEgressRow[]>("egress/recent", `?limit=${limit}`),
-    fetchCoreJson<CoreAgentRecord[]>("agents"),
+    fetchCoreJson<CoreEgressRow[]>("egress/recent", `?limit=${limit}`, req),
+    fetchCoreJson<CoreAgentRecord[]>("agents", "", req),
   ]);
 
   if (!egressR.ok) return egressR.response;

@@ -371,18 +371,14 @@ pub fn verify_aik_signature(
                 .map_err(|_| AttestationError::BadSignature)
         }
         TpmPublicKey::EcdsaP256(spki_point) => {
-            let key = ring_sig::UnparsedPublicKey::new(
-                &ring_sig::ECDSA_P256_SHA256_FIXED,
-                spki_point,
-            );
+            let key =
+                ring_sig::UnparsedPublicKey::new(&ring_sig::ECDSA_P256_SHA256_FIXED, spki_point);
             key.verify(quote_bytes, signature)
                 .map_err(|_| AttestationError::BadSignature)
         }
         TpmPublicKey::RsaPkcs1Spki(spki_der) => {
-            let key = ring_sig::UnparsedPublicKey::new(
-                &ring_sig::RSA_PKCS1_2048_8192_SHA256,
-                spki_der,
-            );
+            let key =
+                ring_sig::UnparsedPublicKey::new(&ring_sig::RSA_PKCS1_2048_8192_SHA256, spki_der);
             key.verify(quote_bytes, signature)
                 .map_err(|_| AttestationError::BadSignature)
         }
@@ -500,25 +496,21 @@ pub fn verify_aik_cert_chain(
             now,
         )
         .map_err(|e| {
-            AttestationError::BadCertChain(format!(
-                "AIK→EK→root chain rejected by webpki: {e:?}"
-            ))
+            AttestationError::BadCertChain(format!("AIK→EK→root chain rejected by webpki: {e:?}"))
         })?;
 
     Ok(())
 }
 
 fn pem_to_single_der(input: &str, field: &str) -> Result<Vec<u8>, AttestationError> {
-    let parsed = pem::parse(input.as_bytes()).map_err(|e| {
-        AttestationError::Malformed(format!("{field} not valid PEM: {e}"))
-    })?;
+    let parsed = pem::parse(input.as_bytes())
+        .map_err(|e| AttestationError::Malformed(format!("{field} not valid PEM: {e}")))?;
     Ok(parsed.into_contents())
 }
 
 fn pem_to_multi_der(input: &str, field: &str) -> Result<Vec<Vec<u8>>, AttestationError> {
-    let parsed = pem::parse_many(input.as_bytes()).map_err(|e| {
-        AttestationError::Malformed(format!("{field} not valid PEM: {e}"))
-    })?;
+    let parsed = pem::parse_many(input.as_bytes())
+        .map_err(|e| AttestationError::Malformed(format!("{field} not valid PEM: {e}")))?;
     Ok(parsed.into_iter().map(|p| p.into_contents()).collect())
 }
 
@@ -556,9 +548,7 @@ pub fn verify_pcr_digest(
     expected_pcr_digest_hex: &str,
 ) -> Result<(), AttestationError> {
     let expected = hex::decode(expected_pcr_digest_hex.trim()).map_err(|e| {
-        AttestationError::Malformed(format!(
-            "expected_pcr_digest_hex is not valid hex: {e}"
-        ))
+        AttestationError::Malformed(format!("expected_pcr_digest_hex is not valid hex: {e}"))
     })?;
     if expected.len() != parsed.quote.pcr_digest.len() {
         return Err(AttestationError::MeasurementMismatch {
@@ -604,12 +594,12 @@ fn verify_tpm2_quote(blob: &[u8], ctx: &AttestationContext) -> Result<(), Attest
 
     let payload = Tpm2QuotePayload::parse_json(blob)?;
 
-    let attest_bytes = B64.decode(payload.attest_b64.as_bytes()).map_err(|e| {
-        AttestationError::Malformed(format!("attest_b64 decode: {e}"))
-    })?;
-    let signature_bytes = B64.decode(payload.signature_b64.as_bytes()).map_err(|e| {
-        AttestationError::Malformed(format!("signature_b64 decode: {e}"))
-    })?;
+    let attest_bytes = B64
+        .decode(payload.attest_b64.as_bytes())
+        .map_err(|e| AttestationError::Malformed(format!("attest_b64 decode: {e}")))?;
+    let signature_bytes = B64
+        .decode(payload.signature_b64.as_bytes())
+        .map_err(|e| AttestationError::Malformed(format!("signature_b64 decode: {e}")))?;
 
     let parsed = parse_tpms_attest(&attest_bytes)?;
 
@@ -618,11 +608,7 @@ fn verify_tpm2_quote(blob: &[u8], ctx: &AttestationContext) -> Result<(), Attest
     let roots = load_trusted_tpm2_roots();
     let roots_refs: Vec<&[u8]> = roots.iter().map(|v| v.as_slice()).collect();
     let ek_chain_one = [payload.ek_cert_chain_pem.as_str()];
-    verify_aik_cert_chain(
-        payload.aik_cert_pem.as_str(),
-        &ek_chain_one,
-        &roots_refs,
-    )?;
+    verify_aik_cert_chain(payload.aik_cert_pem.as_str(), &ek_chain_one, &roots_refs)?;
 
     // C-1: bind the quote-signature check to the AIK CERTIFICATE's own public
     // key (extracted from its just-validated SPKI), NOT a separately
@@ -639,7 +625,8 @@ fn verify_tpm2_quote(blob: &[u8], ctx: &AttestationContext) -> Result<(), Attest
         let claimed = parse_trusted_pubkey(registered)?;
         if !tpm_pubkeys_equal(&claimed, &cert_pubkey) {
             return Err(AttestationError::BadCertChain(
-                "registered AIK pubkey does not match the AIK certificate SubjectPublicKeyInfo".into(),
+                "registered AIK pubkey does not match the AIK certificate SubjectPublicKeyInfo"
+                    .into(),
             ));
         }
     }
@@ -664,10 +651,9 @@ fn parse_trusted_pubkey(s: &str) -> Result<TpmPublicKey, AttestationError> {
         .map_err(|e| AttestationError::BadCertChain(format!("trusted_pubkey_b64u decode: {e}")))?;
     match tag {
         "ed25519" => {
-            let arr: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| AttestationError::BadCertChain("ed25519 key is not 32 bytes".into()))?;
+            let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                AttestationError::BadCertChain("ed25519 key is not 32 bytes".into())
+            })?;
             Ok(TpmPublicKey::Ed25519(arr))
         }
         "p256" => {
@@ -717,7 +703,9 @@ fn der_tlv(input: &[u8]) -> Result<(u8, &[u8], &[u8]), AttestationError> {
         .checked_add(len)
         .ok_or_else(|| AttestationError::Malformed("der: length overflow".into()))?;
     if end > input.len() {
-        return Err(AttestationError::Malformed("der: length exceeds buffer".into()));
+        return Err(AttestationError::Malformed(
+            "der: length exceeds buffer".into(),
+        ));
     }
     Ok((tag, &input[start..end], &input[end..]))
 }
@@ -731,7 +719,9 @@ fn extract_spki(cert_der: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AttestationError>
     }
     let (tag, tbs, _) = der_tlv(cert_seq)?;
     if tag != 0x30 {
-        return Err(AttestationError::Malformed("tbsCertificate: not a SEQUENCE".into()));
+        return Err(AttestationError::Malformed(
+            "tbsCertificate: not a SEQUENCE".into(),
+        ));
     }
     // tbs fields: [0]version? , serialNumber, signature, issuer, validity,
     // subject, subjectPublicKeyInfo, ...
@@ -748,15 +738,21 @@ fn extract_spki(cert_der: &[u8]) -> Result<(Vec<u8>, Vec<u8>), AttestationError>
     }
     let (tag, alg, after_alg) = der_tlv(spki)?;
     if tag != 0x30 {
-        return Err(AttestationError::Malformed("SPKI.algorithm: not a SEQUENCE".into()));
+        return Err(AttestationError::Malformed(
+            "SPKI.algorithm: not a SEQUENCE".into(),
+        ));
     }
     let (tag, oid, _) = der_tlv(alg)?;
     if tag != 0x06 {
-        return Err(AttestationError::Malformed("SPKI.algorithm.oid: not an OID".into()));
+        return Err(AttestationError::Malformed(
+            "SPKI.algorithm.oid: not an OID".into(),
+        ));
     }
     let (tag, bitstr, _) = der_tlv(after_alg)?;
     if tag != 0x03 {
-        return Err(AttestationError::Malformed("SPKI.subjectPublicKey: not a BIT STRING".into()));
+        return Err(AttestationError::Malformed(
+            "SPKI.subjectPublicKey: not a BIT STRING".into(),
+        ));
     }
     if bitstr.first() != Some(&0x00) {
         return Err(AttestationError::Malformed(
@@ -784,10 +780,9 @@ pub fn aik_pubkey_from_cert(cert_der: &[u8]) -> Result<TpmPublicKey, Attestation
             Ok(TpmPublicKey::EcdsaP256(key))
         }
         OID_ED25519 => {
-            let arr: [u8; 32] = key
-                .as_slice()
-                .try_into()
-                .map_err(|_| AttestationError::BadCertChain("AIK cert Ed25519 key not 32 bytes".into()))?;
+            let arr: [u8; 32] = key.as_slice().try_into().map_err(|_| {
+                AttestationError::BadCertChain("AIK cert Ed25519 key not 32 bytes".into())
+            })?;
             Ok(TpmPublicKey::Ed25519(arr))
         }
         OID_RSA_ENCRYPTION => Ok(TpmPublicKey::RsaPkcs1Spki(key)),
@@ -965,7 +960,10 @@ mod tests {
         bytes[0..4].copy_from_slice(&0xdead_beefu32.to_be_bytes());
         match parse_tpms_attest(&bytes) {
             Err(AttestationError::Malformed(msg)) => {
-                assert!(msg.contains("magic"), "expected magic-related error, got: {msg}");
+                assert!(
+                    msg.contains("magic"),
+                    "expected magic-related error, got: {msg}"
+                );
             }
             other => panic!("expected Malformed on bad magic, got {:?}", other),
         }
@@ -1001,8 +999,7 @@ mod tests {
                     "expected qualifiedSigner/65535-related error, got: {msg}"
                 );
                 assert!(
-                    msg.contains("exceeds remaining buffer")
-                        || msg.contains("truncated"),
+                    msg.contains("exceeds remaining buffer") || msg.contains("truncated"),
                     "expected explicit remaining-buffer diagnostic, got: {msg}"
                 );
             }
@@ -1064,14 +1061,9 @@ mod tests {
         use ::ring::rand::SystemRandom;
         use ::ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
         let rng = SystemRandom::new();
-        let pkcs8 =
-            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
-        let kp = EcdsaKeyPair::from_pkcs8(
-            &ECDSA_P256_SHA256_FIXED_SIGNING,
-            pkcs8.as_ref(),
-            &rng,
-        )
-        .unwrap();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
         let pubkey_bytes = kp.public_key().as_ref().to_vec();
         let pubkey = TpmPublicKey::EcdsaP256(pubkey_bytes);
 
@@ -1110,11 +1102,7 @@ mod tests {
     fn verify_aik_cert_chain_rejects_unrooted_chain_when_roots_configured() {
         let aik_pem = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALxk\n-----END CERTIFICATE-----\n";
         let synthetic_root = vec![0x30u8; 64];
-        let res = verify_aik_cert_chain(
-            aik_pem,
-            &[aik_pem],
-            &[synthetic_root.as_slice()],
-        );
+        let res = verify_aik_cert_chain(aik_pem, &[aik_pem], &[synthetic_root.as_slice()]);
         match res {
             Err(AttestationError::BadCertChain(_)) => {}
             other => panic!(

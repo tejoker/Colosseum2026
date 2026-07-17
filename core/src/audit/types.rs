@@ -145,11 +145,7 @@ pub struct ComplianceSummary {
 impl ComplianceSummary {
     /// Build a summary from raw allowed/denied counts; clamps the
     /// derived rate to a finite value.
-    pub fn from_counts(
-        policy_ids: Vec<String>,
-        allowed: u32,
-        denied: u32,
-    ) -> Self {
+    pub fn from_counts(policy_ids: Vec<String>, allowed: u32, denied: u32) -> Self {
         let total = allowed.saturating_add(denied);
         let rate = if total == 0 {
             0.0
@@ -206,7 +202,11 @@ mod tests {
         let s = serde_json::to_string(&e).unwrap();
         let back: SectionEvidence = serde_json::from_str(&s).unwrap();
         match back {
-            SectionEvidence::StatsCommitment { metric_id, n_records, .. } => {
+            SectionEvidence::StatsCommitment {
+                metric_id,
+                n_records,
+                ..
+            } => {
                 assert_eq!(metric_id, "success_rate");
                 assert_eq!(n_records, 100);
             }

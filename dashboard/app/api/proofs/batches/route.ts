@@ -10,8 +10,8 @@ interface CoreBatch {
   btc_anchor_id?: string;
 }
 
-export async function GET() {
-  const r = await fetchCoreJson<CoreBatch[]>("anchor/batches");
+export async function GET(req: Request) {
+  const r = await fetchCoreJson<CoreBatch[]>("anchor/batches", "", req);
   if (!r.ok) return r.response;
   const out = (r.data || []).slice(0, 25).map((b) => ({
     anchor_id: b.anchor_id,

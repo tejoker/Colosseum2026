@@ -16,7 +16,8 @@ export async function GET(
 
   const r = await fetchCoreJson<CoreActionReceipt[]>(
     "agent_actions/recent",
-    "?limit=1000"
+    "?limit=1000",
+    req,
   );
   if (!r.ok) return r.response;
 

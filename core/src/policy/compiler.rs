@@ -20,11 +20,10 @@ use super::expressions::{
 use super::invariants::{
     AllowlistCheck, BudgetCheck, BusinessHoursCheck, ChainDepthCheck, ConcurrencyCheck,
     ContentTypeCheck, CooldownCheck, CurrencyAllowlistCheck, DailyBudgetCheck,
-    DomainAllowlistCheck, DomainDenylistCheck, DryRunCheck, EvaluationContext,
-    GeoRestrictionCheck, HolidayBlackoutCheck, LanguageAllowlistCheck, PayloadSizeCheck,
-    PerActionCapCheck, PiiDetectionCheck, RateCheck, RecipientCountCheck, RuntimeCheck,
-    ScopeCheck, SignatureCheck, ThresholdCheck, TimeCheck, ToolDenylistCheck, Verdict,
-    VersionPinCheck, WeeklyRateCheck,
+    DomainAllowlistCheck, DomainDenylistCheck, DryRunCheck, EvaluationContext, GeoRestrictionCheck,
+    HolidayBlackoutCheck, LanguageAllowlistCheck, PayloadSizeCheck, PerActionCapCheck,
+    PiiDetectionCheck, RateCheck, RecipientCountCheck, RuntimeCheck, ScopeCheck, SignatureCheck,
+    ThresholdCheck, TimeCheck, ToolDenylistCheck, Verdict, VersionPinCheck, WeeklyRateCheck,
 };
 use super::types::PolicyParseError;
 
@@ -145,8 +144,8 @@ pub fn compile(policy: Policy) -> Result<CompiledPolicy, CompileError> {
         checks.push(Box::new(BudgetCheck::new(b)));
     }
     if let Some(ref ds) = policy.binding.data_scope {
-        let check = ScopeCheck::from_scope(ds)
-            .map_err(|e| CompileError::InvalidScope(e.to_string()))?;
+        let check =
+            ScopeCheck::from_scope(ds).map_err(|e| CompileError::InvalidScope(e.to_string()))?;
         checks.push(Box::new(check));
     }
     if let Some(ref tools) = policy.binding.allowed_tools {
@@ -218,8 +217,16 @@ pub fn compile(policy: Policy) -> Result<CompiledPolicy, CompileError> {
         checks.push(Box::new(CurrencyAllowlistCheck::new(ccys.clone())));
     }
     // Geo: register if either allow OR deny list is non-empty.
-    let geo_allow = policy.binding.geo_allow_countries.clone().unwrap_or_default();
-    let geo_deny = policy.binding.geo_deny_countries.clone().unwrap_or_default();
+    let geo_allow = policy
+        .binding
+        .geo_allow_countries
+        .clone()
+        .unwrap_or_default();
+    let geo_deny = policy
+        .binding
+        .geo_deny_countries
+        .clone()
+        .unwrap_or_default();
     if !geo_allow.is_empty() || !geo_deny.is_empty() {
         checks.push(Box::new(GeoRestrictionCheck::new(geo_allow, geo_deny)));
     }
@@ -282,7 +289,8 @@ mod tests {
     const FX_MINIMAL: &str = include_str!("../../../schemas/fixtures/policy_minimal.yaml");
     const FX_HEALTHCARE: &str =
         include_str!("../../../schemas/fixtures/policy_healthcare_records.yaml");
-    const FX_DEVTOOLS: &str = include_str!("../../../schemas/fixtures/policy_devtools_codegen.yaml");
+    const FX_DEVTOOLS: &str =
+        include_str!("../../../schemas/fixtures/policy_devtools_codegen.yaml");
     const FX_RESEARCH: &str =
         include_str!("../../../schemas/fixtures/policy_research_assistant.yaml");
     const FX_SUPPORT: &str =
@@ -403,7 +411,11 @@ mod tests {
     #[test]
     fn compile_with_expressions_treasury_compiles_three_invariants() {
         let c = compile(parse(FX_TREASURY).unwrap()).expect("treasury compiles");
-        let exprs = c.checks.iter().filter(|c| c.name() == "invariant_expr").count();
+        let exprs = c
+            .checks
+            .iter()
+            .filter(|c| c.name() == "invariant_expr")
+            .count();
         assert_eq!(exprs, 3);
     }
 
@@ -411,7 +423,11 @@ mod tests {
     fn compile_with_expressions_devtools_compiles() {
         let c = compile(parse(FX_DEVTOOLS).unwrap()).expect("devtools compiles");
         // Three invariants.
-        let exprs = c.checks.iter().filter(|c| c.name() == "invariant_expr").count();
+        let exprs = c
+            .checks
+            .iter()
+            .filter(|c| c.name() == "invariant_expr")
+            .count();
         assert_eq!(exprs, 3);
     }
 
@@ -502,7 +518,8 @@ binding:
         // Set all required metadata so we only deny on one check.
         a.metadata
             .insert("target_domain".into(), serde_json::json!("api.example.com"));
-        a.metadata.insert("currency".into(), serde_json::json!("EUR"));
+        a.metadata
+            .insert("currency".into(), serde_json::json!("EUR"));
         a.metadata
             .insert("detected_language".into(), serde_json::json!("en"));
         a.metadata

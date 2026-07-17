@@ -72,7 +72,9 @@ export async function GET(
     period_end: String(periodEnd),
   });
   const result = await fetchCoreV1Json<CorePublishedCohort>(
-    `cohort/published?${qs.toString()}`
+    `cohort/published?${qs.toString()}`,
+    "",
+    req,
   );
   if (!result.ok) {
     return result.response;

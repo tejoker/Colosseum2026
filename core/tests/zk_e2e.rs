@@ -126,9 +126,7 @@ async fn action_log_proof_round_trip_commit_prove_verify_tamper() {
             skip("zk_e2e_helper.js reported missing prerequisite (exit 2)");
             return;
         }
-        other => panic!(
-            "zk_e2e_helper.js exited unexpectedly: {other:?} — check stderr above"
-        ),
+        other => panic!("zk_e2e_helper.js exited unexpectedly: {other:?} — check stderr above"),
     }
 
     let payload_bytes = std::fs::read(tmp.join("payload.json")).expect("read payload.json");
@@ -156,16 +154,14 @@ async fn action_log_proof_round_trip_commit_prove_verify_tamper() {
     //    entrypoint below to cover the `FsVKeyLoader` resolution path.)
     // ════════════════════════════════════════════════════════════════════
     let vk_path = root.join("zkp/circuits/build/keys/ActionSumBound.dev.vkey.json");
-    let result =
-        verify_action_log_proof_with_vk(&payload, expected_root_hex, &vk_path).await;
+    let result = verify_action_log_proof_with_vk(&payload, expected_root_hex, &vk_path).await;
     assert!(
         result.is_ok(),
         "honest proof should verify with the DEV vk; got {result:?}"
     );
 
     // FS loader path: same vk, same outcome.
-    let loader =
-        zk_verifier::FsVKeyLoader::new(root.join("zkp/circuits/build/keys"));
+    let loader = zk_verifier::FsVKeyLoader::new(root.join("zkp/circuits/build/keys"));
     let result_loader =
         zk_verifier::verify_action_log_proof(&payload, expected_root_hex, &loader).await;
     assert!(

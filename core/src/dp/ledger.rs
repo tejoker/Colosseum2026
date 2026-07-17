@@ -222,7 +222,8 @@ impl DpBudgetLedger {
             .map_err(|e| LedgerError::Storage(e.to_string()))?;
         // Missing row → treat as fresh slate. Caller should still have
         // called ensure_cycle so this branch is a defensive belt.
-        let (spent_eps, spent_delta, cap_eps, cap_delta) = row.unwrap_or((0.0, 0.0, f64::INFINITY, f64::INFINITY));
+        let (spent_eps, spent_delta, cap_eps, cap_delta) =
+            row.unwrap_or((0.0, 0.0, f64::INFINITY, f64::INFINITY));
         let new_eps = spent_eps + requested_eps;
         let new_delta = spent_delta + requested_delta;
         if new_eps > cap_eps {
@@ -316,15 +317,28 @@ impl DpBudgetLedger {
                     "ledger row missing for ({cohort_id}, {metric_id}, {cycle_start}); call ensure_cycle first"
                 )));
             }
-            conn.execute(
-                "UPDATE dp_budget_ledger
-                 SET epsilon_spent = epsilon_spent + ?4,
-                     delta_spent   = delta_spent   + ?5,
-                     last_published = ?6
-                 WHERE cohort_id = ?1 AND metric_id = ?2 AND cycle_start = ?3",
-                params![cohort_id, metric_id, cycle_start, eps, delta, now],
-            )
-            .map_err(|e| LedgerError::Storage(e.to_string()))?;
+            // Atomic check-AND-charge: the cap guard lives in the WHERE clause,
+            // inside this BEGIN IMMEDIATE txn. `can_publish` is only advisory —
+            // two concurrent publishes could both pass it and then overspend.
+            // Here the increment applies ONLY if it stays within cap; 0 rows
+            // affected ⇒ the charge would exceed the budget, so reject + roll back.
+            let charged = conn
+                .execute(
+                    "UPDATE dp_budget_ledger
+                     SET epsilon_spent = epsilon_spent + ?4,
+                         delta_spent   = delta_spent   + ?5,
+                         last_published = ?6
+                     WHERE cohort_id = ?1 AND metric_id = ?2 AND cycle_start = ?3
+                       AND epsilon_spent + ?4 <= epsilon_cap
+                       AND delta_spent   + ?5 <= delta_cap",
+                    params![cohort_id, metric_id, cycle_start, eps, delta, now],
+                )
+                .map_err(|e| LedgerError::Storage(e.to_string()))?;
+            if charged == 0 {
+                return Err(LedgerError::Invalid(format!(
+                    "budget exceeded: charging eps={eps}/delta={delta} would exceed the cohort cap for cycle {cycle_start} (concurrent publish or stale can_publish)"
+                )));
+            }
             conn.execute(
                 "INSERT INTO dp_budget_publications
                    (publication_id, cohort_id, metric_id, cycle_start,
@@ -472,7 +486,7 @@ fn validate_inputs(
             "epsilon_cap must be > 0 and finite, got {epsilon_cap}"
         )));
     }
-    if !delta_cap.is_finite() || delta_cap < 0.0 || delta_cap >= 1.0 {
+    if !delta_cap.is_finite() || !(0.0..1.0).contains(&delta_cap) {
         return Err(LedgerError::Invalid(format!(
             "delta_cap must be in [0, 1) and finite, got {delta_cap}"
         )));
@@ -500,8 +514,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("sauron-ledger-{pid}-{nanos}-{label}.db"));
+        let path = std::env::temp_dir().join(format!("sauron-ledger-{pid}-{nanos}-{label}.db"));
         let _ = std::fs::remove_file(&path);
         Arc::new(open_db_at(path.to_str().unwrap(), 2))
     }
@@ -521,7 +534,31 @@ mod tests {
             .unwrap();
         let rows = ledger.get_ledger("coh_a").unwrap();
         assert_eq!(rows.len(), 1);
-        assert!((rows[0].epsilon_cap - 4.0).abs() < 1e-12, "cap must not drift");
+        assert!(
+            (rows[0].epsilon_cap - 4.0).abs() < 1e-12,
+            "cap must not drift"
+        );
+    }
+
+    #[test]
+    fn record_publication_atomically_rejects_over_cap_charge() {
+        // Regression: check (can_publish) and charge (record_publication) were
+        // separate, so two concurrent publishes could both pass the check and
+        // overspend. record_publication now charges only within cap.
+        let db = temp_db("atomic_charge");
+        let ledger = DpBudgetLedger::new(db);
+        ledger.ensure_cycle("coh_a", "m", 0, 1.0, 1e-5).unwrap();
+        // First charge to the cap succeeds.
+        ledger.record_publication("coh_a", "m", 0, 1.0, 1e-7, 4.0).unwrap();
+        // A second charge (simulating a racing request that also passed
+        // can_publish against zero spend) must be rejected — not overspend.
+        let second = ledger.record_publication("coh_a", "m", 0, 0.5, 1e-7, 4.0);
+        assert!(second.is_err(), "over-cap charge must be rejected atomically");
+        // Cap is fully consumed — any further request is denied (no overspend).
+        match ledger.can_publish("coh_a", "m", 0, 0.0001, 0.0).unwrap() {
+            BudgetDecision::Denied { .. } => {}
+            other => panic!("expected Denied after cap consumed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -637,9 +674,7 @@ mod tests {
         // Empty cohort_id.
         assert!(ledger.ensure_cycle("", "m", 0, 1.0, 1e-7).is_err());
         // Non-finite epsilon_cap.
-        assert!(ledger
-            .ensure_cycle("coh", "m", 0, f64::NAN, 1e-7)
-            .is_err());
+        assert!(ledger.ensure_cycle("coh", "m", 0, f64::NAN, 1e-7).is_err());
         // δ ≥ 1.
         assert!(ledger.ensure_cycle("coh", "m", 0, 1.0, 1.0).is_err());
         // can_publish with NaN.

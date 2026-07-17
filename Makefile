@@ -1,5 +1,5 @@
 # SauronID Makefile — minimal, opinionated.
-.PHONY: help build clean test verify empirical demo demo-strict demo-real demo-real-attacks bench docs python-setup
+.PHONY: help build clean test verify empirical demo demo-strict demo-real demo-real-attacks bench docs python-setup python-test dashboard-test sdk-test
 
 help:  ## Show this help
 	@echo "SauronID — agent-binding stack"
@@ -9,8 +9,8 @@ help:  ## Show this help
 
 build:  ## Build Rust core (release) + TS clients
 	cd core && cargo build --release
-	cd redteam && (test -d node_modules || npm install --silent) && npm run build --silent
-	cd agentic && (test -d node_modules || npm install --silent) && (test -f tsconfig.json && tsc -p . || true)
+	cd redteam && npm ci --ignore-scripts --silent && npm run build --silent
+	cd agentic && npm ci --ignore-scripts --silent && npm run build --silent
 
 python-setup:  ## Create .venv at repo root + install Python SDK + script deps
 	python3 -m venv .venv
@@ -26,6 +26,16 @@ clean:  ## Remove build artefacts and DB files
 
 test:  ## Run cargo test for the workspace
 	cd core && cargo test --release --workspace
+
+python-test:  ## Run the Python SDK and adapter tests
+	python3 -m pytest clients/python/tests -q
+
+dashboard-test:  ## Run dashboard unit tests
+	cd dashboard && npm ci --ignore-scripts --silent && npm test -- --run
+
+sdk-test:  ## Run the ZKP and agentic SDK test suites
+	cd agentic && npm ci --ignore-scripts --silent && npm test --silent && npm run test:enforcement --silent && npm run test:stats --silent
+	cd zkp/sdk && npm ci --ignore-scripts --silent && npm run build --silent && npm test --silent
 
 demo:  ## Quickstart: build + start + invariants (advisory mode)
 	./scripts/dev/quickstart.sh
@@ -53,8 +63,10 @@ redteam:  ## Run Tavily-driven autonomous red-team agent (15 attacks; needs runn
 	  node redteam/dist/scenarios/tavily-redteam.js
 
 verify: build  ## cargo test + invariants + empirical (full release gate)
-	cd core && cargo clippy --release -- -D warnings || true
+	cd core && cargo fmt --check
+	cd core && cargo clippy --release -- -D warnings
 	cd core && cargo test --release --workspace
+	$(MAKE) python-test
 	./scripts/dev/quickstart.sh
 	SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
 

@@ -9,13 +9,15 @@
 //! Each test owns its own SQLite-on-disk `Repo` for parallel isolation
 //! (same pattern as `core/src/repository.rs::tests::build_test_repo`).
 
+// Tests assert DB state / status after handler calls, not the Json bodies.
+#![allow(unused_must_use)]
+
 use std::sync::Arc;
 
 use sauron_core::db::{open_db_at, DbHandle};
 use sauron_core::error::AppError;
 use sauron_core::policy::binding_handlers::{
-    bind_policy_with_handles, get_binding_with_handle, unbind_policy_with_handle,
-    BindPolicyBody,
+    bind_policy_with_handles, get_binding_with_handle, unbind_policy_with_handle, BindPolicyBody,
 };
 use sauron_core::policy::compiler::compile;
 use sauron_core::policy::handlers::{
@@ -32,9 +34,7 @@ fn build_test_repo(test_name: &str) -> Repo {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "sauron-routes-{pid}-{nanos}-{test_name}.db"
-    ));
+    let path = std::env::temp_dir().join(format!("sauron-routes-{pid}-{nanos}-{test_name}.db"));
     let _ = std::fs::remove_file(&path);
     let handle = open_db_at(path.to_str().unwrap(), 2);
     Repo::Sqlite(Arc::new(handle))
@@ -48,9 +48,8 @@ fn build_binding_state(test_name: &str) -> (Arc<DbHandle>, Arc<PolicyStore>) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "sauron-bind-routes-{pid}-{nanos}-{test_name}.db"
-    ));
+    let path =
+        std::env::temp_dir().join(format!("sauron-bind-routes-{pid}-{nanos}-{test_name}.db"));
     let _ = std::fs::remove_file(&path);
     let handle = Arc::new(open_db_at(path.to_str().unwrap(), 2));
     let store = Arc::new(PolicyStore::new(Arc::clone(&handle)));
@@ -99,7 +98,11 @@ fn post_spend_inserts_and_increments_ledger() {
         )
         .await
         .expect("record ok");
-        assert!(resp.log_id.starts_with("splog_"), "log id prefix: {}", resp.log_id);
+        assert!(
+            resp.log_id.starts_with("splog_"),
+            "log id prefix: {}",
+            resp.log_id
+        );
         assert!((resp.new_total_usd - 10.0).abs() < 1e-9);
 
         // Second record increments the running total.
@@ -414,9 +417,7 @@ fn build_enforce_state(test_name: &str) -> (Arc<DbHandle>, Arc<PolicyStore>, Rep
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "sauron-enforce-{pid}-{nanos}-{test_name}.db"
-    ));
+    let path = std::env::temp_dir().join(format!("sauron-enforce-{pid}-{nanos}-{test_name}.db"));
     let _ = std::fs::remove_file(&path);
     let handle = Arc::new(open_db_at(path.to_str().unwrap(), 2));
     let store = Arc::new(PolicyStore::new(Arc::clone(&handle)));
@@ -458,16 +459,10 @@ fn bound_policy_denies_action_returns_deny_outcome() {
             timestamp: 1_700_000_000,
             ..Default::default()
         };
-        let outcome = enforce_bound_policy_with_handles(
-            &db,
-            &store,
-            &repo,
-            "default",
-            "agt-deny",
-            &action,
-        )
-        .await
-        .expect("enforce ok");
+        let outcome =
+            enforce_bound_policy_with_handles(&db, &store, &repo, "default", "agt-deny", &action)
+                .await
+                .expect("enforce ok");
 
         match outcome {
             BoundPolicyOutcome::Deny {
@@ -513,16 +508,10 @@ fn bound_policy_allows_action_returns_allow_outcome() {
             timestamp: 1_700_000_000,
             ..Default::default()
         };
-        let outcome = enforce_bound_policy_with_handles(
-            &db,
-            &store,
-            &repo,
-            "default",
-            "agt-allow",
-            &action,
-        )
-        .await
-        .expect("enforce ok");
+        let outcome =
+            enforce_bound_policy_with_handles(&db, &store, &repo, "default", "agt-allow", &action)
+                .await
+                .expect("enforce ok");
 
         match outcome {
             BoundPolicyOutcome::Allow { policy_id: pid } => {

@@ -2,7 +2,7 @@
 
 Per-key-type: cadence, procedure, blast radius if missed, automation status. Operator runs through this before every key-rotation maintenance window. Pentest readers use it to verify keys are not "forever-keys".
 
-Audit trail rule: **every rotation event MUST leave an entry in the security audit log** (Sprint 12 middleware writes to `core/src/middleware/audit_log.rs`). The audit row is then included in the next agent-action anchor batch — making the rotation itself tamper-evident.
+Audit trail rule: **every rotation event MUST leave an entry in the security audit log** (Sprint 12 middleware writes to `core/src/middleware/audit_log.rs`). The audit row joins the tamper-evident HMAC hash chain (`seq`/`prev_hash`/`entry_hash`, keyed by `SAURON_AUDIT_HMAC_KEY`) — any edit/delete/reorder is detected by `verify_audit_chain`. (The HMAC chain, not Bitcoin/Solana anchoring, is what makes the security-audit log tamper-evident; on-chain anchoring covers `agent_action_receipts`.)
 
 ---
 

@@ -86,6 +86,18 @@ pub enum AuditEvent {
     AdminKeyRotated { key_fingerprint: String },
     /// Global ingress rate limiter rejected a request.
     RateLimitTripped { ip: String, path: String },
+    /// An in-path egress attempt was denied (allowlist miss, or the target
+    /// resolved to a blocked/private/metadata IP). Recorded to the
+    /// tamper-evident audit chain so denials are non-repudiable — allowed egress
+    /// gets an anchored receipt, but denials are only anchored via this chain.
+    EgressDenied {
+        tenant_id: String,
+        agent_id: String,
+        host: String,
+        method: String,
+        path: String,
+        reason: String,
+    },
 }
 
 impl AuditEvent {
@@ -100,6 +112,7 @@ impl AuditEvent {
             AuditEvent::PolicyViolation { .. } => "policy_violation",
             AuditEvent::AdminKeyRotated { .. } => "admin_key_rotated",
             AuditEvent::RateLimitTripped { .. } => "rate_limit_tripped",
+            AuditEvent::EgressDenied { .. } => "egress_denied",
         }
     }
 
@@ -110,7 +123,8 @@ impl AuditEvent {
     pub fn tenant_id(&self) -> String {
         match self {
             AuditEvent::CrossTenantAttempt { tenant_id, .. }
-            | AuditEvent::PolicyViolation { tenant_id, .. } => tenant_id.clone(),
+            | AuditEvent::PolicyViolation { tenant_id, .. }
+            | AuditEvent::EgressDenied { tenant_id, .. } => tenant_id.clone(),
             _ => "default".to_string(),
         }
     }
@@ -156,6 +170,30 @@ static DB_SINK: OnceLock<Mutex<Option<Arc<DbHandle>>>> = OnceLock::new();
 /// guard.
 static AUDIT_CHAIN_LOCK: Mutex<()> = Mutex::new(());
 
+/// Count of audit-sink write failures (DB insert / file write / serialize).
+/// A non-zero value means at least one security event may not have been durably
+/// recorded. Surfaced in `/admin/health/detailed` so operators can alert; each
+/// failure also emits a `tracing::error!` for SIEM. For regulated deployments,
+/// treat a rising count as a health failure.
+static AUDIT_SINK_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of audit-sink write failures since process start (health metric).
+pub fn audit_sink_failure_count() -> u64 {
+    AUDIT_SINK_FAILURES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Record (and loudly log) a dropped audit event. Called from the sink writers
+/// on every path where a configured sink fails to persist the event.
+fn record_audit_sink_failure(sink: &str, detail: &str) {
+    AUDIT_SINK_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    tracing::error!(
+        target: "sauron::audit::security",
+        sink,
+        error = %detail,
+        "AUDIT SINK WRITE FAILED — security event may not be durably recorded",
+    );
+}
+
 /// Initialize file + DB sinks. Idempotent — calling twice is safe; the
 /// second call replaces the previous sinks under their mutex.
 ///
@@ -198,12 +236,9 @@ pub fn init_audit_sink(db: Arc<DbHandle>) {
 /// Create the `security_audit_log` table if missing. Idempotent — safe
 /// to call on every process start.
 pub fn ensure_security_audit_schema(db: &DbHandle) -> Result<(), rusqlite::Error> {
-    let conn = db
-        .lock()
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))))?;
+    let conn = db.lock().map_err(|e| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(e.to_string())))
+    })?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS security_audit_log (
@@ -229,8 +264,14 @@ pub fn ensure_security_audit_schema(db: &DbHandle) -> Result<(), rusqlite::Error
     // Idempotent ALTERs for DBs whose security_audit_log was created (here or in
     // db.rs) before the hash chain landed. Must precede the seq index below.
     let _ = conn.execute("ALTER TABLE security_audit_log ADD COLUMN seq INTEGER", []);
-    let _ = conn.execute("ALTER TABLE security_audit_log ADD COLUMN prev_hash TEXT", []);
-    let _ = conn.execute("ALTER TABLE security_audit_log ADD COLUMN entry_hash TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE security_audit_log ADD COLUMN prev_hash TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE security_audit_log ADD COLUMN entry_hash TEXT",
+        [],
+    );
     let _ = conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_security_audit_seq ON security_audit_log(seq)",
         [],
@@ -240,8 +281,10 @@ pub fn ensure_security_audit_schema(db: &DbHandle) -> Result<(), rusqlite::Error
 
 /// HMAC key for the audit hash chain. Sourced from `SAURON_AUDIT_HMAC_KEY`
 /// (raw bytes); falls back to a fixed dev key when unset so dev/test still
-/// produce a verifiable chain. Operators MUST set it in production — without a
-/// secret key, a DB writer could recompute the chain after editing a row.
+/// produce a verifiable chain. In production this fallback is unreachable:
+/// `runtime_mode::assert_production_enforcement_safe` refuses to boot without a
+/// real key (without a secret key, a DB writer could recompute the chain after
+/// editing a row).
 fn audit_hmac_key() -> Vec<u8> {
     match std::env::var("SAURON_AUDIT_HMAC_KEY") {
         Ok(v) if !v.trim().is_empty() => v.into_bytes(),
@@ -289,12 +332,18 @@ fn new_audit_id() -> String {
 /// and swallowed so a full disk never bubbles up as a 5xx to the caller.
 fn write_file_sink(line: &str) {
     let cell = FILE_SINK.get_or_init(|| Mutex::new(None));
-    if let Ok(mut g) = cell.lock() {
-        if let Some(file) = g.as_mut() {
-            use std::io::Write;
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
+    match cell.lock() {
+        Ok(mut g) => {
+            if let Some(file) = g.as_mut() {
+                use std::io::Write;
+                // A full disk / IO error means the event was NOT durably written
+                // to the file sink — record it rather than silently dropping.
+                if let Err(e) = writeln!(file, "{line}").and_then(|_| file.flush()) {
+                    record_audit_sink_failure("file", &e.to_string());
+                }
+            }
         }
+        Err(_) => record_audit_sink_failure("file", "sink mutex poisoned"),
     }
 }
 
@@ -304,17 +353,27 @@ fn write_db_sink(record: &AuditRecord) {
     let db = match cell.lock() {
         Ok(g) => match g.as_ref() {
             Some(d) => Arc::clone(d),
+            // No DB sink configured (e.g. unit tests) — not a failure.
             None => return,
         },
-        Err(_) => return,
+        Err(_) => {
+            record_audit_sink_failure("db", "sink mutex poisoned");
+            return;
+        }
     };
     let conn = match db.lock() {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            record_audit_sink_failure("db", &format!("connection pool lock: {e}"));
+            return;
+        }
     };
     let event_json = match serde_json::to_string(&record.event) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(e) => {
+            record_audit_sink_failure("db", &format!("event serialize: {e}"));
+            return;
+        }
     };
     // H-2: append to the tamper-evident hash chain. `DbHandle::lock()` is a pool
     // checkout (not a global mutex), so the head-read → insert must be serialised
@@ -340,7 +399,7 @@ fn write_db_sink(record: &AuditRecord) {
         &event_json,
         record.timestamp,
     );
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "INSERT INTO security_audit_log
          (audit_id, tenant_id, event_type, event_json, timestamp, seq, prev_hash, entry_hash)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -354,7 +413,9 @@ fn write_db_sink(record: &AuditRecord) {
             last_hash,
             entry_hash
         ],
-    );
+    ) {
+        record_audit_sink_failure("db", &format!("insert: {e}"));
+    }
 }
 
 /// Verify the integrity of the security-audit hash chain. Walks rows in `seq`
@@ -390,13 +451,22 @@ pub fn verify_audit_chain(conn: &rusqlite::Connection) -> Result<u64, String> {
         let (seq, prev_hash, entry_hash, audit_id, tenant_id, event_type, event_json, ts) =
             row.map_err(|e| format!("row: {e}"))?;
         if seq != expected_seq {
-            return Err(format!("seq gap: expected {expected_seq}, got {seq} (row deleted/reordered)"));
+            return Err(format!(
+                "seq gap: expected {expected_seq}, got {seq} (row deleted/reordered)"
+            ));
         }
         if prev_hash != prev {
             return Err(format!("prev_hash mismatch at seq {seq} (chain broken)"));
         }
         let recomputed = compute_entry_hash(
-            &key, seq, &prev_hash, &audit_id, &tenant_id, &event_type, &event_json, ts,
+            &key,
+            seq,
+            &prev_hash,
+            &audit_id,
+            &tenant_id,
+            &event_type,
+            &event_json,
+            ts,
         );
         if recomputed != entry_hash {
             return Err(format!("entry_hash mismatch at seq {seq} (row tampered)"));
@@ -452,7 +522,9 @@ pub fn query_audit_events(
     tenant: &str,
     q: &AuditQuery,
 ) -> Result<Vec<AuditRecord>, String> {
-    let conn = db.lock().map_err(|e| format!("audit query: db lock: {e}"))?;
+    let conn = db
+        .lock()
+        .map_err(|e| format!("audit query: db lock: {e}"))?;
     let limit = q.limit.unwrap_or(200).min(1000) as i64;
     let since = q.since.unwrap_or(0);
     let until = q.until.unwrap_or(i64::MAX);
@@ -486,11 +558,7 @@ pub fn query_audit_events(
         let event_json: String = row.get(3)?;
         let timestamp: i64 = row.get(4)?;
         let event: AuditEvent = serde_json::from_str(&event_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
         })?;
         Ok(AuditRecord {
             audit_id,
@@ -568,9 +636,12 @@ pub async fn admin_audit_handler(
     axum::extract::Query(q): axum::extract::Query<AuditQuery>,
 ) -> Result<axum::response::Json<Vec<AuditRecord>>, (axum::http::StatusCode, String)> {
     let db = {
-        let st = state
-            .read()
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("state lock: {e}")))?;
+        let st = state.read().map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("state lock: {e}"),
+            )
+        })?;
         Arc::clone(&st.db)
     };
     let rows = query_audit_events(&db, tenant.as_str(), &q)
@@ -750,7 +821,10 @@ mod tests {
         // Tenant B sees NOTHING — the attempt was recorded against the
         // SOURCE tenant (the attacker), not the target.
         let b = query_audit_events(&db, "tenant_b", &AuditQuery::default()).expect("b");
-        assert!(b.is_empty(), "tenant_b should not see tenant_a's event: {b:?}");
+        assert!(
+            b.is_empty(),
+            "tenant_b should not see tenant_a's event: {b:?}"
+        );
         // Operator-global query (tenant=*) sees both.
         let all = query_audit_events(&db, "*", &AuditQuery::default()).expect("*");
         assert!(all.iter().any(|r| r.tenant_id == "tenant_a"));

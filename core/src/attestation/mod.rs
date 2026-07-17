@@ -51,7 +51,7 @@ pub use nitro::{
 pub use nitro_pcr::verify_nitro_pcrs;
 pub use tpm2::{
     detect_tpmt_signature_alg, load_trusted_tpm2_roots, parse_tpms_attest, verify_aik_cert_chain,
-    verify_aik_signature, verify_pcr_digest, TpmPublicKey, Tpm2QuotePayload, Tpm2QuoteVerifier,
+    verify_aik_signature, verify_pcr_digest, Tpm2QuotePayload, Tpm2QuoteVerifier, TpmPublicKey,
     TpmsAttest, TpmsClockInfo, TpmsPcrSelection, TpmsQuoteInfo, TPM_GENERATED_VALUE,
     TPM_ST_ATTEST_QUOTE,
 };
@@ -247,7 +247,10 @@ pub fn enforce_registration_attestation(
         }
         if !golden.iter().any(|g| g.eq_ignore_ascii_case(measurement)) {
             return Err(AttestationError::MeasurementMismatch {
-                expected: format!("one of {} pre-registered golden measurement(s)", golden.len()),
+                expected: format!(
+                    "one of {} pre-registered golden measurement(s)",
+                    golden.len()
+                ),
                 got: measurement.to_string(),
             });
         }
@@ -271,7 +274,10 @@ pub enum AttestationError {
     Decode(String),
     BadSignature,
     BadCertChain(String),
-    MeasurementMismatch { expected: String, got: String },
+    MeasurementMismatch {
+        expected: String,
+        got: String,
+    },
     NotImplemented(&'static str),
     /// Caller submitted a structurally well-formed payload but the verifier is
     /// only partially implemented (M1 ships parsing; M2 ships verification).
@@ -431,13 +437,11 @@ mod tests {
                 ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", None),
                 ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", None),
             ],
-            || {
-                match enforce_registration_attestation(AttestationKind::None, b"", "", "") {
-                    Err(AttestationError::BadCertChain(m)) => {
-                        assert!(m.contains("SAURON_REQUIRE_HARDWARE_ATTESTATION"));
-                    }
-                    other => panic!("expected BadCertChain, got {:?}", other),
+            || match enforce_registration_attestation(AttestationKind::None, b"", "", "") {
+                Err(AttestationError::BadCertChain(m)) => {
+                    assert!(m.contains("SAURON_REQUIRE_HARDWARE_ATTESTATION"));
                 }
+                other => panic!("expected BadCertChain, got {:?}", other),
             },
         );
     }
@@ -501,7 +505,10 @@ mod tests {
             &[
                 ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
                 ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
-                ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", Some("golden1,golden2")),
+                (
+                    "SAURON_ATTESTATION_GOLDEN_MEASUREMENTS",
+                    Some("golden1,golden2"),
+                ),
             ],
             || {
                 let measurement = "not_golden";
@@ -525,7 +532,10 @@ mod tests {
             &[
                 ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
                 ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
-                ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", Some("GOLDEN_ABC,other")),
+                (
+                    "SAURON_ATTESTATION_GOLDEN_MEASUREMENTS",
+                    Some("GOLDEN_ABC,other"),
+                ),
             ],
             || {
                 // Golden compare is case-insensitive; blob measurement is exact.

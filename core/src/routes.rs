@@ -5,12 +5,9 @@ use serde::Deserialize;
 use std::sync::{Arc, RwLock};
 
 use crate::{
-    admin, aggregation::handlers as agg_handlers,
-    attestation::handlers as attestation_handlers,
-    audit::handlers as audit_report_handlers,
-    middleware::audit_log as audit_log,
-    policy::binding_handlers as binding_handlers, policy::handlers as policy_handlers,
-    rings, state::ServerState, tenancy, usage, zk_verifier,
+    admin, aggregation::handlers as agg_handlers, attestation::handlers as attestation_handlers,
+    audit::handlers as audit_report_handlers, middleware::audit_log, policy::binding_handlers,
+    policy::handlers as policy_handlers, rings, state::ServerState, tenancy, usage, zk_verifier,
 };
 
 /// Router for `/v1/policy/*` — Sprint 2 policy DSL endpoints.
@@ -72,10 +69,7 @@ pub fn agent_spend_router() -> Router<Arc<RwLock<ServerState>>> {
 /// proving but still gated to avoid being an oracle for arbitrary callers.
 pub fn proofs_router() -> Router<Arc<RwLock<ServerState>>> {
     Router::new()
-        .route(
-            "/action-log/verify",
-            post(action_log_verify_handler),
-        )
+        .route("/action-log/verify", post(action_log_verify_handler))
         .route_layer(middleware::from_fn(admin::auth_middleware))
         .route_layer(middleware::from_fn(tenancy::extract_tenant))
 }
@@ -84,21 +78,25 @@ pub fn proofs_router() -> Router<Arc<RwLock<ServerState>>> {
 pub struct ActionLogVerifyRequest {
     #[serde(flatten)]
     pub payload: zk_verifier::ActionLogProofPayload,
+    // SECURITY: `expected_root_hex` is still caller-supplied. It MUST be bound to
+    // an authoritative, finalized server checkpoint (tenant + tree size + anchor
+    // id) rather than trusted verbatim — tracked with the proof-statement
+    // redesign in docs/design/zk-proof-statement.md. Until then this route only
+    // proves internal consistency with the supplied root, NOT with the server's
+    // authoritative log; treat its 200 accordingly.
     pub expected_root_hex: String,
-    /// Optional override of the verification-key directory. When absent,
-    /// falls back to `ZKP_VKEY_DIR` env var, then to the default
-    /// `zkp/circuits/build/keys` relative to CWD.
-    #[serde(default)]
-    pub vkey_dir: Option<String>,
+    // `vkey_dir` was request-controlled — a caller could point verification at an
+    // attacker-supplied verification key (or traverse the filesystem). REMOVED:
+    // the verification-key directory is now server-controlled only (ZKP_VKEY_DIR
+    // env, else the built-in default). Any `vkey_dir` field in the body is
+    // ignored by serde (no field), so old clients simply lose the override.
 }
 
 async fn action_log_verify_handler(
     AxumJson(body): AxumJson<ActionLogVerifyRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let dir = body
-        .vkey_dir
-        .or_else(|| std::env::var("ZKP_VKEY_DIR").ok())
-        .unwrap_or_else(|| "zkp/circuits/build/keys".to_string());
+    // Server-controlled ONLY — never from the request.
+    let dir = std::env::var("ZKP_VKEY_DIR").unwrap_or_else(|_| "zkp/circuits/build/keys".to_string());
     let loader = zk_verifier::FsVKeyLoader::new(dir);
 
     match zk_verifier::verify_action_log_proof(&body.payload, &body.expected_root_hex, &loader)
@@ -163,26 +161,19 @@ pub fn cohort_router() -> Router<Arc<RwLock<ServerState>>> {
             "/",
             post(agg_handlers::cohort_upsert_handler).get(agg_handlers::cohort_list_handler),
         )
-        .route(
-            "/published",
-            get(agg_handlers::cohort_published_handler),
-        )
+        .route("/published", get(agg_handlers::cohort_published_handler))
         // S8 ext: per-cohort ε ledger surface. Both routes admin-gated;
         // the rotate route is operator-only (regulatory quarterly reset).
         // Declared BEFORE the catch-all `/{id}` so axum prefers the
         // literal segments.
-        .route(
-            "/{id}/budget",
-            get(agg_handlers::cohort_budget_get_handler),
-        )
+        .route("/{id}/budget", get(agg_handlers::cohort_budget_get_handler))
         .route(
             "/{id}/budget/rotate",
             post(agg_handlers::cohort_budget_rotate_handler),
         )
         .route(
             "/{id}",
-            get(agg_handlers::cohort_get_handler)
-                .delete(agg_handlers::cohort_delete_handler),
+            get(agg_handlers::cohort_get_handler).delete(agg_handlers::cohort_delete_handler),
         )
         .route_layer(middleware::from_fn(admin::auth_middleware))
         .route_layer(middleware::from_fn(tenancy::extract_tenant))
@@ -249,8 +240,14 @@ pub fn admin_router() -> Router<Arc<RwLock<ServerState>>> {
         .route("/site/{name}/zkp_proofs", get(admin::get_site_zkp_proofs))
         .route("/requests", get(admin::get_requests))
         .route("/stats", get(admin::get_stats))
-        .route("/anchor/agent-actions/proof", get(admin::get_action_anchor_proof))
-        .route("/anchor/agent-actions/run", post(admin::force_action_anchor_run))
+        .route(
+            "/anchor/agent-actions/proof",
+            get(admin::get_action_anchor_proof),
+        )
+        .route(
+            "/anchor/agent-actions/run",
+            post(admin::force_action_anchor_run),
+        )
         // ADR-001: per-batch three-state surface (solana.confirmed / bitcoin.ots_upgraded)
         .route("/anchor/batches", get(admin::get_anchor_batches))
         // Download the OpenTimestamps `.ots` proof for a batch's BTC anchor.
@@ -267,7 +264,10 @@ pub fn admin_router() -> Router<Arc<RwLock<ServerState>>> {
         .route("/checksum/audit/{agent_id}", get(admin::get_checksum_audit))
         .route("/health/detailed", get(admin::health))
         // Anonymous ring-policy admin ops (phase 2; gated by SAURON_ANON_RINGS).
-        .route("/rings", post(rings::create_ring_handler).get(rings::list_rings_handler))
+        .route(
+            "/rings",
+            post(rings::create_ring_handler).get(rings::list_rings_handler),
+        )
         .route("/rings/{ring_id}/subscribe", post(rings::subscribe_handler))
         .route("/rings/{ring_id}/revoke", post(rings::revoke_handler))
         .route("/rings/{ring_id}/members", get(rings::members_handler))

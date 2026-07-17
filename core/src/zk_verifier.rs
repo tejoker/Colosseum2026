@@ -193,7 +193,9 @@ pub async fn verify_action_log_proof_with_vk(
     let proof_json: serde_json::Value = serde_json::from_slice(&proof_json_bytes)
         .map_err(|e| ZkVerifyError::Malformed(format!("proof JSON parse: {e}")))?;
     if !proof_json.is_object() {
-        return Err(ZkVerifyError::Malformed("proof JSON is not an object".into()));
+        return Err(ZkVerifyError::Malformed(
+            "proof JSON is not an object".into(),
+        ));
     }
 
     // Read the vkey file + check the DEV-disclaimer fail-closed gate.
@@ -505,8 +507,7 @@ mod tests {
         // so we only assert the dev-runtime branch here when the harness is
         // running in dev. The production branch is exercised by inspecting
         // the error variant when ENV is unset (default).
-        let res =
-            enforce_dev_vkey_policy(&bytes, std::path::Path::new("/tmp/x.vkey.json"), "Test");
+        let res = enforce_dev_vkey_policy(&bytes, std::path::Path::new("/tmp/x.vkey.json"), "Test");
         if crate::runtime_mode::is_development_runtime() {
             assert!(res.is_ok());
         } else {

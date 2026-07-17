@@ -18,16 +18,21 @@
 //! All tests own a private on-disk SQLite database (same pattern as
 //! `core/tests/policy_routes.rs::build_test_repo`).
 
+// These tests assert DB state / HTTP status after calling handlers, not the
+// returned `Json` bodies — so the must-use handler results are intentionally
+// dropped.
+#![allow(unused_must_use)]
+
 use std::sync::Arc;
 
 use sauron_core::db::open_db_at;
 use sauron_core::policy::compiler::compile;
-use sauron_core::policy::parser::parse;
 use sauron_core::policy::handlers::{
     get_spend_inner_tenant, list_spend_log_inner_tenant, record_spend_inner,
-    record_spend_inner_tenant, resolve_spend_for_evaluation_tenant, RecordSpendBody,
-    SpendLogQuery, SpendQuery,
+    record_spend_inner_tenant, resolve_spend_for_evaluation_tenant, RecordSpendBody, SpendLogQuery,
+    SpendQuery,
 };
+use sauron_core::policy::parser::parse;
 use sauron_core::policy::PolicyStore;
 use sauron_core::repository::Repo;
 use sauron_core::tenancy::{TenantId, TenantRegistry, DEFAULT_TENANT};
@@ -38,9 +43,7 @@ fn build_test_repo(test_name: &str) -> (Repo, Arc<sauron_core::db::DbHandle>) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "sauron-mt-{pid}-{nanos}-{test_name}.db"
-    ));
+    let path = std::env::temp_dir().join(format!("sauron-mt-{pid}-{nanos}-{test_name}.db"));
     let _ = std::fs::remove_file(&path);
     let handle = Arc::new(open_db_at(path.to_str().unwrap(), 2));
     let repo = Repo::Sqlite(Arc::clone(&handle));
@@ -224,28 +227,18 @@ fn evaluate_resolver_uses_tenant_scoped_authoritative_total() {
         // different tenant header gets a zeroed ledger — its spend has
         // never been recorded under tenant_b. The redteam A3b "policy
         // bypass via tenant header" attack lives here.
-        let (spend_b, simulator_b, _) = resolve_spend_for_evaluation_tenant(
-            &repo,
-            "tenant_b",
-            "pol_A",
-            Some("agent-1"),
-            None,
-        )
-        .await
-        .unwrap();
+        let (spend_b, simulator_b, _) =
+            resolve_spend_for_evaluation_tenant(&repo, "tenant_b", "pol_A", Some("agent-1"), None)
+                .await
+                .unwrap();
         assert_eq!(spend_b, 0.0);
         assert!(!simulator_b, "agent_id present so not simulator mode");
 
         // Sanity: tenant_a still sees its own 75 USD.
-        let (spend_a, _, _) = resolve_spend_for_evaluation_tenant(
-            &repo,
-            "tenant_a",
-            "pol_A",
-            Some("agent-1"),
-            None,
-        )
-        .await
-        .unwrap();
+        let (spend_a, _, _) =
+            resolve_spend_for_evaluation_tenant(&repo, "tenant_a", "pol_A", Some("agent-1"), None)
+                .await
+                .unwrap();
         assert!((spend_a - 75.0).abs() < 1e-9);
     });
 }
@@ -470,9 +463,7 @@ fn admin_agents_filters_to_callers_tenant() {
     let listed_a: Vec<String> = {
         let conn = db.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT agent_id FROM agents WHERE tenant_id = ?1 ORDER BY agent_id",
-            )
+            .prepare("SELECT agent_id FROM agents WHERE tenant_id = ?1 ORDER BY agent_id")
             .unwrap();
         let rows: Vec<String> = stmt
             .query_map(rusqlite::params!["tenant_a"], |r| r.get::<_, String>(0))
@@ -486,9 +477,7 @@ fn admin_agents_filters_to_callers_tenant() {
     let listed_b: Vec<String> = {
         let conn = db.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT agent_id FROM agents WHERE tenant_id = ?1 ORDER BY agent_id",
-            )
+            .prepare("SELECT agent_id FROM agents WHERE tenant_id = ?1 ORDER BY agent_id")
             .unwrap();
         let rows: Vec<String> = stmt
             .query_map(rusqlite::params!["tenant_b"], |r| r.get::<_, String>(0))
@@ -618,8 +607,7 @@ fn cross_tenant_evaluate_returns_404_not_403() {
     // Mirror the handler's NotFound mapping to pin the 404-not-403 shape.
     let mapped: AppError = lookup
         .ok_or_else(|| AppError::NotFound(format!("policy {policy_id} not found")))
-        .err()
-        .expect("must error");
+        .expect_err("must error");
     match mapped {
         AppError::NotFound(_) => {} // expected
         other => panic!(

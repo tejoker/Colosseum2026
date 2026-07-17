@@ -32,10 +32,7 @@ impl AttestationVerifier for Ed25519SelfVerifier {
 
 /// Free-function entry point preserved for back-compat with code that called
 /// `crate::attestation::verify_ed25519_self` directly before the refactor.
-pub fn verify_ed25519_self(
-    blob: &[u8],
-    ctx: &AttestationContext,
-) -> Result<(), AttestationError> {
+pub fn verify_ed25519_self(blob: &[u8], ctx: &AttestationContext) -> Result<(), AttestationError> {
     let blob_str = std::str::from_utf8(blob)
         .map_err(|e| AttestationError::Decode(format!("blob is not utf-8: {e}")))?;
     let parts: Vec<&str> = blob_str.split('.').collect();
@@ -58,11 +55,11 @@ pub fn verify_ed25519_self(
         .as_slice()
         .try_into()
         .map_err(|_| AttestationError::BadCertChain("pubkey is not 32 bytes".into()))?;
-    let vk = VerifyingKey::from_bytes(&pk_arr)
-        .map_err(|_| AttestationError::BadCertChain("pubkey is not a valid Ed25519 point".into()))?;
+    let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| {
+        AttestationError::BadCertChain("pubkey is not a valid Ed25519 point".into())
+    })?;
 
-    let sig = Signature::from_slice(&sig_bytes)
-        .map_err(|_| AttestationError::BadSignature)?;
+    let sig = Signature::from_slice(&sig_bytes).map_err(|_| AttestationError::BadSignature)?;
     vk.verify(&payload_bytes, &sig)
         .map_err(|_| AttestationError::BadSignature)?;
 
@@ -178,8 +175,7 @@ mod tests {
         let _orig_payload = parts.next().unwrap();
         let sig = parts.next().unwrap();
         let mutated_payload = serde_json::json!({"measurement":"fake","ts":0,"agent_id":"x"});
-        let mutated_b64 =
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&mutated_payload).unwrap());
+        let mutated_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&mutated_payload).unwrap());
         let mutated_blob = format!("{}.{}", mutated_b64, sig).into_bytes();
         let ctx = AttestationContext {
             expected_measurement_hex: "fake",

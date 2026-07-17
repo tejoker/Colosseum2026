@@ -3,10 +3,12 @@
 // Architecture:
 //   Browser → http://<host>:3000/api/X  (same-origin)
 //          → this proxy
-//          → http://localhost:3001/admin/X  (core, x-admin-key)
+//          → http://localhost:3001/admin/X  (core, short-lived tenant-bound admin JWT)
 //
 // The browser never sees the core URL. CORS is not a concern because the
 // proxy runs server-side in Next.js.
+
+import { createHmac } from "node:crypto";
 
 const CORE_INTERNAL_URL = (
   process.env.SAURON_CORE_INTERNAL_URL ?? "http://localhost:3001"
@@ -48,6 +50,39 @@ function adminKey(): string {
   return k.trim();
 }
 
+function b64uJson(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+/**
+ * Mint a short-lived core admin JWT from the already verified dashboard
+ * session. This prevents the dashboard's static admin key from becoming a
+ * cross-tenant escalation path: non-super operators receive a tenant-locked
+ * `tnt` claim, while only an authenticated super operator receives
+ * `admin:super`. A static key remains a development fallback.
+ */
+function adminAuthHeaders(req?: Request): Record<string, string> {
+  const secret = process.env.SAURON_ADMIN_JWT_HS256_SECRET?.trim();
+  const superOperator = req?.headers.get("x-sauron-admin-super") === "1";
+  const tenants = (req?.headers.get("x-sauron-admin-tenants") ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  if (secret && (superOperator || tenants.length > 0)) {
+    const header = b64uJson({ alg: "HS256", typ: "JWT" });
+    const claims = {
+      scp: superOperator ? ["admin:super"] : ["admin:read", "admin:write"],
+      tnt: superOperator ? [] : tenants,
+      exp: Math.floor(Date.now() / 1000) + 60,
+    };
+    const payload = b64uJson(claims);
+    const input = `${header}.${payload}`;
+    const sig = createHmac("sha256", secret).update(input).digest("base64url");
+    return { authorization: `Bearer ${input}.${sig}` };
+  }
+  return { "x-admin-key": adminKey() };
+}
+
 export interface ProxyOpts {
   method?: string;
   body?: BodyInit | null;
@@ -57,7 +92,7 @@ export interface ProxyOpts {
 
 /**
  * Forward to `${CORE_INTERNAL_URL}/admin/${coreAdminPath}${incomingSearch}` with
- * `x-admin-key`. Returns a Response with the upstream body + status. On network
+ * a tenant-bound admin JWT (or the development static key fallback). Returns a Response with the upstream body + status. On network
  * failure returns 503 `{ok:false, error:"upstream unreachable"}`.
  *
  * `coreAdminPath` MUST NOT start with a slash.
@@ -81,9 +116,9 @@ export async function proxyCore(
 
   const target = `${CORE_INTERNAL_URL}/admin/${coreAdminPath}${search}`;
 
-  let key: string;
+  let auth: Record<string, string>;
   try {
-    key = adminKey();
+    auth = adminAuthHeaders(req);
   } catch (e) {
     return Response.json(
       { ok: false, error: e instanceof Error ? e.message : "admin key missing" },
@@ -92,7 +127,7 @@ export async function proxyCore(
   }
 
   const headers: Record<string, string> = {
-    "x-admin-key": key,
+    ...auth,
     accept: "application/json",
     ...(opts.extraHeaders ?? {}),
   };
@@ -139,9 +174,9 @@ export async function fetchCoreJson<T = unknown>(
   search = "",
   req?: Request
 ): Promise<{ ok: true; data: T } | { ok: false; response: Response }> {
-  let key: string;
+  let auth: Record<string, string>;
   try {
-    key = adminKey();
+    auth = adminAuthHeaders(req);
   } catch (e) {
     return {
       ok: false,
@@ -153,7 +188,7 @@ export async function fetchCoreJson<T = unknown>(
   }
   const target = `${CORE_INTERNAL_URL}/admin/${coreAdminPath}${search}`;
   const headers: Record<string, string> = {
-    "x-admin-key": key,
+    ...auth,
     accept: "application/json",
   };
   if (req) {
@@ -204,9 +239,9 @@ export async function proxyCoreBinary(
   req: Request,
   fallbackFilename?: string
 ): Promise<Response> {
-  let key: string;
+  let auth: Record<string, string>;
   try {
-    key = adminKey();
+    auth = adminAuthHeaders(req);
   } catch (e) {
     return Response.json(
       { ok: false, error: e instanceof Error ? e.message : "admin key missing" },
@@ -221,7 +256,7 @@ export async function proxyCoreBinary(
   }
   const target = `${CORE_INTERNAL_URL}/admin/${coreAdminPath}${search}`;
   const headers: Record<string, string> = {
-    "x-admin-key": key,
+    ...auth,
     accept: "application/octet-stream",
   };
   const tenant = tenantFromRequest(req);
@@ -256,7 +291,7 @@ export async function proxyCoreBinary(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// /v1/* variants. Same admin-key auth, but mount point is `/v1/<prefix>/<path>`
+// /v1/* variants. Same tenant-bound admin auth, but mount point is `/v1/<prefix>/<path>`
 // instead of `/admin/<path>` (used by /v1/policy/* and /v1/agents/*/spend).
 // Additive — does NOT change the /admin/* helpers above.
 // ─────────────────────────────────────────────────────────────────────────
@@ -284,9 +319,9 @@ export async function proxyCoreV1(
 
   const target = `${CORE_INTERNAL_URL}/v1/${corePath}${search}`;
 
-  let key: string;
+  let auth: Record<string, string>;
   try {
-    key = adminKey();
+    auth = adminAuthHeaders(req);
   } catch (e) {
     return Response.json(
       { ok: false, error: e instanceof Error ? e.message : "admin key missing" },
@@ -295,7 +330,7 @@ export async function proxyCoreV1(
   }
 
   const headers: Record<string, string> = {
-    "x-admin-key": key,
+    ...auth,
     accept: "application/json",
     ...(opts.extraHeaders ?? {}),
   };
@@ -339,9 +374,9 @@ export async function fetchCoreV1Json<T = unknown>(
   search = "",
   req?: Request
 ): Promise<{ ok: true; data: T } | { ok: false; response: Response }> {
-  let key: string;
+  let auth: Record<string, string>;
   try {
-    key = adminKey();
+    auth = adminAuthHeaders(req);
   } catch (e) {
     return {
       ok: false,
@@ -353,7 +388,7 @@ export async function fetchCoreV1Json<T = unknown>(
   }
   const target = `${CORE_INTERNAL_URL}/v1/${corePath}${search}`;
   const headers: Record<string, string> = {
-    "x-admin-key": key,
+    ...auth,
     accept: "application/json",
   };
   if (req) {

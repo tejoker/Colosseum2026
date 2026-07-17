@@ -22,7 +22,10 @@ impl LanguageAllowlistCheck {
     /// case-insensitive — codes are lowercased on the way in.
     pub fn new(allowed: Vec<String>) -> Self {
         Self {
-            allowed: allowed.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            allowed: allowed
+                .into_iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect(),
         }
     }
 }

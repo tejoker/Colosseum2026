@@ -141,11 +141,7 @@ impl PaillierPublicKey {
     ///
     /// NEEDS_CRYPTO_REVIEW: r is sampled uniformly from Z_n* via rejection
     /// sampling. Not constant-time. Side-channel resistance is out of scope.
-    pub fn encrypt(
-        &self,
-        m: &BigUint,
-        rng: &mut impl RngCore,
-    ) -> Result<Ciphertext, HeError> {
+    pub fn encrypt(&self, m: &BigUint, rng: &mut impl RngCore) -> Result<Ciphertext, HeError> {
         if m >= &self.n {
             return Err(HeError::MessageOutOfRange);
         }
@@ -228,11 +224,9 @@ impl PaillierPrivateKey {
     /// before production use. Default bit length is 2048.
     pub fn generate(bits: usize, rng: &mut impl RngCore) -> Result<Self, HeError> {
         if bits < 64 {
-            return Err(HeError::InvalidParameter(
-                "bits must be >= 64".to_string(),
-            ));
+            return Err(HeError::InvalidParameter("bits must be >= 64".to_string()));
         }
-        if bits % 2 != 0 {
+        if !bits.is_multiple_of(2) {
             return Err(HeError::InvalidParameter("bits must be even".to_string()));
         }
         let half = bits / 2;
@@ -264,9 +258,8 @@ impl PaillierPrivateKey {
         let lambda = p_minus_1.lcm(&q_minus_1);
         // With g = n+1, L(g^lambda mod n^2) = lambda  mod n,
         // so mu = lambda^{-1} mod n. Use the extended GCD.
-        let mu = mod_inv(&lambda, &n).ok_or_else(|| {
-            HeError::InvalidParameter("lambda not invertible mod n".into())
-        })?;
+        let mu = mod_inv(&lambda, &n)
+            .ok_or_else(|| HeError::InvalidParameter("lambda not invertible mod n".into()))?;
         Ok(Self {
             public: PaillierPublicKey { n, n_squared, g },
             lambda,
@@ -582,7 +575,7 @@ mod tests {
         let sk = medium_keypair(42);
         // Ensure modulus length is close to 512 bits (allow ±2 bits slop).
         let bits = sk.public.n.bits();
-        assert!(bits >= 510 && bits <= 514, "unexpected n bits={bits}");
+        assert!((510..=514).contains(&bits), "unexpected n bits={bits}");
         let mut rng = StdRng::seed_from_u64(43);
         let m = BigUint::from(12345u32);
         let ct = sk.public.encrypt(&m, &mut rng).unwrap();

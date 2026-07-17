@@ -64,6 +64,13 @@ pub fn sign(
 
 pub fn verify(msg: &[u8], ring: &[RistrettoPoint], sig: &RingSignature) -> bool {
     let n = ring.len();
+    // An empty ring makes the loop below run zero times, leaving `c == c0`
+    // trivially true — i.e. ANY signature "verifies" against an empty ring.
+    // Reject empty rings (and the matching empty response vector) outright:
+    // a valid LSAG signature is over at least one member.
+    if n == 0 || sig.responses.is_empty() {
+        return false;
+    }
     if sig.responses.len() != n {
         return false;
     }
@@ -135,5 +142,28 @@ mod tests {
         let msg = b"proof";
         let proof = group.prove(&m1.identity, msg).unwrap();
         assert!(group.verify_proof(msg, &proof));
+    }
+
+    #[test]
+    fn empty_ring_never_verifies() {
+        // Regression: an empty ring made the verify loop run zero times, so
+        // `c == c0` held for ANY signature — an authentication bypass.
+        use curve25519_dalek::traits::Identity;
+        let forged = RingSignature {
+            c0: Scalar::ZERO,
+            responses: vec![],
+            key_image: RistrettoPoint::identity(),
+        };
+        assert!(!verify(b"anything", &[], &forged), "empty ring must never verify");
+        // Also via the group wrapper (mirrors an empty client_group at /register).
+        let empty = AdultGroup::new();
+        assert!(!empty.verify_proof(b"anything", &forged));
+        // A non-empty c0 against an empty ring must also fail.
+        let forged2 = RingSignature {
+            c0: Scalar::from_bytes_mod_order([7u8; 32]),
+            responses: vec![],
+            key_image: RistrettoPoint::identity(),
+        };
+        assert!(!verify(b"x", &[], &forged2));
     }
 }

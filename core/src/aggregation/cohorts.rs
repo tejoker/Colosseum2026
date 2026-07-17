@@ -125,7 +125,7 @@ impl CohortDefinition {
             }
         }
         if let Some(c) = self.delta_cap_per_cycle {
-            if !c.is_finite() || c < 0.0 || c >= 1.0 {
+            if !c.is_finite() || !(0.0..1.0).contains(&c) {
                 return Err(CohortError::Invalid(format!(
                     "delta_cap_per_cycle must be in [0,1), got {c}"
                 )));
@@ -286,7 +286,8 @@ impl CohortStore {
                 k_anonymity_threshold,
                 epsilon_per_metric: eps,
                 delta,
-                cycle_seconds: cycle_seconds.and_then(|v| if v > 0 { Some(v as u64) } else { None }),
+                cycle_seconds: cycle_seconds
+                    .and_then(|v| if v > 0 { Some(v as u64) } else { None }),
                 epsilon_cap_per_cycle: epsilon_cap,
                 delta_cap_per_cycle: delta_cap,
             };
@@ -407,8 +408,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("sauron-cohorts-{pid}-{nanos}-{label}.db"));
+        let path = std::env::temp_dir().join(format!("sauron-cohorts-{pid}-{nanos}-{label}.db"));
         let _ = std::fs::remove_file(&path);
         Arc::new(open_db_at(path.to_str().unwrap(), 2))
     }

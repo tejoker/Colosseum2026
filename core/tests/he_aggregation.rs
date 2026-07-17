@@ -23,8 +23,7 @@ fn temp_db(label: &str) -> Arc<DbHandle> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    let path = std::env::temp_dir()
-        .join(format!("sauron-he-it-{pid}-{nanos}-{label}.db"));
+    let path = std::env::temp_dir().join(format!("sauron-he-it-{pid}-{nanos}-{label}.db"));
     let _ = std::fs::remove_file(&path);
     Arc::new(open_db_at(path.to_str().unwrap(), 2))
 }
@@ -66,11 +65,7 @@ fn it_aggregates_five_ciphertexts_and_decrypts_correct_sum() {
     let stored = get_he_aggregation(&db, "agg_five").unwrap().unwrap();
     assert_eq!(stored.n_contributions, 5);
     let ct = ciphertext_from_b64(&stored.sum_ciphertext_b64).unwrap();
-    let restored = HeAggregator::from_parts(
-        sk.public.clone(),
-        ct,
-        stored.n_contributions as u32,
-    );
+    let restored = HeAggregator::from_parts(sk.public.clone(), ct, stored.n_contributions as u32);
     let total = restored.finalize(&sk).unwrap();
     assert_eq!(total, 75);
 }

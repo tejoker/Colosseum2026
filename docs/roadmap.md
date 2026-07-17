@@ -20,7 +20,14 @@ Two-session sprint delivered the following:
 - **Anchor ADR-001 implemented** — three-state surface (Solana-confirmed /
   BTC-pending / Dually anchored) and deprecated the boolean `anchored` field.
   Documented in `README.md` under the OpenTimestamps section.
-- **Postgres M1-M4** — txn helpers + 14 modules ported + race tests + CI matrix.
+- **Postgres M1 (only)** — serializable txn helper + the **first 3 modules
+  cut over** (`agent_call_nonces`, `ajwt_used_jtis`, `risk_rate_counters`) +
+  the TOCTOU race scenario + a `test-postgres` CI job. These 3 are the only
+  tables with a live `sqlx`/Postgres path (`repository.rs`). **M2/M3 added Repo
+  methods but their call sites were NOT swept** — they still run sync SQLite
+  under a held `MutexGuard` (see the `M2-callsite-sweep` TODOs in
+  `agent.rs`/`main.rs`), so those tables are not exercised on Postgres.
+  **Single-node SQLite remains the default backend.** Full port = Plan 2 below.
 - **TPM2 M1-M2** — TPMS_ATTEST parser + AIK signature verification +
   EK->AIK cert-chain walker skeleton + `ServerDerived` gating.
 - **Benchmark scaffold** — `sauron`, `dpop`, and `http-sig` (RFC 9421) targets
@@ -126,42 +133,47 @@ before flipping the next table.
   - `test-postgres` — boots `postgres:16-alpine`, applies
     `migrations/postgres/0001_initial.sql`, runs M1 unit tests + race scenario.
 
-### M2 — TOCTOU-sensitive consume tables (shipped 2026-05-15)
+### M2 — TOCTOU-sensitive consume tables (Repo methods added; call sites NOT swept)
 
-Four replay-sensitive tables ported. All Postgres paths use
-`SELECT FOR UPDATE` + `RETURNING` to close the read/modify/write window:
+Repo methods were written for these tables with `SELECT FOR UPDATE` +
+`RETURNING`, but the **call sites still hold a sync `MutexGuard<Connection>`
+and run rusqlite** (`M2-callsite-sweep` TODOs). They are therefore **not on the
+Postgres path** — flipping `SAURON_DB_BACKEND=postgres` does not route them:
 
 - `agent_pop_challenges`
 - `bank_attestation_nonces`
 - `consent_log`
 - `agent_payment_authorizations`
 
-Race scenario expanded to cover each new endpoint; still asserts
-1 winner / N-1 conflicts under concurrent reuse.
+### M3 — Identity tables (Repo methods added; call sites NOT swept)
 
-### M3 — Identity tables (shipped 2026-05-15)
-
-Four identity tables ported. Postgres `BIGSERIAL` handles autoincrement
-columns that previously relied on SQLite `INTEGER PRIMARY KEY`:
+Same status as M2 — Postgres Repo methods exist (`BIGSERIAL` autoincrement) but
+the call sites are unswept sync SQLite. Not cut over:
 
 - `credential_codes`
 - `agents` + checksum tables
 - `users` + credentials + registrations
 - `merkle_leaves`
 
+> **Reconciliation note:** the code has a live Postgres path for the **3 M1
+> tables only**. "M2/M3 shipped" and the "14 modules ported" line above were
+> aspirational — corrected to match `repository.rs` + the open callsite-sweep
+> TODOs. Completing M2-M4 is the work in Plan 2.
+
 Lower contention than M2; mostly mechanical SQL dialect work.
 
-### M4 — Anchor tables (shipped 2026-05-15)
+### M4 — Anchor tables (Repo methods added; call sites NOT swept)
 
-Three anchor tables ported:
+Same status as M2/M3 — methods exist, call sites unswept:
 
 - `bitcoin_merkle_anchors`
 - `solana_merkle_anchors`
 - `agent_action_receipts`
 
-After M4 the rusqlite path is feature-complete in Postgres. Staging cuts
-over; the SQLite path remains as a dev fallback. Full confidence-suite run
-on Postgres before flipping production.
+**Only once M2-M4 call sites are actually swept** (this Plan 2's remaining work)
+does the rusqlite path become replaceable by Postgres. Until then SQLite is the
+real backend for everything except the 3 M1 tables. The cutover plan: staging
+first, full confidence-suite on Postgres, then production.
 
 ### M5 — Decommission single-node-SQLite acknowledgement (DEFERRED, target Q3 2026)
 

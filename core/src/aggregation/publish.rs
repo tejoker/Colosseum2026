@@ -184,9 +184,7 @@ pub fn publish_cohort(
     rng: &mut impl RngCore,
 ) -> Result<PublishedCohort, PublishError> {
     if period_end < period_start {
-        return Err(PublishError::Invalid(
-            "period_end < period_start".into(),
-        ));
+        return Err(PublishError::Invalid("period_end < period_start".into()));
     }
     cohort
         .validate()
@@ -452,8 +450,7 @@ pub fn publish_cohort_with_ledger(
                     .into_values()
                     .map(|r| clamp_unit(r.claimed_value as f64 / 1000.0))
                     .collect();
-                values
-                    .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let raw_p25 = nearest_rank(&values, 0.25);
                 let raw_p50 = nearest_rank(&values, 0.50);
                 let raw_p75 = nearest_rank(&values, 0.75);
@@ -595,9 +592,9 @@ mod tests {
             row("t2", "success_rate", 920, 11),
             row("t3", "success_rate", 940, 12),
             row("t4", "success_rate", 960, 13),
-            row("t1", "latency_ms",   500, 14),
-            row("t2", "latency_ms",   510, 15),
-            row("t3", "latency_ms",   520, 16),
+            row("t1", "latency_ms", 500, 14),
+            row("t2", "latency_ms", 510, 15),
+            row("t3", "latency_ms", 520, 16),
         ];
         let mut rng = StdRng::seed_from_u64(7);
         let out = publish_cohort(&cohort, &raw, 0, 60, &mut rng).unwrap();
@@ -692,11 +689,11 @@ mod tests {
         // Three metrics: m_pass has 3 contributors, m_low has 2 (suppressed),
         // m_pass2 has 3 contributors.
         let raw = vec![
-            row("t1", "m_pass",  100, 1),
-            row("t2", "m_pass",  200, 1),
-            row("t3", "m_pass",  300, 1),
-            row("t1", "m_low",   100, 1),
-            row("t2", "m_low",   200, 1),
+            row("t1", "m_pass", 100, 1),
+            row("t2", "m_pass", 200, 1),
+            row("t3", "m_pass", 300, 1),
+            row("t1", "m_low", 100, 1),
+            row("t2", "m_low", 200, 1),
             row("t1", "m_pass2", 100, 1),
             row("t2", "m_pass2", 200, 1),
             row("t3", "m_pass2", 300, 1),
@@ -754,9 +751,9 @@ mod tests {
         // collapses to 1.0 and sensitivity stays at 1.0.
         let cohort = make_cohort(3, 1.0);
         let raw = vec![
-            row("t1", "m", 500, 1),     // 0.5 in range
-            row("t2", "m", 600, 1),     // 0.6 in range
-            row("t3", "m", 50_000, 1),  // 50.0 → clamp to 1.0
+            row("t1", "m", 500, 1),    // 0.5 in range
+            row("t2", "m", 600, 1),    // 0.6 in range
+            row("t3", "m", 50_000, 1), // 50.0 → clamp to 1.0
         ];
         let mut rng = StdRng::seed_from_u64(0);
         let out = publish_cohort(&cohort, &raw, 0, 60, &mut rng).unwrap();

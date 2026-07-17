@@ -39,10 +39,7 @@ impl RuntimeCheck for PayloadSizeCheck {
         if bytes > self.max_bytes {
             Verdict::Deny {
                 check: self.name().to_string(),
-                reason: format!(
-                    "payload {bytes} bytes exceeds max {} bytes",
-                    self.max_bytes
-                ),
+                reason: format!("payload {bytes} bytes exceeds max {} bytes", self.max_bytes),
             }
         } else {
             Verdict::Allow

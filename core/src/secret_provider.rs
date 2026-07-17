@@ -113,8 +113,8 @@ fn resolve_via_vault(name: &str) -> Result<Vec<u8>, ResolveError> {
         )
     })?;
     let wrapped_name = format!("{name}_WRAPPED");
-    let wrapped = std::env::var(&wrapped_name)
-        .map_err(|_| ResolveError::NotFound(wrapped_name.clone()))?;
+    let wrapped =
+        std::env::var(&wrapped_name).map_err(|_| ResolveError::NotFound(wrapped_name.clone()))?;
     if wrapped.trim().is_empty() {
         return Err(ResolveError::NotFound(wrapped_name));
     }
@@ -204,9 +204,7 @@ impl VaultTransitClient {
         let plaintext_b64 = resp_json
             .pointer("/data/plaintext")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ResolveError::Decode("vault response missing data.plaintext".into())
-            })?;
+            .ok_or_else(|| ResolveError::Decode("vault response missing data.plaintext".into()))?;
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         STANDARD
             .decode(plaintext_b64)
@@ -233,9 +231,7 @@ impl VaultTransitClient {
         let ct = resp_json
             .pointer("/data/ciphertext")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ResolveError::Decode("vault response missing data.ciphertext".into())
-            })?;
+            .ok_or_else(|| ResolveError::Decode("vault response missing data.ciphertext".into()))?;
         Ok(ct.to_string())
     }
 }
@@ -294,7 +290,9 @@ mod tests {
     // Env mutation is process-global. Serialise tests that touch SAURON_VAULT_*.
     fn env_lock() -> MutexGuard<'static, ()> {
         static M: OnceLock<Mutex<()>> = OnceLock::new();
-        M.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        M.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn clear_vault_env() {
