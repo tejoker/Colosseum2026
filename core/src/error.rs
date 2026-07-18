@@ -18,6 +18,7 @@ pub enum AppError {
     Unauthorized(String),
     NotFound(String),
     Conflict(String),
+    ServiceUnavailable(String),
     Internal(String),
 }
 
@@ -37,6 +38,7 @@ impl fmt::Display for AppError {
             AppError::Unauthorized(s) => write!(f, "unauthorized: {s}"),
             AppError::NotFound(s) => write!(f, "not found: {s}"),
             AppError::Conflict(s) => write!(f, "conflict: {s}"),
+            AppError::ServiceUnavailable(s) => write!(f, "service unavailable: {s}"),
             AppError::Internal(s) => write!(f, "internal: {s}"),
         }
     }
@@ -51,6 +53,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m),
+            AppError::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             // Internal errors: log full detail, return generic message to caller
             // to avoid leaking implementation details to pentesters.
             AppError::Internal(m) => {

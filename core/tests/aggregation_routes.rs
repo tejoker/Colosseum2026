@@ -18,8 +18,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sauron_core::aggregation::{
-    list_cohort, list_for_cohort, publish_cohort, publish_cohort_with_ledger, upsert_submission,
-    verify_stats_submission, AggError, CohortDefinition, CohortStore, StatsSubmission,
+    list_cohort, list_for_cohort, publish_cohort, publish_cohort_with_ledger, stats_scope_hash,
+    upsert_submission, verify_stats_submission, AggError, CohortDefinition, CohortStore,
+    StatsSubmission,
 };
 use sauron_core::db::{open_db_at, DbHandle};
 use sauron_core::dp::DpBudgetLedger;
@@ -65,7 +66,8 @@ fn good_submission(tenant: &str, agent: Option<&str>, claimed: i64) -> StatsSubm
         period_end: 60,
         merkle_root: "00".repeat(32),
         proof_b64: "e30=".into(),
-        vk_id: "StatsHonestComputation.dev.vk@v0".into(),
+        vk_id: "StatsHonestComputation.dev.vk@v1".into(),
+        checkpoint_id: "zkc_test".into(),
         public_inputs: vec![
             "1".into(),          // valid
             "0".into(),          // root (decimal 0 → 0x00..00 hex)
@@ -74,6 +76,9 @@ fn good_submission(tenant: &str, agent: Option<&str>, claimed: i64) -> StatsSubm
             "4".into(),          // n_records
             "0".into(),          // period_start
             "60".into(),         // period_end
+            "4".into(),          // tree_size
+            stats_scope_hash(tenant),
+            agent.map(stats_scope_hash).unwrap_or_else(|| "0".into()),
         ],
     }
 }

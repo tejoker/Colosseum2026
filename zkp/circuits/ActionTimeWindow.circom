@@ -18,7 +18,7 @@ include "../node_modules/circomlib/circuits/bitify.circom";
  *   - entry[entryFields]         : action-log entry
  *   - pathElements[levels]       : Merkle siblings
  *   - pathIndices[levels]        : left/right indicators
- *   - timestampSelector[entryFields] : one-hot selector picking the timestamp
+ *   - timestamp is fixed to protocol tuple offset 5
  *
  * Bound: 64-bit comparators (epoch seconds easily fit).
  *
@@ -35,27 +35,20 @@ template ActionTimeWindow(levels, entryFields) {
     signal input entry[entryFields];
     signal input pathElements[levels];
     signal input pathIndices[levels];
-    signal input timestampSelector[entryFields];
 
     // Public output
     signal output valid;
 
-    // ─── 1. Selector validity & timestamp extraction ───
-    signal selectorSum[entryFields + 1];
-    selectorSum[0] <== 0;
-    for (var f = 0; f < entryFields; f++) {
-        timestampSelector[f] * (1 - timestampSelector[f]) === 0;
-        selectorSum[f + 1] <== selectorSum[f] + timestampSelector[f];
-    }
-    selectorSum[entryFields] === 1;
-
-    signal partial[entryFields + 1];
-    partial[0] <== 0;
-    for (var f = 0; f < entryFields; f++) {
-        partial[f + 1] <== partial[f] + timestampSelector[f] * entry[f];
-    }
     signal ts;
-    ts <== partial[entryFields];
+    // Protocol tuple offset 5 is timestamp.
+    ts <== entry[5];
+
+    component tsBits = Num2Bits(64);
+    component startBits = Num2Bits(64);
+    component endBits = Num2Bits(64);
+    tsBits.in <== ts;
+    startBits.in <== start;
+    endBits.in <== end;
 
     // ─── 2. start ≤ ts ≤ end (64-bit range) ───
     component geStart = GreaterEqThan(64);

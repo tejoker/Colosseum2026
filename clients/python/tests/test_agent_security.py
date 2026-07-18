@@ -88,7 +88,10 @@ def test_authorize_payment_signs_the_final_post() -> None:
         "x-sauron-call-ts",
         "x-sauron-call-nonce",
         "x-sauron-call-sig",
+        "x-sauron-call-audience",
+        "x-sauron-protocol-version",
         "x-sauron-agent-config-digest",
+        "x-sauron-tenant-id",
     } <= set(headers)
     body = final_kwargs["data"]
     assert isinstance(body, bytes)

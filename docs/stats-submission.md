@@ -1,8 +1,28 @@
-# Stats submission — customer-side aggregation + ZK integrity (Sprint 7)
+# Stats submission — transparent production proof
 
 > Anti-cheat layer for cross-customer benchmarks.
 
-## The model
+## Production model
+
+Production uses `POST /v1/stats/submit-transparent` and the pinned
+`sauron-stats-v1` RISC Zero guest in `transparent-zk/`. There is no trusted
+setup or proving-key ceremony. The client supplies every private signed action
+envelope/receipt in the authoritative action-anchor interval; the guest
+recomputes action hashes, every v2 leaf, the complete Merkle root and the
+metric. The server resolves the checkpoint root, size and anchor from its own
+database and verifies a native STARK receipt against the operator-pinned image
+ID.
+
+Supported production metrics are `success_rate`, `error_rate`,
+`tool_call_count`, and USD-only `cost_total`. The public journal binds tenant,
+checkpoint, action anchor, root, exact tree size, optional agent scope, metric,
+value and period. Clients can verify the same receipt independently with
+`sauron-transparent-verify`; they do not trust a SauronID success boolean.
+
+`POST /v1/stats/submit` and the Circom/Groth16 material described below are
+development/migration compatibility only and are refused in production.
+
+## Legacy Circom model (development only)
 
 Cross-tenant benchmarks are politically explosive: a vendor whose
 "success rate" looks low has a strong incentive to massage the number
@@ -13,39 +33,36 @@ before it lands in a shared cohort view. SauronID's solution is the
 SDK side                              Server side
 ──────────                            ────────────
 1. accumulate N action receipts
-2. commit them to an action-log
-   Merkle tree (already done by
-   the existing agent-action anchor
-   batcher).
+2. commit exactly four typed receipts
+   to the circuit's Poseidon Merkle tree.
 3. compute the metric locally over
    exactly the committed leaves.
 4. produce a Groth16 proof
    "claimed_value is the honest
     aggregation of N receipts
     against root R".
-5. POST {stat, proof, root, …} ──►   6. verify_stats_submission
+5. finalize an anchored checkpoint
+   for that root and tree size.
+6. POST {stat, proof, checkpoint, …} ► 7. verify_stats_submission
                                          • payload sanity
                                          • metric_id ∈ provable set
                                          • public_inputs ↔ body bind
                                          • snarkjs subprocess
-                                     7. upsert into customer_stats
-                                     8. anchor by writing a synthetic
-                                        agent_action_receipts row
-                                        so the merkle batcher rolls
-                                        it into the next BTC + Solana
-                                        anchor cycle.
-                                     9. respond {stored, latency_ms,
-                                                anchored_action_hash}
+                                     8. upsert into customer_stats
+                                     9. persist the statement hash in the
+                                        dedicated stats receipt table; never
+                                        mix an unsigned synthetic row into an
+                                        action-proof Merkle batch.
+                                    10. respond {stored, latency_ms,
+                                                statement_hash}
 ```
 
-The proof binds the claimed integer to the Merkle root that the
-batcher already anchors. A tenant cannot quietly cherry-pick receipts
-because the root would change; cannot inflate a count because the
-circuit recomputes it; cannot fudge `n_records` because it is a public
-input and must equal the active arity. The server still trusts the
-*identity* of the receipts (the tenant could choose which receipts to
-commit in the first place), but the *math over them* is no longer
-trusted — it is verified.
+The proof binds the claimed integer to a finalized, server-resolved checkpoint
+root. It cannot inflate a count or fudge `n_records`: the circuit covers every
+index 0..3 exactly once and requires both `n_records` and checkpoint
+`tree_size` to equal four. The checkpoint timestamps and freezes the tenant's
+commitment; it does **not** prove that the tenant included every real-world
+receipt. Source completeness remains an ingestion/oracle assumption.
 
 ## Metric catalog (10)
 
@@ -58,9 +75,9 @@ trusted — it is verified.
 | tool_call_count             | count       | tool          | count    | yes               |
 | unique_tools_used           | count       | tool          | count    | no                |
 | cost_total                  | count (sum) | amount_usd    | usd      | yes               |
-| policy_violations_blocked   | count       | status        | count    | yes               |
+| policy_violations_blocked   | count       | status        | count    | no                |
 | sessions_count              | count       | agent_id      | count    | no                |
-| avg_session_duration        | average     | latency_ms    | seconds  | yes               |
+| avg_session_duration        | average     | latency_ms    | seconds  | no                |
 
 `sensitivity_l1` is documented per metric in
 `agentic/src/stats/metric-catalog.ts` for Sprint 8's DP publisher.
@@ -83,10 +100,12 @@ know the entry is unverified.
 
 - Public inputs (snarkjs canonical order, after `valid`):
   ```
-  [valid, root, metric_id, claimed_value, n_records, period_start, period_end]
+  [valid, root, metric_id, claimed_value, n_records, period_start, period_end,
+   tree_size, tenant_hash, agent_hash]
   ```
 - Private inputs:
-  - `entries[N][6]` = `[status_bit, latency_ms, amount_milli_usd, tool_id, agent_id_hash, created_at]`
+  - `entries[4][7]` = `[status_bit, latency_ms, amount_milli_usd,
+    tool_id, tenant_hash, agent_hash, created_at]`
   - `pathElements[N][20]`, `pathIndices[N][20]` — per-receipt Merkle path
 - Constraint sketch:
   1. For each k ∈ 0..N-1: `Poseidon(entries[k])` must climb the supplied
@@ -95,13 +114,16 @@ know the entry is unverified.
      circuit doc-comment).
   3. Assert `claimed_value * denominator == numerator * 1000`. The ×1000
      is the fixed-point factor; the SDK's `toFixedPoint` reverses it.
-  4. Assert `n_records == N` so the prover cannot claim N=4 receipts
-     but bake only 2 into the aggregate.
+  4. Bind every receipt to `tenant_hash`, optionally to `agent_hash`, and to
+     the public reporting period.
+  5. Assert `n_records == tree_size == N == 4`; paths are fixed to indices
+     0..3, so the prover cannot omit or duplicate an index.
 
-Depth bound: N ≤ 64. Larger windows split into multiple proofs (one
-per chunk); recursion is future work.
+Depth bound: 20. The currently versioned circuit supports exactly four
+receipts. Larger windows require a new circuit/version or a reviewed recursive
+aggregation construction.
 
-## Server-side surface
+## Legacy server-side surface
 
 ### `POST /v1/stats/submit`
 
@@ -119,9 +141,11 @@ per chunk); recursion is future work.
   "period_end": 60,
   "merkle_root": "00000000000000000000000000000000000000000000000000000000000000ab",
   "proof_b64": "<base64-encoded snarkjs Groth16 proof JSON>",
-  "vk_id": "StatsHonestComputation.dev.vk@v0",
+  "vk_id": "StatsHonestComputation.dev.vk@v1",
+  "checkpoint_id": "zkc_<server-issued-finalized-id>",
   "public_inputs": [
-    "1", "<root-decimal>", "0", "750", "4", "0", "60"
+    "1", "<root-decimal>", "0", "750", "4", "0", "60", "4",
+    "<tenant-hash-decimal>", "0"
   ]
 }
 ```
@@ -132,7 +156,7 @@ per chunk); recursion is future work.
 {
   "stored": true,
   "latency_ms_verify": 87,
-  "anchored_action_hash": "<sha256-hex>"
+  "statement_hash": "<sha256-hex>"
 }
 ```
 
@@ -174,7 +198,7 @@ curl -sS -X POST http://localhost:8080/v1/stats/submit \
   "period_end": 1715644800,
   "merkle_root": "fa1afe1cafe0baadbeefcafefeedfacecafebabefeedfacebeefdeadc0debeef",
   "proof_b64": "eyJwaV9hIjpbIjEiLCIxIl0sInBpX2IiOltbIjEiXV0sInBpX2MiOlsiMSJdLCJwcm90b2NvbCI6Imdyb3RoMTYiLCJjdXJ2ZSI6ImJuMTI4In0=",
-  "vk_id": "StatsHonestComputation.dev.vk@v0",
+  "vk_id": "StatsHonestComputation.dev.vk@v1",
   "public_inputs": [
     "1",
     "113078212145816597093331886104539600640",
@@ -188,7 +212,7 @@ curl -sS -X POST http://localhost:8080/v1/stats/submit \
 JSON
 
 # Expected:
-# {"stored":true,"latency_ms_verify":87,"anchored_action_hash":"…"}
+# {"stored":true,"latency_ms_verify":87,"statement_hash":"…"}
 
 # 2. List cohort
 curl -sS \
@@ -256,9 +280,10 @@ forging Bitcoin and Solana attestations — not a realistic adversary.
   Tracked in `zkp/ceremony/circuits-list.json` as a follow-up.
 - **Distinct-cardinality metrics in ZK.** Same — needs a sorted-
   uniqueness gadget.
-- **Recursion for N > 64 receipts per proof.** Today operators batch
-  larger periods into multiple proofs (one per chunk of 64). A folding
-  scheme (Nova / SuperNova / HyperNova) is the long-term plan.
+- **Arity above four.** The current circuit is deliberately fixed at four and
+  proves complete coverage only for that fixed tree. A transparent zkVM/STARK
+  or a reviewed recursive construction is the migration path; independently
+  proving chunks does not establish completeness for the union by itself.
 - **Real trusted setup ceremony.** Sprint 4 already labelled the DEV
   keys as `*.dev.zkey` / `*.dev.vkey.json`. Production deployments
   MUST swap them; the file naming convention prevents a silent drop-in.

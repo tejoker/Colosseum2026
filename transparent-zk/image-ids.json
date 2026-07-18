@@ -1,0 +1,15 @@
+{
+  "manifest_version": 1,
+  "risc0_zkvm": "3.0.5",
+  "risc0_guest_rust": "1.97.0",
+  "cargo_risczero": "3.0.6",
+  "lock_sha256": {
+    "Cargo.lock": "1f9d1c871250f9bff60cec14f8d2c04b37b37a25dfd90367131f02c87dedd306",
+    "methods/guest/Cargo.lock": "38b7b406d175e4d54a93f17059e5ba42ed670ff8013b4f0f4c4d5fb335d0b46a",
+    "methods/action-policy-guest/Cargo.lock": "0a1c32474796e9bf3c39d9a7f79fcc7f44d81c66da9c5fb239fb2a7cd809b6f4"
+  },
+  "programs": {
+    "sauron-stats-v1": "dd4bf48ed1cc4d62d51b153075a438048d03e832c3a8d50fdf4db9c0240a8060",
+    "sauron-action-policy-v1": "4e7ad7997c31f4a4a9e870e40f5a059306803fca724e14d2e3fa7bf90cdd9aa5"
+  }
+}

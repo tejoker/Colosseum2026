@@ -23,8 +23,8 @@ pub fn upsert_submission(
     conn.execute(
         r#"INSERT INTO customer_stats
            (tenant_id, agent_id, metric_id, claimed_value, n_records,
-            period_start, period_end, merkle_root, proof_b64, vk_id, submitted_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            period_start, period_end, merkle_root, proof_b64, vk_id, checkpoint_id, submitted_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
            ON CONFLICT (tenant_id, agent_id, metric_id, period_start)
            DO UPDATE SET
              claimed_value = excluded.claimed_value,
@@ -33,6 +33,7 @@ pub fn upsert_submission(
              merkle_root   = excluded.merkle_root,
              proof_b64     = excluded.proof_b64,
              vk_id         = excluded.vk_id,
+             checkpoint_id = excluded.checkpoint_id,
              submitted_at  = excluded.submitted_at"#,
         params![
             sub.tenant_id,
@@ -45,6 +46,7 @@ pub fn upsert_submission(
             sub.merkle_root,
             sub.proof_b64,
             sub.vk_id,
+            sub.checkpoint_id,
             submitted_at,
         ],
     )
@@ -211,53 +213,61 @@ pub fn get_one(
     .map_err(|e| AggError::Storage(e.to_string()))
 }
 
-/// Synthetic action hash used to anchor a stats submission into the existing
-/// agent-action merkle batch flow. By computing it as
-/// `SHA256("stats_submission:" + merkle_root + ":" + metric_id)` we get:
-///   1. A 32-byte hex string that fits the `agent_action_receipts.action_hash`
-///      column.
-///   2. Deterministic — re-running the upsert produces the same hash and the
-///      audit chain sees one row per (root, metric_id) pair.
-///   3. Distinct namespace from real action hashes (the prefix prevents
-///      collisions with any agent's real `action_hash`).
-pub fn synthetic_action_hash(merkle_root: &str, metric_id: &str) -> String {
+/// Canonical commitment to the complete verified stats statement. Committing
+/// only `(root, metric)` left value/period/tenant/checkpoint metadata mutable
+/// without changing the external action anchor.
+pub fn synthetic_action_hash(sub: &StatsSubmission) -> String {
     use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"stats_submission:");
-    h.update(merkle_root.as_bytes());
-    h.update(b":");
-    h.update(metric_id.as_bytes());
-    hex::encode(h.finalize())
+    let claimed_value = sub.claimed_value.to_string();
+    let n_records = sub.n_records.to_string();
+    let period_start = sub.period_start.to_string();
+    let period_end = sub.period_end.to_string();
+    let agent_id = sub.agent_id_or_none.as_deref().unwrap_or("");
+    let public_inputs = serde_json::to_vec(&sub.public_inputs).unwrap_or_default();
+    let public_inputs_sha = hex::encode(Sha256::digest(public_inputs));
+    let proof_sha = hex::encode(Sha256::digest(sub.proof_b64.as_bytes()));
+    let statement = crate::crypto_protocol::canonical_fields(
+        "sauron.stats-submission.v2",
+        &[
+            ("tenant_id", &sub.tenant_id),
+            ("agent_id", agent_id),
+            ("metric_id", &sub.metric_id),
+            ("claimed_value", &claimed_value),
+            ("n_records", &n_records),
+            ("period_start", &period_start),
+            ("period_end", &period_end),
+            ("merkle_root", &sub.merkle_root),
+            ("checkpoint_id", &sub.checkpoint_id),
+            ("vk_id", &sub.vk_id),
+            ("public_inputs_sha256", &public_inputs_sha),
+            ("proof_b64_sha256", &proof_sha),
+        ],
+    );
+    hex::encode(Sha256::digest(statement))
 }
 
-/// Bind a stats submission into the existing audit chain by writing a row
-/// into `agent_action_receipts`. The merkle anchor task picks the row up
-/// and rolls it into the next OTS+Solana batch.
+/// Persist a stable digest of the accepted stats statement. This deliberately
+/// does not fabricate an `agent_action_receipts` row: such a row has no
+/// agent-signed envelope preimage and would make a complete transparent action
+/// batch unprovable. The stats proof already binds to an externally anchored,
+/// authoritative action checkpoint.
 pub fn anchor_submission(
     db: &DbHandle,
     sub: &StatsSubmission,
     submitted_at: i64,
 ) -> Result<String, AggError> {
     let conn = db.lock().map_err(|e| AggError::Storage(e.to_string()))?;
-    let action_hash = synthetic_action_hash(&sub.merkle_root, &sub.metric_id);
-    let receipt_id = format!("stats_{}", &action_hash[..16]);
-    // Synthetic agent_id encodes the tenant_id and optional real agent so
-    // operators can filter the chain by tenant. Keep under 255 chars.
-    let synthetic_agent_id = match &sub.agent_id_or_none {
-        Some(a) => format!("__stats__:{}:{}", sub.tenant_id, a),
-        None => format!("__stats__:{}", sub.tenant_id),
-    };
+    let action_hash = synthetic_action_hash(sub);
     conn.execute(
-        r#"INSERT OR IGNORE INTO agent_action_receipts
-           (receipt_id, action_hash, agent_id, ring_key_image_hex,
-            policy_version, ajwt_jti, pop_jkt, status, signature, created_at, tenant_id)
-           VALUES (?1, ?2, ?3, '', 'stats-v1', ?2, '', 'stats_submitted', '', ?4, ?5)"#,
+        r#"INSERT OR IGNORE INTO stats_submission_receipts
+           (statement_hash, tenant_id, checkpoint_id, metric_id, submitted_at)
+           VALUES (?1, ?2, ?3, ?4, ?5)"#,
         params![
-            receipt_id,
             action_hash,
-            synthetic_agent_id,
-            submitted_at,
             sub.tenant_id,
+            sub.checkpoint_id,
+            sub.metric_id,
+            submitted_at,
         ],
     )
     .map_err(|e| AggError::Storage(e.to_string()))?;
@@ -291,7 +301,8 @@ mod tests {
             period_end: 60,
             merkle_root: "ab".repeat(32),
             proof_b64: "e30=".into(),
-            vk_id: "StatsHonestComputation.dev.vk@v0".into(),
+            vk_id: "StatsHonestComputation.dev.vk@v1".into(),
+            checkpoint_id: "zkc_test".into(),
             public_inputs: vec!["1".into(), "0".into()],
         }
     }
@@ -334,31 +345,38 @@ mod tests {
     }
 
     #[test]
-    fn anchor_writes_receipt_with_synthetic_hash() {
+    fn stats_statement_hash_stays_out_of_action_anchor_batches() {
         let db = temp_db("anchor");
         let sub = sample("t1", None);
         let hash = anchor_submission(&db, &sub, 100).unwrap();
-        assert_eq!(
-            hash,
-            synthetic_action_hash(&sub.merkle_root, &sub.metric_id)
-        );
-        // Receipt landed.
+        assert_eq!(hash, synthetic_action_hash(&sub));
+        // Dedicated statement record landed.
         let conn = db.lock().unwrap();
         let n: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM agent_action_receipts WHERE action_hash = ?1",
+                "SELECT COUNT(*) FROM stats_submission_receipts WHERE statement_hash = ?1",
                 [&hash],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "exactly one anchored receipt");
+        assert_eq!(n, 1, "exactly one stats statement receipt");
+        let action_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_action_receipts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(action_rows, 0, "stats must not poison action proof batches");
     }
 
     #[test]
-    fn synthetic_action_hash_is_deterministic_per_root_metric() {
-        let h1 = synthetic_action_hash("ab", "success_rate");
-        let h2 = synthetic_action_hash("ab", "success_rate");
-        let h3 = synthetic_action_hash("ab", "cost_total");
+    fn synthetic_action_hash_binds_the_full_statement() {
+        let first = sample("t1", None);
+        let same = sample("t1", None);
+        let mut changed = sample("t1", None);
+        changed.claimed_value += 1;
+        let h1 = synthetic_action_hash(&first);
+        let h2 = synthetic_action_hash(&same);
+        let h3 = synthetic_action_hash(&changed);
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
     }

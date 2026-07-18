@@ -2,7 +2,7 @@
  * Typed HTTP helpers for Sauron core KYA / agent endpoints (red-team harness).
  */
 import { execFileSync } from "node:child_process";
-import { generateKeyPairSync, KeyObject, sign as cryptoSign } from "node:crypto";
+import { createHash, generateKeyPairSync, KeyObject, sign as cryptoSign } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -33,13 +33,23 @@ export interface AgentActionBuildInput {
 export interface PopKeyPair {
     publicKeyB64u: string;
     privateKey: KeyObject;
+    thumbprint: string;
+}
+
+export function popThumbprint(publicKeyB64u: string): string {
+    const canonical = JSON.stringify({ crv: "Ed25519", kty: "OKP", x: publicKeyB64u });
+    return createHash("sha256").update(canonical).digest("base64url");
 }
 
 export function createPopKeyPair(): PopKeyPair {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
     const publicJwk = publicKey.export({ format: "jwk" }) as { x?: string };
     if (!publicJwk.x) throw new Error("failed to export Ed25519 public JWK x");
-    return { publicKeyB64u: publicJwk.x, privateKey };
+    return {
+        publicKeyB64u: publicJwk.x,
+        privateKey,
+        thumbprint: popThumbprint(publicJwk.x),
+    };
 }
 
 export function signPopJws(challenge: string, privateKey: KeyObject): string {
@@ -137,7 +147,24 @@ export class CoreApi {
         session: string,
         body: Record<string, unknown>
     ): Promise<{ status: number; data: Record<string, unknown>; raw: string }> {
-        return this.post<Record<string, unknown>>("/agent/register", body, { "x-sauron-session": session });
+        const normalized = { ...body };
+        if (typeof normalized.pop_public_key_b64u === "string") {
+            normalized.pop_jkt = popThumbprint(normalized.pop_public_key_b64u);
+        }
+        if (typeof normalized.agent_type !== "string" || normalized.agent_type.length === 0) {
+            normalized.agent_type = "rule_bot";
+            normalized.checksum_inputs = {
+                image_sha:
+                    typeof normalized.agent_checksum === "string" && normalized.agent_checksum
+                        ? normalized.agent_checksum
+                        : "redteam-fixture",
+            };
+            normalized.agent_checksum = "";
+        }
+        return this.post<Record<string, unknown>>("/agent/register", normalized, {
+            "x-sauron-session": session,
+            "x-sauron-tenant-id": "default",
+        });
     }
 
     agentActionKeygen(): AgentActionKeys {

@@ -2,6 +2,9 @@ export {
     computeChecksum,
     verifyChecksum,
     computeComponentChecksums,
+    computeTypedChecksum,
+    computeLlmRegistrationChecksum,
+    llmChecksumInputs,
     AgentConfig,
     AgentTool,
     LLMConfig,
@@ -48,10 +51,17 @@ export {
 export {
     AgentShimClient,
     IdPClientConfig,
+    AgentAttestationChallenge,
+    AgentAttestationFields,
     AgentActionEnvelope,
     AgentActionProof,
     AgentActionChallengeInput,
 } from "./idp-client";
+
+export {
+    authenticateUserWithKey,
+    type UserAuthResult,
+} from "./user-auth";
 
 // Sprint 3 — runtime policy enforcement (additive; opt-in via `bind()`).
 export * from "./enforcement";
@@ -94,6 +104,15 @@ export {
     type MerkleBundle,
     type SubmitResponse,
 } from "./scheduler";
+
+export {
+    STATS_PROGRAM_ID,
+    submitTransparentStats,
+    type TransparentProofPayload,
+    type TransparentStatsSubmission,
+    type TransparentStatsSubmitResponse,
+    type TransparentStatsClientOptions,
+} from "./stats/transparent";
 
 // Sprint 13-14 Tier 2 — Paillier homomorphic-encryption client (thin wrapper).
 // NEEDS_CRYPTO_REVIEW: see `src/he-encrypt.ts` for the full disclaimer.

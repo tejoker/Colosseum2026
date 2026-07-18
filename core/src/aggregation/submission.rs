@@ -5,6 +5,25 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Ceremony-free stats submission.  All result fields are duplicated in the
+/// cryptographically authenticated STARK journal and compared exactly by the
+/// server; the body exists only as a convenient application envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TransparentStatsSubmission {
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub agent_id_or_none: Option<String>,
+    pub metric_id: String,
+    pub claimed_value: i64,
+    pub period_start: i64,
+    pub period_end: i64,
+    pub checkpoint_id: String,
+    #[serde(flatten)]
+    pub proof: crate::transparent_proof::TransparentProofPayload,
+}
+
 /// Single per-tenant per-period statistic submission.
 ///
 /// `agent_id` is optional: a tenant-wide rollup submits with `agent_id = None`,
@@ -35,8 +54,11 @@ pub struct StatsSubmission {
     pub merkle_root: String,
     /// Base64-encoded snarkjs Groth16 proof JSON.
     pub proof_b64: String,
-    /// Verification key identifier (`StatsHonestComputation.dev.vk@v0`).
+    /// Verification key identifier (`StatsHonestComputation.dev.vk@v1`).
     pub vk_id: String,
+    /// Finalized server checkpoint that authoritatively resolves the root and
+    /// tree size. Caller-supplied roots are never trusted without this lookup.
+    pub checkpoint_id: String,
     /// Public inputs from the proof, in the canonical snarkjs order.
     /// Used by the verifier to bind the root + claimed_value + n_records to
     /// the proof's public signals.
@@ -51,10 +73,10 @@ pub struct StatsSubmitResponse {
     pub stored: bool,
     /// End-to-end verify latency in milliseconds.
     pub latency_ms_verify: u64,
-    /// Synthetic action hash used to anchor the submission into the
-    /// `agent_action_receipts` audit chain. See
-    /// `docs/stats-submission.md#audit-anchoring`.
-    pub anchored_action_hash: String,
+    /// Stable digest of the full accepted statement. The proof itself binds to
+    /// the externally anchored action checkpoint; this digest is intentionally
+    /// not inserted as a synthetic action receipt.
+    pub statement_hash: String,
 }
 
 /// One row of `/v1/stats/cohort` output. Operator-facing internal view —
@@ -90,7 +112,8 @@ mod tests {
             period_end: 60,
             merkle_root: "00".repeat(32),
             proof_b64: "e30=".into(),
-            vk_id: "StatsHonestComputation.dev.vk@v0".into(),
+            vk_id: "StatsHonestComputation.dev.vk@v1".into(),
+            checkpoint_id: "zkc_test".into(),
             public_inputs: vec!["1".into(), "0".into()],
         };
         let j = serde_json::to_string(&s).unwrap();
@@ -110,6 +133,7 @@ mod tests {
             "merkle_root": "",
             "proof_b64": "",
             "vk_id": "v",
+            "checkpoint_id": "zkc_test",
             "rogue_field": true
         }"#;
         let r: Result<StatsSubmission, _> = serde_json::from_str(json);

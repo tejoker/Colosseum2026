@@ -36,6 +36,7 @@
 
 import { createHash, randomBytes, generateKeyPairSync, sign } from "crypto";
 import { CoreApi, randSuffix } from "../core-api";
+import { signCallV2 } from "../call-sig-v2";
 
 const N = Math.max(2, parseInt(process.env.SAURON_RACE_N || "50", 10) || 50);
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
@@ -117,9 +118,6 @@ export async function scenarioPostgresToctouRace(
     if (!configDigest) throw new Error("server did not return agent_checksum");
 
     const path = "/agent/payment/authorize";
-    const ts = Date.now();
-    const nonce = randomBytes(16).toString("hex");
-
     const body = JSON.stringify({
         ajwt,
         jti: `jti-pgrace-${sfx}`,
@@ -128,16 +126,16 @@ export async function scenarioPostgresToctouRace(
         merchant_id: `mch-${sfx}`,
         payment_ref: `pay-${sfx}`,
     });
-    const bodyHash = createHash("sha256").update(body).digest("hex");
-    const payload = `POST|${path}|${bodyHash}|${ts}|${nonce}`;
-    const sigBuf = sign(null, Buffer.from(payload, "utf8"), privateKey);
     const headers = {
         "content-type": "application/json",
-        "x-sauron-agent-id": agentId,
-        "x-sauron-call-ts": String(ts),
-        "x-sauron-call-nonce": nonce,
-        "x-sauron-call-sig": sigBuf.toString("base64url"),
-        "x-sauron-agent-config-digest": configDigest,
+        ...signCallV2({
+            agentId,
+            privateKey,
+            method: "POST",
+            targetUri: path,
+            body,
+            configDigest,
+        }),
     };
 
     // Fire N concurrent requests reusing the same nonce.
@@ -206,16 +204,16 @@ export async function scenarioPostgresToctouRace(
         // requests will fail upstream of the consume — that is fine: we only
         // want to confirm the server does NOT 500 and does NOT silently
         // succeed twice under serialisable isolation.
-        const ts2 = Date.now();
-        const nonce2 = randomBytes(16).toString("hex");
-        const bodyHash2 = createHash("sha256").update(consumeBody).digest("hex");
-        const payload2 = `POST|${consumePath}|${bodyHash2}|${ts2}|${nonce2}`;
-        const sigBuf2 = sign(null, Buffer.from(payload2, "utf8"), privateKey);
         const headers2 = {
-            ...headers,
-            "x-sauron-call-ts": String(ts2),
-            "x-sauron-call-nonce": nonce2,
-            "x-sauron-call-sig": sigBuf2.toString("base64url"),
+            "content-type": "application/json",
+            ...signCallV2({
+                agentId,
+                privateKey,
+                method: "POST",
+                targetUri: consumePath,
+                body: consumeBody,
+                configDigest,
+            }),
         };
         const burstSize = Math.min(N, 10);
         const burst = Array.from({ length: burstSize }, () =>

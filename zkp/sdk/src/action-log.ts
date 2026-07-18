@@ -99,6 +99,16 @@ function resolveVKey(vkeyDir: string, circuitName: string) {
     return JSON.parse(fs.readFileSync(vkey, "utf-8"));
 }
 
+function oneHotIndex(selector: number[], label: string): number {
+    const ones = selector
+        .map((value, index) => ({ value, index }))
+        .filter(({ value }) => value === 1);
+    if (ones.length !== 1 || selector.some((value) => value !== 0 && value !== 1)) {
+        throw new Error(`[action-log] ${label} must be a one-hot bit vector`);
+    }
+    return ones[0].index;
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // Prover
 // ════════════════════════════════════════════════════════════════════════
@@ -128,16 +138,17 @@ export class ActionLogProver {
         b: bigint,
         fieldSelector: number[]
     ): Promise<ActionLogProof> {
+        const fieldIndex = oneHotIndex(fieldSelector, "fieldSelector");
         const { wasm, zkey } = resolveCircuit(this.circuitsDir, "ActionRangeProof");
         const input = {
             root: (entry as any).root?.toString() ?? "0",
             a: a.toString(),
             b: b.toString(),
             entryIndex: entry.merkle_index.toString(),
+            fieldIndex: fieldIndex.toString(),
             entry: entry.fields,
             pathElements: path.pathElements,
             pathIndices: path.pathIndices.map((i) => i.toString()),
-            fieldSelector: fieldSelector.map((i) => i.toString()),
         };
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(
             input,
@@ -156,6 +167,9 @@ export class ActionLogProver {
         budget: bigint,
         amountSelector: number[]
     ): Promise<ActionLogProof> {
+        if (oneHotIndex(amountSelector, "amountSelector") !== 2) {
+            throw new Error("[action-log] amountSelector must select protocol field 2");
+        }
         const { wasm, zkey } = resolveCircuit(this.circuitsDir, "ActionSumBound");
         if (entries.length !== paths.length) {
             throw new Error("[action-log] entries.length != paths.length");
@@ -172,7 +186,6 @@ export class ActionLogProver {
             entries: entries.map((e) => e.fields),
             pathElements: paths.map((p) => p.pathElements),
             pathIndices: paths.map((p) => p.pathIndices.map((i) => i.toString())),
-            amountSelector: amountSelector.map((i) => i.toString()),
         };
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(
             input,
@@ -193,6 +206,9 @@ export class ActionLogProver {
         toolValue: bigint,
         toolSelector: number[]
     ): Promise<ActionLogProof> {
+        if (oneHotIndex(toolSelector, "toolSelector") !== 3) {
+            throw new Error("[action-log] toolSelector must select protocol field 3");
+        }
         const { wasm, zkey } = resolveCircuit(this.circuitsDir, "ActionSetMembership");
         const root = (entry as any).root?.toString() ?? "0";
         const input = {
@@ -203,7 +219,6 @@ export class ActionLogProver {
             entryPathElements: entryPath.pathElements,
             entryPathIndices: entryPath.pathIndices.map((i) => i.toString()),
             toolValue: toolValue.toString(),
-            toolSelector: toolSelector.map((i) => i.toString()),
             setPathElements: setPath.pathElements,
             setPathIndices: setPath.pathIndices.map((i) => i.toString()),
         };
@@ -230,6 +245,9 @@ export class ActionLogProver {
         low: bigint,
         high: bigint
     ): Promise<ActionLogProof> {
+        if (oneHotIndex(toolSelector, "toolSelector") !== 3) {
+            throw new Error("[action-log] toolSelector must select protocol field 3");
+        }
         const { wasm, zkey } = resolveCircuit(this.circuitsDir, "ActionSetNonMembership");
         const root = (entry as any).root?.toString() ?? "0";
         const input = {
@@ -240,7 +258,6 @@ export class ActionLogProver {
             entryPathElements: entryPath.pathElements,
             entryPathIndices: entryPath.pathIndices.map((i) => i.toString()),
             toolValue: toolValue.toString(),
-            toolSelector: toolSelector.map((i) => i.toString()),
             low: low.toString(),
             high: high.toString(),
             pairPathElements: setPath.pathElements,
@@ -264,6 +281,9 @@ export class ActionLogProver {
         end: bigint,
         timestampSelector: number[]
     ): Promise<ActionLogProof> {
+        if (oneHotIndex(timestampSelector, "timestampSelector") !== 5) {
+            throw new Error("[action-log] timestampSelector must select protocol field 5");
+        }
         const { wasm, zkey } = resolveCircuit(this.circuitsDir, "ActionTimeWindow");
         const root = (entry as any).root?.toString() ?? "0";
         const input = {
@@ -274,7 +294,6 @@ export class ActionLogProver {
             entry: entry.fields,
             pathElements: path.pathElements,
             pathIndices: path.pathIndices.map((i) => i.toString()),
-            timestampSelector: timestampSelector.map((i) => i.toString()),
         };
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(
             input,
@@ -296,6 +315,10 @@ export class ActionLogProver {
         fieldSelector: number[],
         matchFlag: number[]
     ): Promise<ActionLogProof> {
+        const selected = oneHotIndex(fieldSelector, "fieldSelector");
+        if (F !== BigInt(selected)) {
+            throw new Error("[action-log] public F must equal the selected protocol field index");
+        }
         const { wasm, zkey } = resolveCircuit(this.circuitsDir, "ActionCountInRange");
         if (entries.length !== paths.length) {
             throw new Error("[action-log] entries.length != paths.length");
@@ -314,7 +337,6 @@ export class ActionLogProver {
             entries: entries.map((e) => e.fields),
             pathElements: paths.map((p) => p.pathElements),
             pathIndices: paths.map((p) => p.pathIndices.map((i) => i.toString())),
-            fieldSelector: fieldSelector.map((i) => i.toString()),
             matchFlag: matchFlag.map((i) => i.toString()),
         };
         const { proof, publicSignals } = await snarkjs.groth16.fullProve(

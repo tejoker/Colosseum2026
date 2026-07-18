@@ -1,19 +1,19 @@
-//! Data-flow / taint-tracking invariant — **stub**.
+//! Data-flow / taint-tracking invariant — fail-closed sentinel.
 //!
-//! Sprint 2 ships this as a placeholder so the compiler interface is
-//! stable. Full taint tracking (tracking PII reads → outputs through
-//! function call graphs) is deferred to Sprint 6+.
+//! Full taint tracking is not implemented. Selecting this invariant must not
+//! silently grant permission: it denies until a real tracker supplies a
+//! cryptographically bound result.
 
 use super::{EvaluationContext, RuntimeCheck, Verdict};
 
-/// Placeholder check. Always allows; warns once at construction.
+/// Unsupported check. Always denies instead of creating a policy bypass.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DataFlowCheck;
 
 impl DataFlowCheck {
-    /// Construct a stub data-flow check.
+    /// Construct the fail-closed sentinel.
     pub fn new() -> Self {
-        tracing::warn!("data_flow taint tracking deferred to S6+");
+        tracing::warn!("data_flow taint tracking unavailable; invariant will deny");
         Self
     }
 }
@@ -24,6 +24,25 @@ impl RuntimeCheck for DataFlowCheck {
     }
 
     fn evaluate(&self, _ctx: &EvaluationContext) -> Verdict {
-        Verdict::Allow
+        Verdict::Deny {
+            check: self.name().to_string(),
+            reason:
+                "data-flow tracking is not implemented; refusing to treat an unknown flow as safe"
+                    .to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::invariants::Action;
+
+    #[test]
+    fn unsupported_tracker_denies() {
+        let action = Action::default();
+        assert!(DataFlowCheck::new()
+            .evaluate(&EvaluationContext::with_defaults(&action))
+            .is_deny());
     }
 }

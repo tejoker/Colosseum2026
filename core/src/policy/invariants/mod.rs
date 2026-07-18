@@ -5,8 +5,8 @@
 //! into a `Vec<Box<dyn RuntimeCheck>>`; the [`evaluate`](super::evaluator::evaluate)
 //! function runs them in order against an [`EvaluationContext`].
 //!
-//! Sprint 2 ships seven production-ready invariants plus a stubbed
-//! `DataFlowCheck`. Free-form `invariants:` strings (e.g.,
+//! `DataFlowCheck` is a fail-closed sentinel until real taint tracking is
+//! available. Free-form `invariants:` strings (e.g.,
 //! `"spend_total <= max_budget_usd"`) are intentionally not compiled — an
 //! expression parser will land in a later sprint.
 

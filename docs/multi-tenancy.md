@@ -107,21 +107,21 @@ These tables stay global because:
 
 ## Admin endpoints — operator-global vs tenant-scoped
 
-Admin endpoints aggregate across tenants by default in Sprint 11. The
-operator MUST treat their output as cross-tenant aggregate (per-endpoint
-tenant filtering lands in 11.5). Intended split:
+Admin data endpoints are tenant-scoped by default. Scoped admin JWTs can carry
+a `tnt` tenant allowlist. Cross-tenant aggregation requires `admin:super` or
+the explicit `SAURON_ADMIN_CROSS_TENANT=1` operator setting. Current split:
 
 - **GLOBAL** (operator aggregate): `/admin/stats`,
   `/admin/health/detailed`, `/admin/anchor/status`,
   `/admin/anchor/batches`, `/admin/anchor/agent-actions/*`,
   `/admin/clients`, `/admin/requests`.
-- **TENANT-SCOPED (planned for 11.5)**: `/admin/agents`, `/admin/users`,
+- **TENANT-SCOPED**: `/admin/agents`, `/admin/users`,
   `/admin/per_agent_metrics`, `/admin/agent_actions/recent`,
   `/admin/egress/recent`, `/admin/checksum/audit/:agent_id`.
 
-The tenant middleware does resolve the `TenantId` for admin requests; it's
-simply not yet consumed by these handlers. When 11.5 lands, the handler
-signature picks up `Extension<TenantId>` and the SQL gains a tenant filter.
+The tenant middleware resolves `TenantId`; these handlers consume it in their
+SQL scope. Deployment-global tables refuse tenant-locked admins instead of
+silently returning global rows.
 
 ## Known gaps (intentional)
 

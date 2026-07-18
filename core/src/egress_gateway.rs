@@ -19,7 +19,7 @@
 //! so it enforces at the host + resolved-IP level only — no payload inspection
 //! beyond opt-in PII redaction of the request body.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -44,7 +44,7 @@ fn env_on(var: &str) -> bool {
 }
 
 pub fn egress_gateway_enabled() -> bool {
-    env_on("SAURON_EGRESS_GATEWAY")
+    crate::runtime_mode::require_or_default("SAURON_EGRESS_GATEWAY", false, true)
 }
 
 /// PII redaction is opt-in: whether a value in an outbound payload is a leak or
@@ -110,6 +110,123 @@ pub fn redact_pii(body: &str) -> (String, Vec<String>) {
         }
     }
     (out, hit)
+}
+
+/// Validate the disclosure contract at agent registration so a typo cannot
+/// silently create a lease whose egress always fails later. Missing or empty
+/// allowlists are valid (the agent has no network authority).
+pub fn validate_production_egress_policy(intent: &serde_json::Value) -> Result<(), String> {
+    let Some(entries) = intent.get("egress_allowlist") else {
+        return Ok(());
+    };
+    let entries = entries
+        .as_array()
+        .ok_or("egress_allowlist must be an array")?;
+    for (index, entry) in entries.iter().enumerate() {
+        let o = entry
+            .as_object()
+            .ok_or_else(|| format!("egress_allowlist[{index}] must be a structured object"))?;
+        const FIELDS: [&str; 9] = [
+            "host",
+            "methods",
+            "path_prefix",
+            "inject_credential",
+            "request_body",
+            "response_body",
+            "max_request_bytes",
+            "max_response_bytes",
+            "allowed_headers",
+        ];
+        if let Some(field) = o.keys().find(|k| !FIELDS.contains(&k.as_str())) {
+            return Err(format!(
+                "egress_allowlist[{index}] has unknown field '{field}'"
+            ));
+        }
+        let host = o.get("host").and_then(|v| v.as_str()).unwrap_or("");
+        if host.is_empty() || host.contains('*') || host.contains('/') || host.contains('@') {
+            return Err(format!(
+                "egress_allowlist[{index}].host must be an exact host"
+            ));
+        }
+        let methods = o
+            .get("methods")
+            .and_then(|v| v.as_array())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("egress_allowlist[{index}].methods must be non-empty"))?;
+        for method in methods {
+            let method = method
+                .as_str()
+                .ok_or_else(|| format!("egress_allowlist[{index}].methods must be strings"))?
+                .to_ascii_uppercase();
+            if !matches!(
+                method.as_str(),
+                "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+            ) {
+                return Err(format!(
+                    "egress_allowlist[{index}] forbids method '{method}'"
+                ));
+            }
+        }
+        let prefix = o.get("path_prefix").and_then(|v| v.as_str()).unwrap_or("");
+        if !prefix.starts_with('/') || prefix.trim_end_matches('/').is_empty() {
+            return Err(format!(
+                "egress_allowlist[{index}].path_prefix must be narrower than '/'"
+            ));
+        }
+        if !matches!(
+            o.get("request_body").and_then(|v| v.as_str()),
+            Some("allow" | "deny")
+        ) {
+            return Err(format!(
+                "egress_allowlist[{index}].request_body is required"
+            ));
+        }
+        if !matches!(
+            o.get("response_body").and_then(|v| v.as_str()),
+            Some("allow" | "digest_only")
+        ) {
+            return Err(format!(
+                "egress_allowlist[{index}].response_body is required"
+            ));
+        }
+        let request_cap = o.get("max_request_bytes").and_then(|v| v.as_u64());
+        if !matches!(request_cap, Some(0..=4_194_304)) {
+            return Err(format!(
+                "egress_allowlist[{index}].max_request_bytes is invalid"
+            ));
+        }
+        let response_cap = o.get("max_response_bytes").and_then(|v| v.as_u64());
+        if !matches!(response_cap, Some(1..=1_048_576)) {
+            return Err(format!(
+                "egress_allowlist[{index}].max_response_bytes is invalid"
+            ));
+        }
+        let headers = o
+            .get("allowed_headers")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| format!("egress_allowlist[{index}].allowed_headers is required"))?;
+        for header in headers {
+            let name = header.as_str().ok_or_else(|| {
+                format!("egress_allowlist[{index}].allowed_headers must be strings")
+            })?;
+            if name.is_empty()
+                || header_forbidden(name)
+                || name.parse::<reqwest::header::HeaderName>().is_err()
+            {
+                return Err(format!(
+                    "egress_allowlist[{index}] contains forbidden header '{name}'"
+                ));
+            }
+        }
+        if let Some(credential) = o.get("inject_credential") {
+            if !matches!(credential.as_str(), Some(v) if !v.trim().is_empty()) {
+                return Err(format!(
+                    "egress_allowlist[{index}].inject_credential is invalid"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -203,10 +320,12 @@ fn header_forbidden(name: &str) -> bool {
         || n.starts_with("proxy-")
 }
 
-/// Record one egress event to the anchored trail. Shared by the voluntary
+/// Record one egress event to the audit trail. Shared by the voluntary
 /// `/agent/egress/log` endpoint and the enforcing proxy so both log identically
-/// and both get anchored. On `allowed`, also commits an `agent_action_receipts`
-/// row that the anchor batch seals into Bitcoin/Solana. Returns the egress row id.
+/// and both remain queryable. Capability issuance already commits the signed
+/// action receipt that the anchor batch seals. Creating a second synthetic
+/// receipt here would have no signed action-envelope preimage and would make a
+/// complete transparent-proof batch impossible. Returns the egress row id.
 #[allow(clippy::too_many_arguments)]
 pub fn record_egress(
     db: &Connection,
@@ -239,30 +358,6 @@ pub fn record_egress(
     .map_err(|e| format!("insert agent_egress_log: {e}"))?;
     let egress_id = db.last_insert_rowid();
 
-    // Denied calls are logged (and audited via the tamper-evident chain by the
-    // caller) but not anchored as an accepted action.
-    if allowed {
-        let mut h = Sha256::new();
-        for part in [
-            agent_id,
-            target_host,
-            target_path,
-            method,
-            &egress_id.to_string(),
-            &now.to_string(),
-        ] {
-            h.update(part.as_bytes());
-            h.update(b"|");
-        }
-        let action_hash = hex::encode(h.finalize());
-        let receipt_id = format!("rcp_egr_{egress_id}");
-        let _ = db.execute(
-            "INSERT INTO agent_action_receipts
-             (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, tenant_id)
-             VALUES (?1, ?2, ?3, '', 'egress', '', '', 'accepted', '', ?4, ?5)",
-            params![receipt_id, action_hash, agent_id, now, tenant_id],
-        );
-    }
     Ok(egress_id)
 }
 
@@ -293,6 +388,11 @@ fn agent_intent(
 /// docs/design/credential-broker.md).
 struct EgressMatch {
     inject_credential: Option<String>,
+    request_body_allowed: bool,
+    response_body_allowed: bool,
+    max_request_bytes: usize,
+    max_response_bytes: usize,
+    allowed_headers: HashSet<String>,
 }
 
 /// Match `(host, method, path)` against `intent_json.egress_allowlist`.
@@ -304,16 +404,38 @@ fn egress_match(
     host: &str,
     method: &str,
     path: &str,
+    strict: bool,
 ) -> Option<EgressMatch> {
     let arr = intent.get("egress_allowlist").and_then(|v| v.as_array())?;
     for entry in arr {
         if let Some(s) = entry.as_str() {
-            if s.eq_ignore_ascii_case(host) {
+            if !strict && s.eq_ignore_ascii_case(host) {
                 return Some(EgressMatch {
                     inject_credential: None,
+                    request_body_allowed: true,
+                    response_body_allowed: true,
+                    max_request_bytes: 256 * 1024,
+                    max_response_bytes: max_resp_bytes(),
+                    allowed_headers: HashSet::new(),
                 });
             }
         } else if let Some(o) = entry.as_object() {
+            if strict {
+                const FIELDS: [&str; 9] = [
+                    "host",
+                    "methods",
+                    "path_prefix",
+                    "inject_credential",
+                    "request_body",
+                    "response_body",
+                    "max_request_bytes",
+                    "max_response_bytes",
+                    "allowed_headers",
+                ];
+                if o.keys().any(|k| !FIELDS.contains(&k.as_str())) {
+                    continue;
+                }
+            }
             if !o
                 .get("host")
                 .and_then(|v| v.as_str())
@@ -323,6 +445,9 @@ fn egress_match(
                 continue;
             }
             if let Some(methods) = o.get("methods").and_then(|v| v.as_array()) {
+                if strict && methods.is_empty() {
+                    continue;
+                }
                 if !methods
                     .iter()
                     .filter_map(|m| m.as_str())
@@ -330,18 +455,73 @@ fn egress_match(
                 {
                     continue;
                 }
+            } else if strict {
+                continue;
             }
             if let Some(prefix) = o.get("path_prefix").and_then(|v| v.as_str()) {
                 let prefix = prefix.trim_end_matches('/');
+                if strict && (prefix.is_empty() || !prefix.starts_with('/')) {
+                    continue;
+                }
                 if path != prefix && !path.starts_with(&format!("{prefix}/")) {
                     continue;
                 }
+            } else if strict {
+                continue;
             }
             let inject_credential = o
                 .get("inject_credential")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            return Some(EgressMatch { inject_credential });
+            let request_body_allowed = match o.get("request_body").and_then(|v| v.as_str()) {
+                Some("allow") => true,
+                Some("deny") => false,
+                Some(_) => continue,
+                None if strict => continue,
+                None => true,
+            };
+            let response_body_allowed = match o.get("response_body").and_then(|v| v.as_str()) {
+                Some("allow") => true,
+                Some("digest_only") => false,
+                Some(_) => continue,
+                None if strict => continue,
+                None => true,
+            };
+            let max_request_bytes = o
+                .get("max_request_bytes")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok())
+                .filter(|v| *v <= 4 * 1024 * 1024);
+            let max_response_bytes = o
+                .get("max_response_bytes")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok())
+                .filter(|v| *v > 0 && *v <= max_resp_bytes());
+            if strict && (max_request_bytes.is_none() || max_response_bytes.is_none()) {
+                continue;
+            }
+            let allowed_headers: Option<HashSet<String>> = o
+                .get("allowed_headers")
+                .and_then(|v| v.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|v| v.trim().to_ascii_lowercase())
+                        .filter(|v| !v.is_empty() && !header_forbidden(v))
+                        .collect()
+                });
+            if strict && allowed_headers.is_none() {
+                continue;
+            }
+            return Some(EgressMatch {
+                inject_credential,
+                request_body_allowed,
+                response_body_allowed,
+                max_request_bytes: max_request_bytes.unwrap_or(256 * 1024),
+                max_response_bytes: max_response_bytes.unwrap_or_else(max_resp_bytes),
+                allowed_headers: allowed_headers.unwrap_or_default(),
+            });
         }
     }
     None
@@ -350,7 +530,7 @@ fn egress_match(
 /// Backward-compatible boolean form (used by tests).
 #[cfg(test)]
 fn egress_allowed(intent: &serde_json::Value, host: &str, method: &str, path: &str) -> bool {
-    egress_match(intent, host, method, path).is_some()
+    egress_match(intent, host, method, path, false).is_some()
 }
 
 /// Resolve a server-held egress credential to `(header_name, header_value)`.
@@ -377,7 +557,188 @@ fn egress_credential(name: &str) -> Option<(String, String)> {
 }
 
 #[derive(Deserialize)]
+pub struct EgressCapabilityRequest {
+    pub agent_id: String,
+    pub ajwt: String,
+    pub method: String,
+    pub url: String,
+    /// SHA-256 hex of the exact, pre-redaction body that will later be sent to
+    /// `/agent/egress/proxy` (empty body is SHA256 of zero bytes).
+    pub body_hash_hex: String,
+    pub agent_action: crate::agent_action::AgentActionProof,
+}
+
+#[derive(Serialize)]
+pub struct EgressCapabilityResponse {
+    /// Opaque bearer value returned once; only its digest is persisted.
+    pub capability: String,
+    pub expires_at: i64,
+    pub action_receipt: crate::agent_action::ActionReceipt,
+}
+
+/// Authorize one exact outbound request. The per-call signature authenticates
+/// this issuance request; the ring-signed action proof establishes explicit
+/// policy intent. The returned bearer can be consumed exactly once by proxy.
+pub async fn issue_egress_capability(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<crate::tenancy::TenantId>>,
+    headers: HeaderMap,
+    Json(req): Json<EgressCapabilityRequest>,
+) -> Result<Json<EgressCapabilityResponse>, (StatusCode, String)> {
+    if !egress_gateway_enabled() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "egress gateway disabled".into(),
+        ));
+    }
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
+    let signed_agent = headers
+        .get("x-sauron-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if signed_agent.is_empty() || signed_agent != req.agent_id {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "capability agent_id does not match the signed caller".into(),
+        ));
+    }
+    let method = req.method.trim().to_ascii_uppercase();
+    reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid HTTP method".into()))?;
+    let url = reqwest::Url::parse(&req.url)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad url: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "capability URL must be http(s) without userinfo, query, or fragment".into(),
+        ));
+    }
+    if req.body_hash_hex.len() != 64 || !req.body_hash_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "body_hash_hex must be 32-byte hex".into(),
+        ));
+    }
+
+    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let claims =
+        crate::agent::verify_ajwt_for_tenant(&jwt_secret, &req.ajwt, &tenant_id).ok_or((
+            StatusCode::UNAUTHORIZED,
+            "invalid, expired, or wrong-tenant A-JWT".into(),
+        ))?;
+    let claim_agent = claims
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if claim_agent != req.agent_id {
+        return Err((StatusCode::UNAUTHORIZED, "A-JWT agent_id mismatch".into()));
+    }
+    {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        crate::risk::check_and_increment(
+            &db,
+            &crate::risk::bucket_egress_capability(&tenant_id, &req.agent_id),
+            crate::agent_action::now_secs(),
+            crate::risk::limit_egress_capability(),
+        )
+        .map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "agent egress capability rate limit exceeded".into(),
+            )
+        })?;
+    }
+    let human = claims
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing sub".into()))?;
+    let jti = claims
+        .get("jti")
+        .and_then(|v| v.as_str())
+        .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing jti".into()))?;
+    let exp = claims
+        .get("exp")
+        .and_then(|v| v.as_i64())
+        .ok_or((StatusCode::UNAUTHORIZED, "A-JWT missing exp".into()))?;
+    let pop_jkt = claims
+        .get("cnf")
+        .and_then(|v| v.get("jkt"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let intent = match claims.get("intent") {
+        Some(serde_json::Value::String(s)) => serde_json::from_str(s).map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "A-JWT intent is invalid JSON".into(),
+            )
+        })?,
+        Some(v) => v.clone(),
+        None => return Err((StatusCode::UNAUTHORIZED, "A-JWT missing intent".into())),
+    };
+
+    let validated = crate::agent_action::validate_agent_action(
+        &state,
+        &req.agent_action,
+        crate::agent_action::ValidateAgentActionOptions {
+            tenant_id: &tenant_id,
+            agent_id: &req.agent_id,
+            human_key_image: human,
+            ajwt_jti: jti,
+            intent: Some(&intent),
+            expected_action: "egress",
+            expected_resource: Some(req.url.as_str()),
+            expected_merchant_id: url.host_str(),
+            expected_amount_minor: Some(0),
+            expected_currency: Some(""),
+            pop_jkt: Some(pop_jkt),
+            status: "authorized",
+        },
+    )?;
+
+    let now = crate::agent_action::now_secs();
+    let expires_at = exp.min(req.agent_action.envelope.expires_at).min(now + 120);
+    if expires_at <= now {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "capability would already be expired".into(),
+        ));
+    }
+    let capability = format!(
+        "egc_{}{}",
+        crate::ajwt_support::random_hex_32(),
+        crate::ajwt_support::random_hex_32()
+    );
+    let token_hash = sha256_hex(&capability);
+    {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        db.execute(
+            "DELETE FROM agent_egress_capabilities WHERE expires_at < ?1 OR used_at IS NOT NULL",
+            params![now],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        db.execute(
+            "INSERT INTO agent_egress_capabilities (token_hash_hex, tenant_id, agent_id, method, url, body_hash_hex, action_receipt_id, expires_at, used_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL)",
+            params![token_hash, tenant_id, req.agent_id, method, req.url, req.body_hash_hex.to_ascii_lowercase(), validated.receipt.receipt_id, expires_at],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(Json(EgressCapabilityResponse {
+        capability,
+        expires_at,
+        action_receipt: validated.receipt,
+    }))
+}
+
+#[derive(Deserialize)]
 pub struct EgressProxyRequest {
+    pub capability: String,
     pub method: String,
     pub url: String,
     #[serde(default)]
@@ -390,6 +751,8 @@ pub struct EgressProxyRequest {
 pub struct EgressProxyResponse {
     pub status: u16,
     pub body: String,
+    pub body_sha256_hex: String,
+    pub body_bytes: usize,
     /// PII classes redacted from the forwarded request body (empty if none / off).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redacted: Vec<String>,
@@ -486,7 +849,13 @@ pub async fn agent_egress_proxy(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         let intent = agent_intent(&db, &tenant_id, &agent_id)?;
-        egress_match(&intent, &host, &method_str, &path)
+        egress_match(
+            &intent,
+            &host,
+            &method_str,
+            &path,
+            !crate::runtime_mode::is_development_runtime(),
+        )
     };
     let Some(matched) = matched else {
         return Err(deny(format!(
@@ -525,12 +894,59 @@ pub async fn agent_egress_proxy(
     // 3. PII-redact the outbound body (opt-in). We forward + hash what was
     //    actually sent, so the anchored log reflects the redacted payload.
     let original_body = req.body.clone().unwrap_or_default();
+    if !matched.request_body_allowed && !original_body.is_empty() {
+        return Err(deny(
+            "egress policy forbids a request body for this target".into(),
+        ));
+    }
+    if original_body.len() > matched.max_request_bytes {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "request body exceeds target policy max_request_bytes ({})",
+                matched.max_request_bytes
+            ),
+        ));
+    }
+    let original_body_hash = sha256_hex(&original_body);
     let (fwd_body, redacted) = if redact_enabled() {
         redact_pii(&original_body)
     } else {
         (original_body, Vec::new())
     };
     let body_hash = sha256_hex(&fwd_body);
+
+    // Atomically consume the capability before making the external request.
+    // A network failure spends it; callers must obtain a new authorization,
+    // which is safer than allowing an ambiguous retry to duplicate effects.
+    {
+        let token_hash = sha256_hex(req.capability.trim());
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        let changed = db
+            .execute(
+                "UPDATE agent_egress_capabilities SET used_at = ?1
+                 WHERE token_hash_hex = ?2 AND tenant_id = ?3 AND agent_id = ?4
+                   AND method = ?5 AND url = ?6 AND body_hash_hex = ?7
+                   AND used_at IS NULL AND expires_at >= ?1",
+                params![
+                    now,
+                    token_hash,
+                    tenant_id,
+                    agent_id,
+                    method_str,
+                    req.url,
+                    original_body_hash,
+                ],
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if changed != 1 {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "egress capability is invalid, expired, already used, or not bound to this exact request".into(),
+            ));
+        }
+    }
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes())
         .map_err(|_| (StatusCode::BAD_REQUEST, "bad HTTP method".to_string()))?;
@@ -553,6 +969,16 @@ pub async fn agent_egress_proxy(
     for (k, v) in &req.headers {
         if header_forbidden(k) {
             continue;
+        }
+        if !crate::runtime_mode::is_development_runtime()
+            && !matched
+                .allowed_headers
+                .contains(&k.trim().to_ascii_lowercase())
+        {
+            return Err(deny(format!(
+                "request header '{}' is not explicitly allowed by target policy",
+                k.trim()
+            )));
         }
         if injected_header_lc.as_deref() == Some(k.trim().to_ascii_lowercase().as_str()) {
             continue;
@@ -592,7 +1018,7 @@ pub async fn agent_egress_proxy(
     }
 
     // 4. Bounded response read — never buffer an unbounded body.
-    let cap = max_resp_bytes();
+    let cap = matched.max_response_bytes.min(max_resp_bytes());
     if let Some(len) = resp.content_length() {
         if len as usize > cap {
             return Err((
@@ -624,11 +1050,18 @@ pub async fn agent_egress_proxy(
             }
         }
     }
-    let resp_body = String::from_utf8_lossy(&buf).into_owned();
+    let resp_body_hash = hex::encode(Sha256::digest(&buf));
+    let resp_body = if matched.response_body_allowed {
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        String::new()
+    };
 
     Ok(Json(EgressProxyResponse {
         status,
         body: resp_body,
+        body_sha256_hex: resp_body_hash,
+        body_bytes: buf.len(),
         redacted,
     }))
 }
@@ -693,16 +1126,57 @@ mod tests {
             ]
         });
         // Bare host → allowed, no credential.
-        let plain = egress_match(&intent, "plain.com", "GET", "/").expect("allowed");
+        let plain = egress_match(&intent, "plain.com", "GET", "/", false).expect("allowed");
         assert!(plain.inject_credential.is_none());
         // Object entry → credential name surfaced for server-side injection.
-        let m = egress_match(&intent, "api.stripe.com", "POST", "/v1/charges").expect("allowed");
+        let m =
+            egress_match(&intent, "api.stripe.com", "POST", "/v1/charges", false).expect("allowed");
         assert_eq!(m.inject_credential.as_deref(), Some("stripe"));
         // Constraints still apply.
         assert!(
-            egress_match(&intent, "api.stripe.com", "GET", "/").is_none(),
+            egress_match(&intent, "api.stripe.com", "GET", "/", false).is_none(),
             "method blocked"
         );
+    }
+
+    #[test]
+    fn production_egress_requires_explicit_disclosure_contract() {
+        let broad = serde_json::json!({"egress_allowlist": ["example.com"]});
+        assert!(egress_match(&broad, "example.com", "GET", "/x", true).is_none());
+
+        let strict = serde_json::json!({
+            "egress_allowlist": [{
+                "host": "example.com",
+                "methods": ["POST"],
+                "path_prefix": "/v1/jobs",
+                "request_body": "allow",
+                "response_body": "digest_only",
+                "max_request_bytes": 4096,
+                "max_response_bytes": 8192,
+                "allowed_headers": ["content-type"]
+            }]
+        });
+        let matched = egress_match(&strict, "example.com", "POST", "/v1/jobs/7", true)
+            .expect("fully constrained entry is valid");
+        assert!(!matched.response_body_allowed);
+        assert_eq!(matched.max_request_bytes, 4096);
+        assert!(matched.allowed_headers.contains("content-type"));
+        assert!(egress_match(&strict, "example.com", "GET", "/v1/jobs/7", true).is_none());
+        validate_production_egress_policy(&strict).expect("registration accepts strict policy");
+        assert!(validate_production_egress_policy(&broad).is_err());
+
+        let typo = serde_json::json!({"egress_allowlist": [{
+            "host": "example.com",
+            "methods": ["POST"],
+            "path_prefix": "/v1/jobs",
+            "request_body": "allow",
+            "response_body": "digest_only",
+            "max_request_bytes": 4096,
+            "max_response_bytes": 8192,
+            "allowed_headers": [],
+            "max_reponse_bytes": 7
+        }]});
+        assert!(validate_production_egress_policy(&typo).is_err());
     }
 
     #[test]
@@ -882,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn record_egress_logs_and_anchors_only_when_allowed() {
+    fn record_egress_does_not_create_unprovable_synthetic_receipts() {
         let db = mem_db();
         record_egress(
             &db,
@@ -912,10 +1386,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            receipts, 1,
-            "allowed egress must leave an anchorable receipt"
-        );
+        assert_eq!(receipts, 0, "capability issuance owns the signed receipt");
         // tenant_id is persisted on both rows.
         let scoped: i64 = db
             .query_row(
@@ -945,6 +1416,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(receipts_after, 1, "denied egress must NOT be anchored");
+        assert_eq!(
+            receipts_after, 0,
+            "egress logging never fabricates receipts"
+        );
     }
 }

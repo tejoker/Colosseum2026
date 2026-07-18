@@ -16,7 +16,17 @@ fi
 
 mkdir -p "$TMP_DIR"
 
-CIRCUITS=("AgeVerification" "MerkleInclusion" "CredentialVerification")
+# Audit every first-party circuit. A hand-maintained three-item allowlist
+# previously let newly added action/stats circuits bypass CI entirely.
+mapfile -t CIRCUITS < <(
+  find "$CIRCUITS_DIR" -maxdepth 1 -type f -name '*.circom' -printf '%f\n' \
+    | sed 's/\.circom$//' \
+    | sort
+)
+if [ "${#CIRCUITS[@]}" -eq 0 ]; then
+  echo "[ERROR] no circuits found under $CIRCUITS_DIR"
+  exit 1
+fi
 
 echo "═══════════════════════════════════════════════════"
 echo "  SauronID — Circuit Structural Audit"

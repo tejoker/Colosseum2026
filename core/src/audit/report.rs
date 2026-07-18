@@ -121,14 +121,13 @@ impl AuditReport {
     }
 }
 
-/// HMAC-SHA256 over the report's canonical form using the supplied
-/// operator key. Hex-encoded.
-///
-/// Placeholder for the real signing pipeline — in production the
-/// operator wires `secret_provider::resolve_secret("SAURON_ADMIN_KEY")`
-/// into an Ed25519 signer, but the wire shape is identical.
+/// HMAC-SHA256 over the report's canonical form using an HKDF-separated
+/// audit-report key. Hex-encoded. This is an internal integrity MAC, not a
+/// publicly verifiable signature; external chain-of-custody exports must be
+/// signed by the operator's asymmetric KMS/threshold-signing workflow.
 pub fn sign_report(report: &AuditReport, key: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
+    let separated = crate::crypto_protocol::derive_subkey(key, "audit-report-hmac-v1");
+    let mut mac = HmacSha256::new_from_slice(&separated).expect("HMAC key length");
     mac.update(&report.canonical_bytes());
     let tag = mac.finalize().into_bytes();
     hex::encode(tag)

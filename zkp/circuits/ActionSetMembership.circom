@@ -42,28 +42,14 @@ template ActionSetMembership(levels, setLevels, entryFields) {
     signal input entryPathElements[levels];
     signal input entryPathIndices[levels];
     signal input toolValue;
-    signal input toolSelector[entryFields];
     signal input setPathElements[setLevels];
     signal input setPathIndices[setLevels];
 
     // Public output
     signal output valid;
 
-    // ─── 1. Verify toolSelector is one-hot and select entry[i*] = toolValue ───
-    signal selectorSum[entryFields + 1];
-    selectorSum[0] <== 0;
-    for (var f = 0; f < entryFields; f++) {
-        toolSelector[f] * (1 - toolSelector[f]) === 0;
-        selectorSum[f + 1] <== selectorSum[f] + toolSelector[f];
-    }
-    selectorSum[entryFields] === 1;
-
-    signal extracted[entryFields + 1];
-    extracted[0] <== 0;
-    for (var f = 0; f < entryFields; f++) {
-        extracted[f + 1] <== extracted[f] + toolSelector[f] * entry[f];
-    }
-    extracted[entryFields] === toolValue;
+    // Protocol tuple offset 3 is tool id.
+    entry[3] === toolValue;
 
     // ─── 2. Action-log Merkle path verification (leaf = Poseidon(entry)) ───
     component leafHasher = Poseidon(entryFields);

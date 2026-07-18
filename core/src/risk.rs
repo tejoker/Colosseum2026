@@ -80,6 +80,13 @@ pub fn bucket_agent_verify(tenant_id: &str, agent_id: &str) -> String {
     )
 }
 
+pub fn bucket_egress_capability(tenant_id: &str, agent_id: &str) -> String {
+    hash_bucket(
+        b"egress_capability",
+        &[tenant_id.as_bytes(), agent_id.as_bytes()],
+    )
+}
+
 fn parse_limit(name: &str, production_default: i64) -> i64 {
     std::env::var(name)
         .ok()
@@ -206,6 +213,10 @@ pub fn limit_agent_verify() -> i64 {
     parse_limit("SAURON_RISK_AGENT_VERIFY_PER_WINDOW", 300)
 }
 
+pub fn limit_egress_capability() -> i64 {
+    parse_limit("SAURON_RISK_EGRESS_CAPABILITY_PER_WINDOW", 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +245,10 @@ mod tests {
         assert_ne!(
             bucket_agent_verify("t1", "agent"),
             bucket_agent_verify("t2", "agent")
+        );
+        assert_ne!(
+            bucket_egress_capability("t1", "agent"),
+            bucket_egress_capability("t2", "agent")
         );
     }
 }

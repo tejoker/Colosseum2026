@@ -525,8 +525,8 @@ mod tests {
         conn.execute(
             "INSERT INTO customer_stats
              (tenant_id, agent_id, metric_id, claimed_value, n_records,
-              period_start, period_end, merkle_root, proof_b64, vk_id, submitted_at)
-             VALUES (?1, '', ?2, ?3, 10, ?4, ?5, ?6, 'e30=', 'vk@v0', ?5)",
+              period_start, period_end, merkle_root, proof_b64, vk_id, checkpoint_id, submitted_at)
+             VALUES (?1, '', ?2, ?3, 10, ?4, ?5, ?6, 'e30=', 'vk@v0', 'zkc_test', ?5)",
             params![tenant, metric, claimed, period.0, period.1, "ff".repeat(32)],
         )
         .unwrap();

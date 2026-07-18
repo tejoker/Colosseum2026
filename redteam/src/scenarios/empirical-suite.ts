@@ -14,6 +14,7 @@
 import { generateKeyPairSync, randomBytes, createHash, sign as edSign } from "crypto";
 import { writeFileSync } from "fs";
 import { CoreApi, randSuffix, createPopKeyPair, signPopJws } from "../core-api";
+import { signCallV2 } from "../call-sig-v2";
 
 interface TestResult {
     id: string;
@@ -119,18 +120,16 @@ function signCallHeaders(opts: {
     ts?: number;
     nonce?: string;
 }): Record<string, string> {
-    const t = opts.ts ?? Date.now();
-    const n = opts.nonce ?? randomBytes(16).toString("hex");
-    const bodyHash = createHash("sha256").update(opts.body).digest("hex");
-    const payload = `${opts.method}|${opts.path}|${bodyHash}|${t}|${n}`;
-    const sig = edSign(null, Buffer.from(payload, "utf8"), opts.privateKey);
-    return {
-        "x-sauron-agent-id": opts.agentId,
-        "x-sauron-call-ts": String(t),
-        "x-sauron-call-nonce": n,
-        "x-sauron-call-sig": sig.toString("base64url"),
-        "x-sauron-agent-config-digest": opts.configDigest,
-    };
+    return signCallV2({
+        agentId: opts.agentId,
+        privateKey: opts.privateKey,
+        method: opts.method,
+        targetUri: opts.path,
+        body: opts.body,
+        configDigest: opts.configDigest,
+        timestampMs: opts.ts,
+        nonce: opts.nonce,
+    });
 }
 
 async function timed<T>(fn: () => Promise<T>): Promise<{ result: T; ms: number }> {
@@ -932,20 +931,14 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
                 ajwt_jti: ajwtJti,
                 ttl_secs: 120,
             });
-            const challengeHeaders = (() => {
-                const t = Date.now();
-                const n = randomBytes(16).toString("hex");
-                const bodyHash = createHash("sha256").update(challengeBody).digest("hex");
-                const payload = `POST|${challengePath}|${bodyHash}|${t}|${n}`;
-                const sig = edSign(null, Buffer.from(payload, "utf8"), pop.privateKey);
-                return {
-                    "x-sauron-agent-id": agentId,
-                    "x-sauron-call-ts": String(t),
-                    "x-sauron-call-nonce": n,
-                    "x-sauron-call-sig": sig.toString("base64url"),
-                    "x-sauron-agent-config-digest": a14Digest,
-                };
-            })();
+            const challengeHeaders = signCallV2({
+                agentId,
+                privateKey: pop.privateKey,
+                method: "POST",
+                targetUri: challengePath,
+                body: challengeBody,
+                configDigest: a14Digest,
+            });
             const chR = await fetch(`${baseUrl}${challengePath}`, {
                 method: "POST",
                 headers: { "content-type": "application/json", ...challengeHeaders },
@@ -988,20 +981,14 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
             // Use the test-suite's "ed25519 ride along" call-sig the way the existing
             // signCallHeaders does, but the agent's PoP private key here is `pop.privateKey`.
             // Build matching headers directly to bypass scope mismatch with helper.
-            const a14Headers = (() => {
-                const t = Date.now();
-                const n = randomBytes(16).toString("hex");
-                const bodyHash = createHash("sha256").update(a14Body).digest("hex");
-                const payload = `POST|${a14Path}|${bodyHash}|${t}|${n}`;
-                const sig = edSign(null, Buffer.from(payload, "utf8"), pop.privateKey);
-                return {
-                    "x-sauron-agent-id": agentId,
-                    "x-sauron-call-ts": String(t),
-                    "x-sauron-call-nonce": n,
-                    "x-sauron-call-sig": sig.toString("base64url"),
-                    "x-sauron-agent-config-digest": a14Digest,
-                };
-            })();
+            const a14Headers = signCallV2({
+                agentId,
+                privateKey: pop.privateKey,
+                method: "POST",
+                targetUri: a14Path,
+                body: a14Body,
+                configDigest: a14Digest,
+            });
             const authResp = await fetch(`${baseUrl}${a14Path}`, {
                 method: "POST",
                 headers: { "content-type": "application/json", ...a14Headers },

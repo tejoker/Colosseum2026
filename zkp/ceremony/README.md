@@ -1,8 +1,10 @@
 # SauronID ZK Trusted Setup Ceremony
 
-This directory describes how to produce **production** Groth16 verification
-keys for the action-log circuits in `zkp/circuits/Action*.circom` and
-`zkp/circuits/SignedLogEntry.circom`.
+This directory describes the legacy Groth16 ceremony path for the action-log
+circuits. Groth16 now defaults off in production; the preferred replacement is
+the transparent zkVM/STARK design in `docs/crypto-migration-boundary.md`.
+Retaining Groth16 requires an explicit reviewed opt-in, a new ceremony for the
+current circuit sources, and source/key digest pins.
 
 > **WARNING — DEV KEYS = FORGEABLE PROOFS**
 >
@@ -17,6 +19,9 @@ keys for the action-log circuits in `zkp/circuits/Action*.circom` and
 > `contributors_required` independent parties each contribute entropy, AND
 > at least one of them deletes their toxic waste. See
 > `circuits-list.json` for per-circuit security tiers.
+>
+> Circuit versions before `@v1` predate the public/fixed selector and explicit
+> comparator-range constraints and are rejected for the hardened circuits.
 >
 > The Rust verifier (`core/src/zk_verifier.rs`) refuses to start verification
 > in any non-development runtime when a vk JSON still carries the

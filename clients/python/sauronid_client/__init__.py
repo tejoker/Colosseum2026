@@ -70,7 +70,7 @@ from .anthropic_adapter import (
     dispatch_tool_use_blocks,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "SauronIDClient",
     "SauronIDError",

@@ -67,7 +67,8 @@ async function main(): Promise<ScenarioResult> {
         period_end: period + 3600,
         merkle_root: "11".repeat(32),
         proof_b64: "e30=",
-        vk_id: "stats_honest_computation.dev.vk@v0",
+        vk_id: "StatsHonestComputation.dev.vk@v1",
+        checkpoint_id: "zkc_wrong_tenant",
         public_inputs: ["0", "0", "0"],
     };
     await fetch(`${BASE_URL}/v1/stats/submit`, {
@@ -75,6 +76,7 @@ async function main(): Promise<ScenarioResult> {
         headers: {
             "content-type": "application/json",
             authorization: `Bearer ${ADMIN_KEY}`,
+            "x-sauron-tenant-id": tenantA,
         },
         body: JSON.stringify(submission),
     });

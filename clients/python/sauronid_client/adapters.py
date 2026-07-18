@@ -63,19 +63,15 @@ class LangChainTool:
             separators=(",", ":"), default=str,
         ).encode("utf-8")
         body_hash = hashlib.sha256(body_repr).hexdigest()
-        try:
-            self.agent.report_egress(
-                target_host=self.target_host,
-                target_path=self.target_path,
-                method="POST",
-                body_hash_hex=body_hash,
-            )
-        except Exception as e:  # noqa: BLE001 — telemetry path, do not break the agent
-            import warnings
-            warnings.warn(
-                f"sauronid: report_egress failed: {e}; tool will still run",
-                RuntimeWarning,
-            )
+        # Fail closed. A security adapter must never turn an unavailable guard
+        # into permission to run the tool. Production deployments should use
+        # SignedAgent.egress_request so the network call itself crosses core.
+        self.agent.report_egress(
+            target_host=self.target_host,
+            target_path=self.target_path,
+            method="POST",
+            body_hash_hex=body_hash,
+        )
         return self.tool._run(*args, **kwargs)
 
     async def _arun(self, *args, **kwargs):
@@ -85,15 +81,12 @@ class LangChainTool:
             separators=(",", ":"), default=str,
         ).encode("utf-8")
         body_hash = hashlib.sha256(body_repr).hexdigest()
-        try:
-            self.agent.report_egress(
-                target_host=self.target_host,
-                target_path=self.target_path,
-                method="POST",
-                body_hash_hex=body_hash,
-            )
-        except Exception:
-            pass
+        self.agent.report_egress(
+            target_host=self.target_host,
+            target_path=self.target_path,
+            method="POST",
+            body_hash_hex=body_hash,
+        )
         if hasattr(self.tool, "_arun"):
             return await self.tool._arun(*args, **kwargs)
         return self.tool._run(*args, **kwargs)

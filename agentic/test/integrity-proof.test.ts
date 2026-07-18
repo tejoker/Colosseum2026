@@ -47,6 +47,9 @@ function stubRunner(): ProofRunner {
             witness.n_records as string,
             witness.period_start as string,
             witness.period_end as string,
+            witness.tree_size as string,
+            witness.tenant_hash as string,
+            witness.agent_hash as string,
         ];
         return { proof: stubProof, publicSignals };
     };
@@ -96,8 +99,8 @@ async function testHappyPath() {
     assert(out.root === "deadbeef", "root passes through");
     assert(out.metric.id === "success_rate", "metric echoed");
     assert(
-        out.public_inputs.length === 7,
-        `7 public inputs (valid+root+metric_id+claimed+n_records+start+end), got ${out.public_inputs.length}`,
+        out.public_inputs.length === 10,
+        `10 public inputs including tree/tenant/agent binding, got ${out.public_inputs.length}`,
     );
     assert(out.public_inputs[2] === "0", "metric_id index = 0 (success_rate)");
     assert(out.public_inputs[3] === String(m.value_fixed), "claimed_value matches");
@@ -202,7 +205,7 @@ async function testReceiptToFieldsDeterministic() {
     const r = mkReceipt({ status: "ok", latency_ms: 50, amount_usd: 1.5 });
     const a = receiptToFields(r);
     const b = receiptToFields(r);
-    assert(a.length === 6, `6 fields per receipt (got ${a.length})`);
+    assert(a.length === 7, `7 fields per receipt (got ${a.length})`);
     assert(a.every((x, i) => x === b[i]), "deterministic across calls");
     assert(a[0] === "1", "status_bit = 1 for ok");
     assert(a[1] === "50", "latency_ms = 50");

@@ -1,25 +1,26 @@
-//! Customer-side stat aggregation + ZK integrity (Sprint 7).
+//! Customer-side stat aggregation + transparent proof integrity.
 //!
 //! Wire flow:
 //!
 //! ```text
 //!   SDK (agentic)                      Server (this module)
 //!   ───────────────────                ──────────────────────
-//!   commit N receipts                  /v1/stats/submit
-//!   compute 10 metrics                 │
-//!   prove StatsHonestComputation       ├─► verify::verify_stats_submission
-//!   POST {stat, proof, root, ...} ────►│      • payload sanity
-//!                                      │      • metric_id ∈ provable set
-//!                                      │      • public_inputs ↔ body bind
-//!                                      │      • snarkjs subprocess
+//!   collect complete v2 batch          /v1/stats/submit-transparent
+//!   compute one reviewed metric        │
+//!   prove reviewed STARK metric        ├─► transparent_proof verifier
+//!   POST {statement, receipt} ────────►│      • native receipt + image ID
+//!                                      │      • exact journal/body binding
+//!                                      │      • authoritative checkpoint
 //!                                      ├─► store::upsert_submission
 //!                                      │      • idempotent INSERT
 //!                                      ├─► store::anchor_submission
-//!                                      │      • synthetic action_hash
-//!                                      │      • row in agent_action_receipts
+//!                                      │      • dedicated statement digest
 //!                                      └─► returns {stored, latency_ms,
-//!                                                  anchored_action_hash}
+//!                                                  statement_hash}
 //! ```
+//!
+//! The older `/v1/stats/submit` Circom/Groth16 path remains development-only
+//! compatibility and is quarantined by production startup.
 //!
 //! Documentation: `docs/stats-submission.md`.
 
@@ -42,7 +43,7 @@ pub use store::{
     upsert_submission,
 };
 pub use submission::{CohortRow, StatsSubmission, StatsSubmitResponse};
-pub use verify::{verify_stats_submission, AggError, PROVABLE_METRICS};
+pub use verify::{stats_scope_hash, verify_stats_submission, AggError, PROVABLE_METRICS};
 
 pub use he_aggregator::HeAggregator;
 pub use he_store::{get_he_aggregation, upsert_he_aggregation, HeAggregationRow, HeStoreError};

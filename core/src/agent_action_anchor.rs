@@ -8,7 +8,9 @@
 //! 1. Every `SAURON_ACTION_ANCHOR_INTERVAL_SECS` (default 600 s = 10 min):
 //!    - Select all `agent_action_receipts` rows newer than the last anchor.
 //!    - If empty, skip.
-//!    - Compute `leaf_i = SHA256(receipt_id || action_hash || created_at)`.
+//!    - Compute a domain-separated, length-prefixed v2 leaf committing the
+//!      tenant, receipt/action identity, agent/ring identity, policy/JTI/PoP,
+//!      outcome, signature, creation time, ring id, and config digest.
 //!    - Build a binary merkle tree (rs_merkle / sha256). Root = `batch_root`.
 //!    - Persist a row in `agent_action_anchors` with the batch range.
 //!    - Submit `batch_root` to Bitcoin via `bitcoin_anchor` (OTS calendar) AND
@@ -17,7 +19,8 @@
 //! ## External verification
 //!
 //! Any auditor with a copy of an `agent_action_receipts` row can:
-//!   - Recompute `leaf` from (receipt_id, action_hash, created_at).
+//!   - Recompute the versioned leaf from the receipt fields returned by the
+//!     audit export. Historical v1 batches retain their legacy leaf version.
 //!   - Fetch the merkle path from `/admin/anchor/agent-actions/proof?receipt_id=…`
 //!     and re-derive the root.
 //!   - Look up the OTS proof in `bitcoin_merkle_anchors` and run `ots verify`.
@@ -61,12 +64,43 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
-/// Compute the leaf hash for a single action receipt.
-///
-/// `leaf = SHA256(receipt_id || '|' || action_hash || '|' || created_at_ascii)`
-///
-/// All three components are append-only so the leaf is deterministic forever.
-fn leaf_hash(receipt_id: &str, action_hash: &str, created_at: i64) -> [u8; 32] {
+#[derive(Debug, Clone)]
+struct AnchoredReceipt {
+    receipt_id: String,
+    action_hash: String,
+    agent_id: String,
+    ring_key_image_hex: String,
+    policy_version: String,
+    ajwt_jti: String,
+    pop_jkt: String,
+    status: String,
+    signature: String,
+    created_at: i64,
+    tenant_id: String,
+    ring_id: String,
+    config_digest: String,
+}
+
+fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnchoredReceipt> {
+    Ok(AnchoredReceipt {
+        receipt_id: row.get(0)?,
+        action_hash: row.get(1)?,
+        agent_id: row.get(2)?,
+        ring_key_image_hex: row.get(3)?,
+        policy_version: row.get(4)?,
+        ajwt_jti: row.get(5)?,
+        pop_jkt: row.get(6)?,
+        status: row.get(7)?,
+        signature: row.get(8)?,
+        created_at: row.get(9)?,
+        tenant_id: row.get(10)?,
+        ring_id: row.get(11)?,
+        config_digest: row.get(12)?,
+    })
+}
+
+/// Legacy leaf retained solely to reconstruct anchors created before v2.
+fn leaf_hash_v1(receipt_id: &str, action_hash: &str, created_at: i64) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(receipt_id.as_bytes());
     h.update(b"|");
@@ -74,6 +108,32 @@ fn leaf_hash(receipt_id: &str, action_hash: &str, created_at: i64) -> [u8; 32] {
     h.update(b"|");
     h.update(created_at.to_string().as_bytes());
     h.finalize().into()
+}
+
+/// V2 commits every security-relevant receipt field with unambiguous framing.
+/// Rewriting policy/JTI/PoP/status/signature/tenant metadata now changes the
+/// externally anchored root instead of leaving the old three-field leaf intact.
+fn leaf_hash_v2(receipt: &AnchoredReceipt) -> [u8; 32] {
+    let created_at = receipt.created_at.to_string();
+    Sha256::digest(crate::crypto_protocol::canonical_fields(
+        "sauron.action-anchor-leaf.v2",
+        &[
+            ("tenant_id", &receipt.tenant_id),
+            ("receipt_id", &receipt.receipt_id),
+            ("action_hash", &receipt.action_hash),
+            ("agent_id", &receipt.agent_id),
+            ("ring_key_image_hex", &receipt.ring_key_image_hex),
+            ("policy_version", &receipt.policy_version),
+            ("ajwt_jti", &receipt.ajwt_jti),
+            ("pop_jkt", &receipt.pop_jkt),
+            ("status", &receipt.status),
+            ("signature", &receipt.signature),
+            ("created_at", &created_at),
+            ("ring_id", &receipt.ring_id),
+            ("config_digest", &receipt.config_digest),
+        ],
+    ))
+    .into()
 }
 
 /// Anchor each tenant's pending receipts independently. A mixed-tenant Merkle
@@ -119,7 +179,8 @@ pub async fn anchor_pending_actions_for_tenant(
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT to_created_at, to_receipt_id FROM agent_action_anchors
-             WHERE tenant_id = ?1 ORDER BY to_created_at DESC LIMIT 1",
+             WHERE tenant_id = ?1 AND anchor_status = 'submitted'
+             ORDER BY to_created_at DESC LIMIT 1",
             params![tenant_id],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
         )
@@ -127,12 +188,15 @@ pub async fn anchor_pending_actions_for_tenant(
     };
 
     // 2. Pull all receipts after that watermark, ordered.
-    let receipts: Vec<(String, String, i64)> = {
+    let receipts: Vec<AnchoredReceipt> = {
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT receipt_id, action_hash, created_at
+                "SELECT receipt_id, action_hash, agent_id, ring_key_image_hex,
+                        policy_version, ajwt_jti, pop_jkt, status, signature,
+                        created_at, tenant_id, COALESCE(ring_id, ''),
+                        COALESCE(config_digest, '')
                  FROM agent_action_receipts
                  WHERE tenant_id = ?1
                    AND (created_at > ?2 OR (created_at = ?2 AND receipt_id > ?3))
@@ -148,13 +212,7 @@ pub async fn anchor_pending_actions_for_tenant(
                     last_receipt_id,
                     MAX_RECEIPTS_PER_BATCH as i64
                 ],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                },
+                receipt_from_row,
             )
             .map_err(|e| e.to_string())?;
         rows.flatten().collect()
@@ -165,18 +223,15 @@ pub async fn anchor_pending_actions_for_tenant(
     }
 
     // 3. Build the merkle tree over leaves.
-    let leaves: Vec<[u8; 32]> = receipts
-        .iter()
-        .map(|(rid, ah, ts)| leaf_hash(rid, ah, *ts))
-        .collect();
+    let leaves: Vec<[u8; 32]> = receipts.iter().map(leaf_hash_v2).collect();
     let tree = MerkleTree::<MerkleSha256>::from_leaves(&leaves);
     let root: [u8; 32] = tree.root().ok_or("empty merkle tree (unreachable)")?;
     let batch_root_hex = hex::encode(root);
 
-    let from_receipt_id = receipts.first().unwrap().0.clone();
-    let to_receipt_id = receipts.last().unwrap().0.clone();
-    let from_created_at = receipts.first().unwrap().2;
-    let to_created_at = receipts.last().unwrap().2;
+    let from_receipt_id = receipts.first().unwrap().receipt_id.clone();
+    let to_receipt_id = receipts.last().unwrap().receipt_id.clone();
+    let from_created_at = receipts.first().unwrap().created_at;
+    let to_created_at = receipts.last().unwrap().created_at;
     let n_actions = receipts.len() as i64;
 
     let anchor_id = format!("aaa_{}", random_hex_32());
@@ -188,8 +243,9 @@ pub async fn anchor_pending_actions_for_tenant(
         conn.execute(
             "INSERT INTO agent_action_anchors
              (anchor_id, batch_root_hex, n_actions, from_receipt_id, to_receipt_id,
-             from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, created_at, tenant_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', ?8, ?9)",
+             from_created_at, to_created_at, btc_anchor_id, sol_anchor_id,
+             anchor_status, anchor_error, leaf_version, created_at, tenant_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', 'pending', '', 2, ?8, ?9)",
             params![
                 anchor_id,
                 batch_root_hex,
@@ -208,6 +264,8 @@ pub async fn anchor_pending_actions_for_tenant(
     // 5. Fire BOTH on-chain anchors in parallel; collect receipt ids.
     let bitcoin_anchor = state.read().unwrap().bitcoin_anchor.clone();
     let solana_anchor = state.read().unwrap().solana_anchor.clone();
+    let expected_anchors =
+        usize::from(bitcoin_anchor.is_some()) + usize::from(solana_anchor.is_some());
     let db = state.read().unwrap().db.clone();
 
     let btc_handle = if let Some(svc) = bitcoin_anchor {
@@ -229,6 +287,7 @@ pub async fn anchor_pending_actions_for_tenant(
 
     let mut btc_id = String::new();
     let mut sol_id = String::new();
+    let mut anchor_errors: Vec<String> = Vec::new();
     if let Some(h) = btc_handle {
         match h.await {
             Ok(Ok(receipt)) => {
@@ -242,9 +301,11 @@ pub async fn anchor_pending_actions_for_tenant(
                 );
             }
             Ok(Err(e)) => {
+                anchor_errors.push(format!("bitcoin: {e}"));
                 tracing::warn!(target: "sauron::action_anchor", error = %e, "BTC anchor failed (non-fatal)")
             }
             Err(e) => {
+                anchor_errors.push(format!("bitcoin task: {e}"));
                 tracing::warn!(target: "sauron::action_anchor", error = %e, "BTC anchor task join error")
             }
         }
@@ -263,9 +324,11 @@ pub async fn anchor_pending_actions_for_tenant(
                 );
             }
             Ok(Err(e)) => {
+                anchor_errors.push(format!("solana: {e}"));
                 tracing::warn!(target: "sauron::action_anchor", error = %e, "Solana anchor failed (non-fatal)")
             }
             Err(e) => {
+                anchor_errors.push(format!("solana task: {e}"));
                 tracing::warn!(target: "sauron::action_anchor", error = %e, "Solana anchor task join error")
             }
         }
@@ -290,9 +353,22 @@ pub async fn anchor_pending_actions_for_tenant(
                 params![tenant_id, sol_id],
             );
         }
+        let successes = usize::from(!btc_id.is_empty()) + usize::from(!sol_id.is_empty());
+        let anchor_status = if expected_anchors > 0 && successes == expected_anchors {
+            "submitted"
+        } else if successes > 0 {
+            "partial"
+        } else {
+            "failed"
+        };
+        let anchor_error = if expected_anchors == 0 {
+            "no anchor provider configured".to_string()
+        } else {
+            anchor_errors.join("; ")
+        };
         conn.execute(
-            "UPDATE agent_action_anchors SET btc_anchor_id = ?1, sol_anchor_id = ?2 WHERE anchor_id = ?3",
-            params![btc_id, sol_id, anchor_id],
+            "UPDATE agent_action_anchors SET btc_anchor_id = ?1, sol_anchor_id = ?2, anchor_status = ?3, anchor_error = ?4 WHERE anchor_id = ?5",
+            params![btc_id, sol_id, anchor_status, anchor_error, anchor_id],
         )
         .ok();
     }
@@ -367,11 +443,21 @@ pub fn proof_for_receipt_for_tenant(
         }
     };
 
-    let batch: Option<(String, String, i64, i64, String, String, String, String)> = {
+    let batch: Option<(
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        i64,
+    )> = {
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
-            "SELECT anchor_id, batch_root_hex, from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, from_receipt_id, to_receipt_id
+            "SELECT anchor_id, batch_root_hex, from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, from_receipt_id, to_receipt_id, leaf_version
              FROM agent_action_anchors
              WHERE from_created_at <= ?1 AND to_created_at >= ?1
                AND (?2 = '*' OR tenant_id = ?2)
@@ -386,15 +472,17 @@ pub fn proof_for_receipt_for_tenant(
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
                 r.get::<_, String>(7)?,
+                r.get::<_, i64>(8)?,
             )),
         )
         .ok()
     };
 
-    let (anchor_id, batch_root_hex, from_ts, to_ts, btc, sol, from_rid, to_rid) = match batch {
-        Some(b) => b,
-        None => return Ok(None),
-    };
+    let (anchor_id, batch_root_hex, from_ts, to_ts, btc, sol, from_rid, to_rid, leaf_version) =
+        match batch {
+            Some(b) => b,
+            None => return Ok(None),
+        };
 
     // 1b. Resolve the per-chain three-state surface (ADR-001).
     // `solana.confirmed` = solana_merkle_anchors.confirmed == 1
@@ -454,12 +542,15 @@ pub fn proof_for_receipt_for_tenant(
     // receipts that the anchor batch didn't actually include, producing a
     // wrong merkle root. Tuple-ordered bounds make the rebuild identical to
     // the original ordered LIMIT-capped batch.
-    let receipts: Vec<(String, String, i64)> = {
+    let receipts: Vec<AnchoredReceipt> = {
         let st = state.read().unwrap();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT receipt_id, action_hash, created_at
+                "SELECT receipt_id, action_hash, agent_id, ring_key_image_hex,
+                        policy_version, ajwt_jti, pop_jkt, status, signature,
+                        created_at, tenant_id, COALESCE(ring_id, ''),
+                        COALESCE(config_digest, '')
                  FROM agent_action_receipts
                  WHERE (?5 = '*' OR tenant_id = ?5)
                    AND (created_at > ?1 OR (created_at = ?1 AND receipt_id >= ?2))
@@ -468,24 +559,31 @@ pub fn proof_for_receipt_for_tenant(
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![from_ts, from_rid, to_ts, to_rid, tenant_id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })
+            .query_map(
+                params![from_ts, from_rid, to_ts, to_rid, tenant_id],
+                receipt_from_row,
+            )
             .map_err(|e| e.to_string())?;
         rows.flatten().collect()
     };
 
     let leaves: Vec<[u8; 32]> = receipts
         .iter()
-        .map(|(rid, ah, ts)| leaf_hash(rid, ah, *ts))
+        .map(|receipt| {
+            if leaf_version >= 2 {
+                leaf_hash_v2(receipt)
+            } else {
+                leaf_hash_v1(
+                    &receipt.receipt_id,
+                    &receipt.action_hash,
+                    receipt.created_at,
+                )
+            }
+        })
         .collect();
     let leaf_index = receipts
         .iter()
-        .position(|(rid, _, _)| rid == receipt_id)
+        .position(|receipt| receipt.receipt_id == receipt_id)
         .ok_or("receipt not in batch (DB drift?)")?;
 
     let tree = MerkleTree::<MerkleSha256>::from_leaves(&leaves);
@@ -499,6 +597,7 @@ pub fn proof_for_receipt_for_tenant(
         "leaf_hex": hex::encode(leaves[leaf_index]),
         "proof_hashes_hex": proof_hashes,
         "tree_size": leaves.len(),
+        "leaf_version": leaf_version,
         "btc_anchor_id": btc,
         "sol_anchor_id": sol,
         // ADR-001: three-state surface. `anchored` retained for one minor
@@ -543,7 +642,7 @@ pub fn recent_batches_for_tenant(
     let conn = st.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT anchor_id, batch_root_hex, n_actions, btc_anchor_id, sol_anchor_id, created_at
+            "SELECT anchor_id, batch_root_hex, n_actions, btc_anchor_id, sol_anchor_id, created_at, anchor_status, anchor_error
              FROM agent_action_anchors
              WHERE (?2 = '*' OR tenant_id = ?2)
              ORDER BY created_at DESC
@@ -559,16 +658,21 @@ pub fn recent_batches_for_tenant(
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
-    let batches: Vec<(String, String, i64, String, String, i64)> = rows.flatten().collect();
+    let batches: Vec<(String, String, i64, String, String, i64, String, String)> =
+        rows.flatten().collect();
     drop(stmt);
     drop(conn);
     drop(st);
 
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(batches.len());
-    for (anchor_id, batch_root_hex, n_actions, btc, sol, created_at) in batches {
+    for (anchor_id, batch_root_hex, n_actions, btc, sol, created_at, anchor_status, anchor_error) in
+        batches
+    {
         let (sol_confirmed, sol_slot, sol_sig) = if sol.is_empty() {
             (false, None::<i64>, None::<String>)
         } else {
@@ -614,6 +718,8 @@ pub fn recent_batches_for_tenant(
             "batch_root_hex": batch_root_hex,
             "n_actions": n_actions,
             "created_at": created_at,
+            "anchor_status": anchor_status,
+            "anchor_error": anchor_error,
             "btc_anchor_id": btc,
             "sol_anchor_id": sol,
             "solana": {
@@ -638,18 +744,42 @@ pub fn recent_batches_for_tenant(
 mod tests {
     use super::*;
 
+    fn receipt() -> AnchoredReceipt {
+        AnchoredReceipt {
+            receipt_id: "rcp_abc".into(),
+            action_hash: "deadbeef".into(),
+            agent_id: "agt_1".into(),
+            ring_key_image_hex: "11".repeat(32),
+            policy_version: "v1".into(),
+            ajwt_jti: "jti_1".into(),
+            pop_jkt: "jkt_1".into(),
+            status: "accepted".into(),
+            signature: "sig_1".into(),
+            created_at: 12345,
+            tenant_id: "tenant_1".into(),
+            ring_id: String::new(),
+            config_digest: "sha256:abc".into(),
+        }
+    }
+
     #[test]
     fn leaf_hash_is_deterministic() {
-        let a = leaf_hash("rcp_abc", "deadbeef", 12345);
-        let b = leaf_hash("rcp_abc", "deadbeef", 12345);
+        let a = leaf_hash_v2(&receipt());
+        let b = leaf_hash_v2(&receipt());
         assert_eq!(a, b);
     }
 
     #[test]
     fn leaf_hash_changes_with_any_field() {
-        let base = leaf_hash("rcp_abc", "deadbeef", 12345);
-        assert_ne!(base, leaf_hash("rcp_abd", "deadbeef", 12345));
-        assert_ne!(base, leaf_hash("rcp_abc", "deadbeee", 12345));
-        assert_ne!(base, leaf_hash("rcp_abc", "deadbeef", 12346));
+        let base = leaf_hash_v2(&receipt());
+        let mut changed = receipt();
+        changed.status = "denied".into();
+        assert_ne!(base, leaf_hash_v2(&changed));
+        changed = receipt();
+        changed.tenant_id = "tenant_2".into();
+        assert_ne!(base, leaf_hash_v2(&changed));
+        changed = receipt();
+        changed.signature = "forged".into();
+        assert_ne!(base, leaf_hash_v2(&changed));
     }
 }

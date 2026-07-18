@@ -1,7 +1,12 @@
 use axum::{
-    extract::Json as AxumJson, http::StatusCode, middleware, routing::get, routing::post, Router,
+    extract::{Extension, Json as AxumJson, State},
+    http::StatusCode,
+    middleware,
+    routing::get,
+    routing::post,
+    Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
 use crate::{
@@ -64,27 +69,409 @@ pub fn agent_spend_router() -> Router<Arc<RwLock<ServerState>>> {
 /// Router for `/v1/proofs/*` — Sprint 4 action-log proof verification.
 ///
 /// `POST /v1/proofs/action-log/verify` consumes an `ActionLogProofPayload`
-/// plus an `expected_root_hex` and replies 200 on accept, 400 on reject.
+/// plus a finalized checkpoint id and replies 200 on accept, 400 on reject.
 /// Admin-gated; the proof verification is computationally cheap relative to
 /// proving but still gated to avoid being an oracle for arbitrary callers.
 pub fn proofs_router() -> Router<Arc<RwLock<ServerState>>> {
     Router::new()
         .route("/action-log/verify", post(action_log_verify_handler))
+        .route("/transparent/verify", post(transparent_verify_handler))
+        .route("/checkpoint/finalize", post(finalize_proof_checkpoint))
         .route_layer(middleware::from_fn(admin::auth_middleware))
         .route_layer(middleware::from_fn(tenancy::extract_tenant))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FinalizeProofCheckpointRequest {
+    circuit: String,
+    /// Existing server-created action anchor.  The caller no longer supplies
+    /// a root or a tree size: both are resolved from the complete receipt batch.
+    action_anchor_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FinalizeProofCheckpointResponse {
+    checkpoint_id: String,
+    anchor_id: String,
+    finalized: bool,
+    statement_commitment_hex: String,
+}
+
+/// Freeze a proof statement over a server-created, externally anchored action
+/// batch.  The caller selects a batch but cannot choose its root, size, receipt
+/// range, or anchoring status.  This closes the old "honestly prove an
+/// incomplete caller-selected tree" path.
+async fn finalize_proof_checkpoint(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<tenancy::TenantId>>,
+    AxumJson(body): AxumJson<FinalizeProofCheckpointRequest>,
+) -> Result<AxumJson<FinalizeProofCheckpointResponse>, (StatusCode, String)> {
+    use sha2::{Digest, Sha256};
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
+    if body.circuit.is_empty()
+        || body
+            .circuit
+            .chars()
+            .any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.')
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid circuit name".into()));
+    }
+    const ALLOWED_CHECKPOINT_CIRCUITS: &[&str] = &[
+        "StatsHonestComputation",
+        "TransparentActionPolicy",
+        "ActionRangeProof",
+        "ActionTimeWindow",
+        "ActionSetMembership",
+        "ActionSetNonMembership",
+        "ActionSumBound",
+        "ActionCountInRange",
+    ];
+    if !ALLOWED_CHECKPOINT_CIRCUITS.contains(&body.circuit.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "unsupported checkpoint circuit".into(),
+        ));
+    }
+    if body.action_anchor_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "action_anchor_id is required".into(),
+        ));
+    }
+
+    let (db, receipt_mac_secret) = {
+        let st = state.read().unwrap();
+        (st.db.clone(), st.jwt_secret.clone())
+    };
+    let (
+        root_hex,
+        tree_size,
+        btc_anchor_id,
+        anchor_status,
+        leaf_version,
+        ots_upgraded,
+        btc_provider,
+        from_created_at,
+        from_receipt_id,
+        to_created_at,
+        to_receipt_id,
+    ): (
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        i64,
+        String,
+        i64,
+        String,
+    ) = {
+        let conn = db
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        conn.query_row(
+            "SELECT a.batch_root_hex, a.n_actions, a.btc_anchor_id, a.anchor_status,
+                    a.leaf_version, COALESCE(b.ots_upgraded, 0), COALESCE(b.provider, ''),
+                    a.from_created_at, a.from_receipt_id, a.to_created_at, a.to_receipt_id
+             FROM agent_action_anchors a
+             LEFT JOIN bitcoin_merkle_anchors b
+               ON b.anchor_id = a.btc_anchor_id AND b.tenant_id = a.tenant_id
+             WHERE a.anchor_id = ?1 AND a.tenant_id = ?2",
+            rusqlite::params![&body.action_anchor_id, &tenant_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                ))
+            },
+        )
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                "tenant action anchor not found".into(),
+            )
+        })?
+    };
+    if tree_size <= 0 || tree_size > 10_000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "action anchor has invalid tree size".into(),
+        ));
+    }
+    if leaf_version < 2 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "legacy partial receipt leaves cannot back a production proof checkpoint".into(),
+        ));
+    }
+    if matches!(
+        body.circuit.as_str(),
+        "StatsHonestComputation" | "TransparentActionPolicy"
+    ) {
+        let (batch_count, compatible_count, valid_mac_count): (i64, i64, i64) = {
+            let conn = db
+                .lock()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let mut stmt = conn.prepare(
+                "SELECT receipt_id, action_hash, agent_id, ring_key_image_hex,
+                        policy_version, ajwt_jti, pop_jkt, status, signature,
+                        created_at, COALESCE(ring_id, ''), COALESCE(config_digest, ''), tenant_id
+                 FROM agent_action_receipts
+                 WHERE tenant_id = ?1
+                   AND (created_at > ?2 OR (created_at = ?2 AND receipt_id >= ?3))
+                   AND (created_at < ?4 OR (created_at = ?4 AND receipt_id <= ?5))
+                 ORDER BY created_at, receipt_id",
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![
+                    &tenant_id,
+                    from_created_at,
+                    &from_receipt_id,
+                    to_created_at,
+                    &to_receipt_id
+                    ],
+                    |r| {
+                        Ok((
+                            crate::agent_action::ActionReceipt {
+                                tenant_id: r.get(12)?,
+                                receipt_id: r.get(0)?,
+                                action_hash: r.get(1)?,
+                                agent_id: r.get(2)?,
+                                ring_key_image_hex: r.get(3)?,
+                                policy_version: r.get(4)?,
+                                ajwt_jti: r.get(5)?,
+                                pop_jkt: r.get(6)?,
+                                status: r.get(7)?,
+                                signature: r.get(8)?,
+                                timestamp: r.get(9)?,
+                            },
+                            r.get::<_, String>(10)?,
+                            r.get::<_, String>(11)?,
+                        ))
+                    },
+                )
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let mut total = 0i64;
+            let mut compatible = 0i64;
+            let mut valid_macs = 0i64;
+            for row in rows {
+                let (receipt, ring_id, config_digest) = row
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                total += 1;
+                if !receipt.agent_id.is_empty()
+                    && !receipt.ring_key_image_hex.is_empty()
+                    && !receipt.signature.is_empty()
+                    && ring_id.is_empty()
+                    && config_digest.is_empty()
+                {
+                    compatible += 1;
+                }
+                if crate::agent_action::verify_receipt_signature(&receipt_mac_secret, &receipt) {
+                    valid_macs += 1;
+                }
+            }
+            (total, compatible, valid_macs)
+        };
+        if batch_count != tree_size
+            || compatible_count != batch_count
+            || valid_mac_count != batch_count
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "transparent checkpoints require a complete, unchanged batch of ordinary action receipts with valid tenant-bound server MACs"
+                    .into(),
+            ));
+        }
+    }
+    if anchor_status != "submitted" || btc_anchor_id.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            "action batch is not fully submitted to its configured anchors".into(),
+        ));
+    }
+    if !crate::runtime_mode::is_development_runtime()
+        && (btc_provider != "opentimestamps" || ots_upgraded != 1)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "production checkpoint requires an upgraded OpenTimestamps proof committed in Bitcoin"
+                .into(),
+        ));
+    }
+    let decoded_root = hex::decode(&root_hex).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored anchor root is not hex".into(),
+        )
+    })?;
+    if decoded_root.len() != 32 {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored anchor root is not 32 bytes".into(),
+        ));
+    }
+    let tree_size_text = tree_size.to_string();
+    let statement = crate::crypto_protocol::canonical_fields(
+        "sauron.zk-checkpoint.v2",
+        &[
+            ("tenant_id", &tenant_id),
+            ("circuit", &body.circuit),
+            ("action_anchor_id", &body.action_anchor_id),
+            ("merkle_root", &root_hex),
+            ("tree_size", &tree_size_text),
+        ],
+    );
+    let commitment: [u8; 32] = Sha256::digest(&statement).into();
+    let commitment_hex = hex::encode(commitment);
+
+    let finalized = true;
+    let finalized_at = crate::ajwt_support::now_secs();
+    let checkpoint_id = format!("zkc_{}", crate::ajwt_support::random_hex_32());
+    {
+        let conn = db
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        conn.execute(
+            "INSERT INTO zk_proof_checkpoints (checkpoint_id, tenant_id, circuit, merkle_root, tree_size, anchor_id, finalized_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![&checkpoint_id, &tenant_id, &body.circuit, &root_hex, tree_size, &body.action_anchor_id, finalized_at],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(AxumJson(FinalizeProofCheckpointResponse {
+        checkpoint_id,
+        anchor_id: body.action_anchor_id,
+        finalized,
+        statement_commitment_hex: commitment_hex,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransparentVerifyRequest {
+    checkpoint_id: String,
+    #[serde(flatten)]
+    proof: crate::transparent_proof::TransparentProofPayload,
+}
+
+#[derive(Debug, Serialize)]
+struct TransparentVerifyResponse {
+    valid: bool,
+    journal: crate::transparent_proof::TransparentJournal,
+}
+
+async fn transparent_verify_handler(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<tenancy::TenantId>>,
+    AxumJson(body): AxumJson<TransparentVerifyRequest>,
+) -> Result<AxumJson<TransparentVerifyResponse>, (StatusCode, String)> {
+    use crate::transparent_proof::{TransparentProofError, TransparentStatement};
+
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
+    let journal = crate::transparent_proof::verify_transparent_proof(&body.proof)
+        .await
+        .map_err(|e| match e {
+            TransparentProofError::Malformed(_) | TransparentProofError::Unsupported(_) => {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            }
+            TransparentProofError::Configuration(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+            }
+            TransparentProofError::Busy(_) => (StatusCode::TOO_MANY_REQUESTS, e.to_string()),
+            TransparentProofError::Invalid(_) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+        })?;
+
+    let (journal_tenant, journal_checkpoint, journal_anchor, journal_root, journal_size, circuit) =
+        match &journal.statement {
+            TransparentStatement::Stats {
+                tenant_id,
+                checkpoint_id,
+                action_anchor_id,
+                merkle_root,
+                tree_size,
+                ..
+            } => (
+                tenant_id,
+                checkpoint_id,
+                action_anchor_id,
+                merkle_root,
+                *tree_size,
+                "StatsHonestComputation",
+            ),
+            TransparentStatement::ActionPolicy {
+                tenant_id,
+                checkpoint_id,
+                action_anchor_id,
+                merkle_root,
+                tree_size,
+                ..
+            } => (
+                tenant_id,
+                checkpoint_id,
+                action_anchor_id,
+                merkle_root,
+                *tree_size,
+                "TransparentActionPolicy",
+            ),
+        };
+    if journal_tenant != &tenant_id || journal_checkpoint != &body.checkpoint_id {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "proof tenant/checkpoint binding mismatch".into(),
+        ));
+    }
+    let (expected_root, expected_size, expected_anchor): (String, i64, String) = {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        db.query_row(
+            "SELECT merkle_root, tree_size, anchor_id FROM zk_proof_checkpoints
+             WHERE checkpoint_id = ?1 AND tenant_id = ?2 AND circuit = ?3 AND finalized_at > 0",
+            rusqlite::params![&body.checkpoint_id, &tenant_id, circuit],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                "finalized transparent checkpoint not found".into(),
+            )
+        })?
+    };
+    if !journal_root.eq_ignore_ascii_case(&expected_root)
+        || journal_size != expected_size as u64
+        || journal_anchor != &expected_anchor
+    {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "proof journal does not match the authoritative checkpoint root/size/anchor".into(),
+        ));
+    }
+
+    Ok(AxumJson(TransparentVerifyResponse {
+        valid: true,
+        journal,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ActionLogVerifyRequest {
     #[serde(flatten)]
     pub payload: zk_verifier::ActionLogProofPayload,
-    // SECURITY: `expected_root_hex` is still caller-supplied. It MUST be bound to
-    // an authoritative, finalized server checkpoint (tenant + tree size + anchor
-    // id) rather than trusted verbatim — tracked with the proof-statement
-    // redesign in docs/design/zk-proof-statement.md. Until then this route only
-    // proves internal consistency with the supplied root, NOT with the server's
-    // authoritative log; treat its 200 accordingly.
-    pub expected_root_hex: String,
+    /// Server-issued finalized checkpoint. The verifier resolves root, tree
+    /// size and anchor server-side; callers cannot choose the trusted root.
+    pub checkpoint_id: String,
     // `vkey_dir` was request-controlled — a caller could point verification at an
     // attacker-supplied verification key (or traverse the filesystem). REMOVED:
     // the verification-key directory is now server-controlled only (ZKP_VKEY_DIR
@@ -93,15 +480,39 @@ pub struct ActionLogVerifyRequest {
 }
 
 async fn action_log_verify_handler(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<Extension<tenancy::TenantId>>,
     AxumJson(body): AxumJson<ActionLogVerifyRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
+    let (expected_root, tree_size): (String, i64) = {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        db.query_row(
+            "SELECT merkle_root, tree_size FROM zk_proof_checkpoints WHERE checkpoint_id = ?1 AND tenant_id = ?2 AND circuit = ?3 AND finalized_at > 0",
+            rusqlite::params![&body.checkpoint_id, &tenant_id, &body.payload.circuit],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| (StatusCode::NOT_FOUND, "finalized proof checkpoint not found for tenant/circuit".into()))?
+    };
+    // Circuits with an explicit tree-size public input must bind it to this
+    // server checkpoint. StatsHonestComputation places it at index 7.
+    let expected_tree_size = tree_size.to_string();
+    if body.payload.circuit == "StatsHonestComputation"
+        && body.payload.public_inputs.get(7).map(String::as_str)
+            != Some(expected_tree_size.as_str())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "proof tree_size does not match authoritative checkpoint".into(),
+        ));
+    }
     // Server-controlled ONLY — never from the request.
-    let dir = std::env::var("ZKP_VKEY_DIR").unwrap_or_else(|_| "zkp/circuits/build/keys".to_string());
+    let dir =
+        std::env::var("ZKP_VKEY_DIR").unwrap_or_else(|_| "zkp/circuits/build/keys".to_string());
     let loader = zk_verifier::FsVKeyLoader::new(dir);
 
-    match zk_verifier::verify_action_log_proof(&body.payload, &body.expected_root_hex, &loader)
-        .await
-    {
+    match zk_verifier::verify_action_log_proof(&body.payload, &expected_root, &loader).await {
         Ok(()) => Ok(StatusCode::OK),
         Err(zk_verifier::ZkVerifyError::Malformed(m)) => {
             Err((StatusCode::BAD_REQUEST, format!("malformed: {m}")))
@@ -130,6 +541,10 @@ async fn action_log_verify_handler(
 pub fn stats_router() -> Router<Arc<RwLock<ServerState>>> {
     Router::new()
         .route("/submit", post(agg_handlers::submit_handler))
+        .route(
+            "/submit-transparent",
+            post(agg_handlers::submit_transparent_handler),
+        )
         // Sprint 13-14 Tier 2: optional Paillier-encrypted submission path.
         // NEEDS_CRYPTO_REVIEW — see core/src/he/ disclaimer block.
         .route(

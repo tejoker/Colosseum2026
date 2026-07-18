@@ -87,11 +87,11 @@ assert(
     "honesty constraint binds claimed_value to (numerator, denominator)",
 );
 
-// 5. Documented depth bound + N cap.
+// 5. Documented depth bound + fixed complete-tree arity.
 assert(/Depth\s*≤\s*20|levels.*≤\s*20/i.test(src), "depth ≤ 20 documented");
 assert(
-    /N\s*<=\s*64|N\s*≤\s*64/.test(src),
-    "N ≤ 64 cap documented",
+    /N\s*=\s*4|N=4/.test(src),
+    "fixed N=4 arity documented",
 );
 
 // 6. Documented non-provable subset.

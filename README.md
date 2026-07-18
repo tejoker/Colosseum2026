@@ -1,16 +1,27 @@
 # SauronID
 
-**The cryptographic agent-binding layer for AI deployments.**
+**A fail-closed authorization and verifiable-audit boundary for AI agents.**
 
 ## Why this matters
 
-An AI agent that gets compromised at runtime — by prompt injection, a tampered system prompt, a swapped tool definition, a stolen token — can do real damage in a few HTTP calls. Replay a captured token, mutate the request body after signing, escalate scope through delegation, drift its config without anyone noticing.
+An AI agent compromised by prompt injection or hostile tools can do real damage
+through otherwise valid credentials. SauronID puts an independently enforced
+gateway in front of those actions: tenant-bound sessions, exact request
+signatures, one-use capabilities, server-side policy evaluation, disclosure
+contracts, byte and rate caps, and a tamper-evident action log.
 
-**Without SauronID**, an attacker who pwns your agent can do all of the above. **With SauronID**, every one of those produces an HTTP 401 in under 5 ms, on every request. There is no "trust the agent runtime" assumption: each call is independently re-verified against a binding that the operator cannot forge.
+This is containment, not a proof that an agent is benevolent. A valid but overly
+broad policy still authorizes harm, and traffic that can bypass the gateway is
+outside its control. Production therefore fails closed and requires the
+deployment network policy in [`deploy/kubernetes/agent-network-isolation.yaml`](deploy/kubernetes/agent-network-isolation.yaml)
+or an equivalent deny-by-default egress boundary.
 
-The [16-attack empirical suite](redteam/) covers this in two layers: **10/16 attacks (A1–A10) are dynamically executed against a live server, all blocked**; **6/16 attacks (A11–A16) are verified by source-code review** against canonical patterns (atomic `UPDATE ... WHERE` TOCTOU, constant-time HMAC compares, `UNIQUE` constraints on every consume table). Dynamic harness for A11–A16 is tracked in the redteam roadmap. Anyone can re-run the dynamic layer (`npx tsx redteam/src/scenarios/empirical-suite.ts`).
-
-Default mode is **advisory** (logs violations but accepts). Set `SAURON_REQUIRE_CALL_SIG=1` for **fail-closed** enforcement. All numbers below assume fail-closed unless stated.
+Compliance statements are proved by the transparent RISC Zero STARK guests in
+[`transparent-zk/`](transparent-zk/). They require no per-circuit setup ceremony;
+customers verify receipts locally against published image IDs. The proof
+certifies computation over the complete externally anchored receipt batch. It
+cannot certify that a real-world event was truthful or that an event which
+never entered the protected path occurred.
 
 ## What an agent under SauronID cannot do
 
@@ -19,15 +30,18 @@ Default mode is **advisory** (logs violations but accepts). Set `SAURON_REQUIRE_
 - act outside its declared `intent`,
 - silently swap its system prompt, tool list, or model id,
 - escalate scope across delegation (parent → child),
-- evade the merkle-anchored audit log,
+- change an already finalized and externally anchored receipt batch without detection,
 - act after revocation.
+
+Those guarantees apply only to protected calls that cannot route around the
+gateway and only within the limits encoded by the operator's policy.
 
 ## What SauronID is, and what it is not
 
 | | |
 |---|---|
-| **Is** | A self-hostable HTTP service in Rust + a TS/Python client. Every protected endpoint a registered agent calls verifies: A-JWT signature, intent-leash, per-call DPoP-style body signature, single-use nonce, single-use JTI, agent-runtime config digest, rate limits. Every agent action is merkle-anchored to Bitcoin (OpenTimestamps) and Solana (Memo) for tamper-evident audit. |
-| **Is not** | A user-authentication system. SauronID does not handle human SSO/SAML/social-login. Plug it next to your existing user auth (or none) — the human authorisation flow is independent. SauronID is purely about **the agent layer**: from the moment an AI agent is allowed to act, until it acts. |
+| **Is** | A self-hostable Rust authorization gateway with TS, Python, and Go clients. Protected calls bind tenant, method, path, audience, query, body digest, timestamp, nonce, intent, runtime configuration, and one-use credentials. Finalized action batches can back native transparent STARK statements and external timestamp proofs. |
+| **Is not** | A sandbox, a complete IdP, an oracle for human intent, or evidence that source data is true. It includes tenant-bound passwordless Ed25519 sessions, but SSO/SAML/social login remains an integration with the customer's IdP. |
 
 If your AI agents call internal APIs, your customers' APIs, third-party APIs, or each other — that traffic is what SauronID binds.
 
@@ -35,51 +49,89 @@ If your AI agents call internal APIs, your customers' APIs, third-party APIs, or
 
 Be honest about who you have to trust.
 
-- **PoP keys are derived server-side** as `SHA256(jwt_secret | agent_id | human_key_image | agent_checksum)`. The operator who controls `jwt_secret` can derive any agent's PoP key. The trust assumption is therefore: **the operator of the SauronID server is trusted**. Compromise of `jwt_secret` is equivalent to compromise of every agent identity in the deployment. Protect it accordingly (Vault Transit / KMS wrapping is on the roadmap — see Partial section).
-- **Hardware-bound PoP keys** (TPM2, AWS Nitro, Apple Secure Enclave, SEV-SNP) would remove this trust assumption by binding the private key material to hardware the operator does not directly hold. The attestation enum and the operator-rooted `ed25519_self` verifier ship today; the hardware verifiers are roadmap (see Partial).
-- **Agent runtime trust** is bounded but not eliminated. SauronID detects config drift, replay, body mutation, scope escalation, and post-revocation use. It does **not** detect an attacker with full process-memory access on the agent host — only hardware attestation does that.
-- M1 of TPM2 roadmap shipped: server-derived PoP is now explicit and refused in production by default; TPM2 quote endpoint accepts well-formed payloads but full verification (vendor cert-chain walker) is M2. See [docs/roadmap.md](docs/roadmap.md) Plan 1.
-- M2 shipped: TPM2 quote parsing + AIK signature verification + cert-chain walker. Operators supply vendor roots via `SAURON_TPM2_VENDOR_ROOTS_DIR`. M3 (cutover from server-derived keys) still pending.
+- Production agents register client-generated Ed25519 proof-of-possession keys;
+  server-derived PoP is refused. Hardware attestation is not required for the
+  authorization or STARK proof path.
+- TPM/Nitro can be enabled as an optional claim about where a key or program
+  executed. That claim adds vendor/hardware assumptions and requires real-device
+  release evidence; it is not a consequence of Groth16 and does not make an
+  authorized policy safe.
+- The STARK prover and agent process are untrusted. Verifiers still rely on the
+  published guest source/image ID, RISC Zero's proof-system assumptions,
+  collision-resistant hashing, and correct verifier software. This is
+  cryptographic verification, not unconditional mathematics.
+- A hostile process holding a valid agent key can request anything its current
+  policy permits. The independent gateway, one-use capabilities, rate/amount
+  caps, response-disclosure rules, and network isolation limit that authority;
+  they cannot infer whether an allowed action is wise.
+- Canonical trust boundaries and remaining impossibility results are maintained
+  in [`docs/crypto-migration-boundary.md`](docs/crypto-migration-boundary.md).
 
 ## What ships, what's partial, what doesn't yet exist
 
 Honest table. Re-verifiable from the source.
 
-### Fully shipped — verified by the 16-attack empirical suite
+### Implemented security path
 
-- Per-agent Ed25519 PoP keys with mandatory hardware-attestation slot.
+- Client-generated per-agent Ed25519 PoP keys; optional hardware-attestation
+  evidence is challenge- and key-bound when explicitly enabled.
 - A-JWT (intent + checksum + delegation depth) with single-use JTI.
-- DPoP-style per-call signature over `method | path | sha256(body) | timestamp | nonce`.
+- Versioned per-call signature over tenant, method, path, canonical query,
+  audience, body digest, timestamp, nonce, JTI, and runtime configuration.
 - Server-computed agent checksum from typed `agent_type` + `checksum_inputs`. Operators cannot supply a fake checksum.
 - Per-call `x-sauron-agent-config-digest` header check: agent runtime cannot drift from registered config without rejecting on every call.
 - Atomic single-use TOCTOU patterns on every consume table (consent, payment, credential, bank nonce, lightning, call-nonce, JTI).
 - Constant-time HMAC compares (no timing oracles).
 - CORS hard-fail on empty origins (no permissive fallback).
 - Sliding-window rate limits per agent + per human.
-- Merkle commitment of agent action receipts → Bitcoin (OpenTimestamps) + Solana (Memo) → externally verifiable via `ots verify` and Solana Explorer.
-- Operator-rooted `ed25519_self` hardware-attestation verifier (signed runtime measurements with an operator-held Ed25519 key, e.g. HSM / YubiKey).
+- Complete v2 Merkle commitment of action receipts → Bitcoin
+  (OpenTimestamps) + Solana (Memo), with authoritative tenant-scoped proof
+  checkpoints.
+- Native RISC Zero `Succinct`/`Composite` STARK verification for stats and
+  action-policy statements. Fake, Groth16-compressed, unknown, wrong-program,
+  wrong-tenant, and wrong-checkpoint receipts fail closed.
+- Tenant-bound passwordless user challenge/response using an Ed25519 key, with
+  short-lived one-use challenges and signed sessions.
 - Telemetry: `tracing` (JSON or pretty), Prometheus `/metrics`, structured logs.
 - Background GC for 5 expirable tables.
-- Egress reporting endpoint where agents voluntarily POST signed records of their outbound calls. Intent-allowlist enforcement is operator-side (separate egress controller or service mesh). SauronID provides the auditable log and per-call signature verification; it does not proxy traffic in-band.
+- In-band egress capability gateway: exact host/method/path constraints,
+  request/response disclosure modes, allowed-header and byte caps, DNS/SSRF
+  checks, redirect refusal, credential brokerage, one-use capabilities, and
+  rate buckets. Production rejects bare-host policies.
 - Python client (`clients/python/sauronid_client/`) with LangChain, OpenAI Assistants, and Anthropic Computer Use adapters.
 - TypeScript client (`agentic/src/`) with the same primitives.
-- Postgres backend opt-in (3 modules ported; 9 still on rusqlite — incremental).
+- SQLite online-backup verification and restore-integrity tooling for the
+  supported single-node topology.
 
 ### Partial — works but operator must complete
 
-- **Postgres swap**: 3 modules have a live Postgres path (`agent_call_nonces`, `risk_rate_counters`, `ajwt_used_jtis`). The other 9 still run synchronous rusqlite (call-site sweep incomplete — `M2-callsite-sweep` TODOs). Single-node SQLite is the default; `SAURON_DB_BACKEND=postgres` only reroutes the 3 ported modules. **Data-layer positioning:** this is a **single-node pilot appliance** — sync SQLite access on the async runtime, one DB file, **no HA / failover / replication / multi-region**. Fine for a dedicated pilot; **not yet a shared multi-tenant control plane** (that's the roadmap's "Plan 2 — Postgres backend completion"). Don't co-locate unrelated customers on one node.
+- **Database topology**: SQLite remains load-bearing even when the partial
+  Postgres paths are enabled. Production startup requires explicit acceptance
+  of the single-node topology. There is no honest HA/failover/multi-region
+  claim yet; use a dedicated node and perform the documented restore drill.
 - **OpenTimestamps confirmation latency**: receipts are submitted instantly to public calendars; **Bitcoin block inclusion takes ~1 hour**. Solana memo finalisation is ~30 s. Dashboard surfaces three honest states per batch (ADR-001): Solana-confirmed (≤30 s), BTC-pending (≤1 h), Dually anchored. No single false "anchored" summary — both chains are reported independently on `/admin/anchor/batches` and the `/anchors` console page. Operators with stricter timing pick the Solana path or run their own calendar.
 - **ZKP issuer / KYC consent / bank-KYC ingest**: feature-flagged off by default. Available behind `SAURON_DISABLE_*=0` for legacy deployments. SauronID does NOT ship a sanctions/PEP screening provider — wire your own data into `compliance_screening`.
-- **Vault Transit envelope encryption**: the `secret_provider` abstraction is shipped and resolves `<NAME>_WRAPPED` env vars through `POST /v1/transit/decrypt/<key>` when `SAURON_VAULT_TRANSIT_ENABLED=1`. The call path is **not yet wired into server init** for `jwt_secret` / `token_secret` / `oprf_seed` / `admin_key` — today those secrets are still loaded from plain env vars (or sit unencrypted in the DB for derived keys). Roadmap: wire the Vault path through `core/src/secret_provider.rs` into init before the first production customer. Source: [`core/src/secret_provider.rs`](core/src/secret_provider.rs).
-- **AWS KMS adapter**: not implemented. `resolve_via_kms()` in [`core/src/secret_provider.rs`](core/src/secret_provider.rs) returns `BackendUnavailable("AWS KMS adapter not yet wired (Phase 1B)")`. Use the Vault Transit path once wired, or supply your own adapter.
-- **Hardware attestation beyond `ed25519_self`**: the `AttestationKind` enum recognises `tpm2_quote`, `sgx_quote`, `sev_snp`, `arm_cca`, `nitro_enclave`, `apple_secure`, but every verifier except `ed25519_self` returns `AttestationError::NotImplemented` today. Source: [`core/src/attestation.rs`](core/src/attestation.rs). To deploy with hardware-rooted PoP, either use the operator-signed `ed25519_self` path (works today) or supply a verifier for your target platform. AWS Nitro chain validation is roadmap, not shipped.
+- **External key custody**: production secret resolution and external partner-key
+  custody are fail-closed configuration obligations. Vault loopback behavior is
+  covered by tests, but the deployment must supply, authorize, rotate, and
+  recover its real secret backend.
+- **Optional hardware tier**: TPM2 and Nitro verification code exists, but no
+  hardware-tier claim is release-ready without real-device end-to-end evidence
+  for the exact production image and vendor roots.
 
 ### Cannot do — out of scope by design
 
-- Replace your IdP, SSO, or human-auth system. SauronID does not authenticate humans.
-- Detect a compromised agent host without hardware attestation. Process-memory access defeats every signature-based system. Mitigation: hardware-backed PoP keys (TPM2 / AWS Nitro / Apple Secure Enclave / SEV-SNP).
+- Prove that an unobserved real-world event happened or that submitted source
+  data was truthful. It proves computation and completeness relative to the
+  finalized protected receipt batch.
+- Determine that every syntactically valid encoded payload is semantically free
+  of sensitive data.
+- Prevent damage which an operator's policy deliberately or accidentally
+  authorizes.
+- Protect calls which can bypass the gateway at the network layer.
 - Multi-region without operator effort. Single-binary deploys are vertical scaling only.
-- Pass SOC2 / ISO 27001 audit. No audit performed yet.
+- Prove the absence of unknown vulnerabilities or replace an independent
+  cryptographic review, penetration test, and deployment audit.
 
 ## Quickstart (one command, 60 seconds)
 

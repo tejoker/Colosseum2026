@@ -109,16 +109,70 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}) 
 
 // RegisterAgentRequest is the body of POST /agent/register.
 type RegisterAgentRequest struct {
-	HumanKeyImage   string                 `json:"human_key_image"`
-	AgentType       string                 `json:"agent_type"`
-	ChecksumInputs  map[string]interface{} `json:"checksum_inputs"`
-	AgentChecksum   string                 `json:"agent_checksum"`
-	IntentJSON      string                 `json:"intent_json"`
-	PublicKeyHex    string                 `json:"public_key_hex"`
-	RingKeyImageHex string                 `json:"ring_key_image_hex"`
-	PopJkt          string                 `json:"pop_jkt"`
-	PopPublicKeyB64u string                `json:"pop_public_key_b64u"`
-	TTLSecs         int                    `json:"ttl_secs"`
+	HumanKeyImage              string                 `json:"human_key_image"`
+	AgentType                  string                 `json:"agent_type"`
+	ChecksumInputs             map[string]interface{} `json:"checksum_inputs"`
+	AgentChecksum              string                 `json:"agent_checksum"`
+	IntentJSON                 string                 `json:"intent_json"`
+	PublicKeyHex               string                 `json:"public_key_hex"`
+	RingKeyImageHex            string                 `json:"ring_key_image_hex"`
+	PopJkt                     string                 `json:"pop_jkt"`
+	PopPublicKeyB64u           string                 `json:"pop_public_key_b64u"`
+	TTLSecs                    int                    `json:"ttl_secs"`
+	AttestationChallengeID    string                 `json:"attestation_challenge_id,omitempty"`
+	AttestationKind           string                 `json:"attestation_kind,omitempty"`
+	AttestationBlob           string                 `json:"attestation_blob,omitempty"`
+	ExpectedMeasurementHex    string                 `json:"expected_measurement_hex,omitempty"`
+	AttestationPubKeyB64u     string                 `json:"attestation_pubkey_b64u,omitempty"`
+	TPM2QuoteB64              string                 `json:"tpm2_quote_b64,omitempty"`
+	TPM2AttestB64             string                 `json:"tpm2_attest_b64,omitempty"`
+	TPM2SignatureB64          string                 `json:"tpm2_signature_b64,omitempty"`
+	TPM2AIKCertPEM            string                 `json:"tpm2_aik_cert_pem,omitempty"`
+	TPM2EKCertChainPEM        string                 `json:"tpm2_ek_cert_chain_pem,omitempty"`
+	TPM2PCRSet                string                 `json:"tpm2_pcr_set,omitempty"`
+	TPM2AttestationPubKeyB64u string                 `json:"tpm2_attestation_pubkey_b64u,omitempty"`
+}
+
+// AttestationChallenge is a one-use nonce bound to the authenticated human,
+// tenant, and future Ed25519 PoP key. A TPM/Nitro provider must embed its nonce
+// and the same PoP key in the signed registration document.
+type AttestationChallenge struct {
+	AttestationChallengeID string `json:"attestation_challenge_id"`
+	Nonce                  string `json:"nonce"`
+	PopJkt                 string `json:"pop_jkt"`
+	ExpiresAt              int64  `json:"expires_at"`
+}
+
+// RequestAttestationChallenge obtains the nonce that must be attested before
+// RegisterAgent. Hardware-backed production registrations cannot skip it.
+func (c *Client) RequestAttestationChallenge(ctx context.Context, userSession, popPublicKeyB64u string) (*AttestationChallenge, error) {
+	buf, err := json.Marshal(map[string]string{"pop_public_key_b64u": popPublicKeyB64u})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/agent/attestation/challenge", bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Sauron-Session", userSession)
+	if c.tenantID != "" {
+		req.Header.Set("X-Sauron-Tenant-Id", c.tenantID)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &Error{Status: resp.StatusCode, Body: string(body)}
+	}
+	var out AttestationChallenge
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode attestation challenge: %w", err)
+	}
+	return &out, nil
 }
 
 // RegisterAgentResponse is the JSON returned by POST /agent/register.

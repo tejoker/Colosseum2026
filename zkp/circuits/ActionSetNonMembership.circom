@@ -25,14 +25,13 @@ include "../node_modules/circomlib/circuits/bitify.circom";
  *   - entryPathElements[levels]     : action-log path siblings
  *   - entryPathIndices[levels]      : action-log path indicators
  *   - toolValue                     : value being proven non-member
- *   - toolSelector[entryFields]     : one-hot selector for tool field
  *   - low, high                     : adjacent denylist members straddling toolValue
  *   - pairPathElements[setLevels]   : siblings for pair leaf Merkle path
  *   - pairPathIndices[setLevels]    : indicators for pair leaf Merkle path
  *
  * The denylist leaf format is Poseidon(low, high, 2). Operators MUST build
  * the denylist tree with leaves sorted ascending by `low`. Sentinel leaves
- * (low=0, high=p-1 endpoints) cover values outside the represented range.
+ * (low=0, high=2^64-1 endpoints) cover values outside the represented range.
  * Depth ≤ 20 for both trees.
  */
 template ActionSetNonMembership(levels, setLevels, entryFields) {
@@ -46,7 +45,6 @@ template ActionSetNonMembership(levels, setLevels, entryFields) {
     signal input entryPathElements[levels];
     signal input entryPathIndices[levels];
     signal input toolValue;
-    signal input toolSelector[entryFields];
     signal input low;
     signal input high;
     signal input pairPathElements[setLevels];
@@ -55,21 +53,18 @@ template ActionSetNonMembership(levels, setLevels, entryFields) {
     // Public output
     signal output valid;
 
-    // ─── 1. Selector validity & tool extraction ───
-    signal selectorSum[entryFields + 1];
-    selectorSum[0] <== 0;
-    for (var f = 0; f < entryFields; f++) {
-        toolSelector[f] * (1 - toolSelector[f]) === 0;
-        selectorSum[f + 1] <== selectorSum[f] + toolSelector[f];
-    }
-    selectorSum[entryFields] === 1;
+    // Protocol tuple offset 3 is tool id.
+    entry[3] === toolValue;
 
-    signal extracted[entryFields + 1];
-    extracted[0] <== 0;
-    for (var f = 0; f < entryFields; f++) {
-        extracted[f + 1] <== extracted[f] + toolSelector[f] * entry[f];
-    }
-    extracted[entryFields] === toolValue;
+    // circomlib's 64-bit comparators are sound only when all operands are
+    // explicitly range constrained. Without these gadgets, a prover can use
+    // a large BN254 field element and exploit modular wraparound.
+    component toolBits = Num2Bits(64);
+    component lowBits = Num2Bits(64);
+    component highBits = Num2Bits(64);
+    toolBits.in <== toolValue;
+    lowBits.in <== low;
+    highBits.in <== high;
 
     // ─── 2. low < toolValue < high (strict gap) ───
     component cmpLow = LessThan(64);

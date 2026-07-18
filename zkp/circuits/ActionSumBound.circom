@@ -10,20 +10,17 @@ include "../node_modules/circomlib/circuits/bitify.circom";
  * contiguous range of N entry indices.
  *
  * Each entry is committed as Poseidon(entry[0..entryFields]). The amount lies
- * at a fixed offset `amountOffset` (compile-time parameter via fieldSelector
- * supplied privately — but constrained to be the same selector for every
- * entry).
+ * at protocol tuple offset 2, fixed in the circuit.
  *
  * Public inputs:
  *   - root        : Merkle root of the action-log tree
- *   - budget      : upper bound on the sum (32-bit)
+ *   - budget      : upper bound on the sum (64-bit)
  *   - iLo, iHi    : inclusive range of entry indices (iHi = iLo + N - 1)
  *
  * Private inputs:
  *   - entries[N][entryFields]      : the entries
  *   - pathElements[N][levels]      : Merkle sibling hashes per entry
  *   - pathIndices[N][levels]       : left/right indicators per entry
- *   - amountSelector[entryFields]  : one-hot selector for the amount field
  *
  * Bound: 64-bit sum comparator (allows summing many 32-bit amounts safely).
  *
@@ -41,19 +38,9 @@ template ActionSumBound(levels, entryFields, N) {
     signal input entries[N][entryFields];
     signal input pathElements[N][levels];
     signal input pathIndices[N][levels];
-    signal input amountSelector[entryFields];
 
     // Public output
     signal output valid;
-
-    // Selector validity: one-hot
-    signal selectorSum[entryFields + 1];
-    selectorSum[0] <== 0;
-    for (var f = 0; f < entryFields; f++) {
-        amountSelector[f] * (1 - amountSelector[f]) === 0;
-        selectorSum[f + 1] <== selectorSum[f] + amountSelector[f];
-    }
-    selectorSum[entryFields] === 1;
 
     // iHi == iLo + N - 1
     iHi === iLo + (N - 1);
@@ -64,18 +51,17 @@ template ActionSumBound(levels, entryFields, N) {
     component hashers[N][levels];
     component mux[N][levels];
     component rootCheck[N];
+    component amountBits[N];
 
     signal extracted[N];
-    signal partials[N][entryFields + 1];
     signal pathLevels[N][levels + 1];
 
     for (var k = 0; k < N; k++) {
-        // Extract amount via the shared selector.
-        partials[k][0] <== 0;
-        for (var f = 0; f < entryFields; f++) {
-            partials[k][f + 1] <== partials[k][f] + amountSelector[f] * entries[k][f];
-        }
-        extracted[k] <== partials[k][entryFields];
+        // Protocol tuple offset 2 is amount; the prover cannot redirect the
+        // budget comparison to a different private column.
+        extracted[k] <== entries[k][2];
+        amountBits[k] = Num2Bits(32);
+        amountBits[k].in <== extracted[k];
 
         // Hash the leaf.
         leafHasher[k] = Poseidon(entryFields);
@@ -118,6 +104,11 @@ template ActionSumBound(levels, entryFields, N) {
     }
     signal total;
     total <== sums[N];
+
+    component totalBits = Num2Bits(64);
+    component budgetBits = Num2Bits(64);
+    totalBits.in <== total;
+    budgetBits.in <== budget;
 
     component le = LessEqThan(64);
     le.in[0] <== total;

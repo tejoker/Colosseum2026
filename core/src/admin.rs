@@ -385,6 +385,12 @@ pub async fn auth_middleware(
 pub struct AddClientRequest {
     pub name: String,
     pub client_type: ClientType,
+    /// Production partners generate and retain their own ring key. The server
+    /// receives only the public key and key image; it never stores custody.
+    #[serde(default)]
+    pub public_key_hex: Option<String>,
+    #[serde(default)]
+    pub key_image_hex: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -393,28 +399,91 @@ pub struct AddClientResponse {
     pub public_key_hex: String,
     pub key_image_hex: String,
     pub client_type: String,
+    /// Development-only one-time secret when the server generated the key.
+    /// Never persisted, and forbidden by default in production.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_key_hex_once: Option<String>,
 }
 
 pub async fn add_client(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<crate::tenancy::TenantId>>,
     Json(payload): Json<AddClientRequest>,
 ) -> Result<Json<AddClientResponse>, (StatusCode, String)> {
-    // Génère une paire de clés Ristretto aléatoire pour ce site.
-    let identity = Identity::random();
-    let pub_hex = identity.public_hex();
-    let priv_hex = identity.secret_hex();
-    let ki_hex = identity.key_image_hex();
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
+    let require_external = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_EXTERNAL_CLIENT_KEYS",
+        /* dev_default */ false,
+        /* prod_default */ true,
+    );
+    let (pub_hex, ki_hex, private_key_hex_once) = match (
+        &payload.public_key_hex,
+        &payload.key_image_hex,
+    ) {
+        (Some(pub_hex), Some(ki_hex)) => {
+            use curve25519_dalek::ristretto::CompressedRistretto;
+            use curve25519_dalek::traits::Identity as _;
+            for (label, encoded) in [("public_key_hex", pub_hex), ("key_image_hex", ki_hex)] {
+                let bytes = hex::decode(encoded)
+                    .map_err(|_| (StatusCode::BAD_REQUEST, format!("{label} must be hex")))?;
+                let arr: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| (StatusCode::BAD_REQUEST, format!("{label} must be 32 bytes")))?;
+                let point = CompressedRistretto(arr).decompress().ok_or((
+                    StatusCode::BAD_REQUEST,
+                    format!("{label} is not a valid Ristretto point"),
+                ))?;
+                if point == curve25519_dalek::RistrettoPoint::identity() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("{label} must not be the identity point"),
+                    ));
+                }
+            }
+            (pub_hex.clone(), ki_hex.clone(), None)
+        }
+        (None, None) if !require_external => {
+            let identity = Identity::random();
+            (
+                identity.public_hex(),
+                identity.key_image_hex(),
+                Some(identity.secret_hex()),
+            )
+        }
+        (None, None) => {
+            return Err((
+                    StatusCode::BAD_REQUEST,
+                    "production requires externally generated public_key_hex and key_image_hex; private partner keys must never enter SauronID custody".into(),
+                ));
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "public_key_hex and key_image_hex must be supplied together".into(),
+            ));
+        }
+    };
     let type_str = payload.client_type.as_db_str();
 
     // Persistance en DB.
     {
         let st = state.read().unwrap();
-        let db = st.db.lock().unwrap();
-        db.execute(
+        let mut db = st.db.lock().unwrap();
+        let tx = db
+            .transaction()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        tx.execute(
             "INSERT INTO clients (name, public_key_hex, private_key_hex, key_image_hex, client_type)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![payload.name, pub_hex, priv_hex, ki_hex, type_str],
+            params![payload.name, pub_hex, "EXTERNAL_CUSTODY", ki_hex, type_str],
         ).map_err(|e| (StatusCode::CONFLICT, format!("Client already exists or DB error: {e}")))?;
+        tx.execute(
+            "INSERT INTO client_tenant_bindings (client_name, tenant_id) VALUES (?1, ?2)",
+            params![payload.name, tenant_id],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        tx.commit()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     // Ajouter la clé publique au groupe client en mémoire (pour vérifier les ring sigs Flux 1).
@@ -449,6 +518,7 @@ pub async fn add_client(
         public_key_hex: pub_hex,
         key_image_hex: ki_hex,
         client_type: type_str.to_string(),
+        private_key_hex_once,
     }))
 }
 
@@ -697,6 +767,11 @@ pub struct HealthResponse {
     pub runtime: &'static str,
     pub call_sig_enforce: bool,
     pub require_agent_type: bool,
+    pub require_hardware_attestation: bool,
+    pub require_preregistered_measurement: bool,
+    pub policy_require_binding: bool,
+    pub egress_gateway_enabled: bool,
+    pub global_max_action_usd: Option<f64>,
     /// Sprint 1: surfaces SAURON_POLICY_ENFORCEMENT_MODE so operators
     /// can confirm the server is fail-closed before traffic flips.
     pub policy_enforcement_mode: &'static str,
@@ -746,16 +821,43 @@ pub async fn health(State(state): State<Arc<RwLock<ServerState>>>) -> Json<Healt
         crate::runtime_mode::require_or_default("SAURON_REQUIRE_CALL_SIG", false, true);
     let require_agent_type =
         crate::runtime_mode::require_or_default("SAURON_REQUIRE_AGENT_TYPE", false, true);
+    let require_hardware_attestation = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_HARDWARE_ATTESTATION",
+        false,
+        false,
+    );
+    let require_preregistered_measurement = crate::runtime_mode::require_or_default(
+        "SAURON_REQUIRE_PREREGISTERED_MEASUREMENT",
+        false,
+        false,
+    );
+    let policy_require_binding = crate::runtime_mode::policy_require_binding();
+    let egress_gateway_enabled = crate::egress_gateway::egress_gateway_enabled();
+    let global_max_action_usd = crate::runtime_mode::global_max_action_usd();
     let policy_enforcement_mode = crate::runtime_mode::policy_enforcement_mode();
 
     let mut warnings: Vec<String> = Vec::new();
 
     // Bitcoin anchor health
     let bitcoin_anchor = match state.read().unwrap().bitcoin_anchor.as_ref() {
-        Some(svc) => HealthComponent {
-            ok: true,
-            detail: format!("provider={:?}", svc.provider()),
-        },
+        Some(svc) if svc.provider() == crate::bitcoin_anchor::AnchorProvider::OpenTimestamps => {
+            HealthComponent {
+                ok: true,
+                detail: "provider=OpenTimestamps".into(),
+            }
+        }
+        Some(svc) => {
+            if runtime == "production" {
+                warnings.push(
+                    "Production runtime uses a mock Bitcoin anchor; commitments are not externally verifiable"
+                        .into(),
+                );
+            }
+            HealthComponent {
+                ok: runtime != "production",
+                detail: format!("provider={:?} (development only)", svc.provider()),
+            }
+        }
         None => {
             warnings.push(
                 "Bitcoin anchor disabled — audit log is not externally verifiable on BTC".into(),
@@ -816,6 +918,23 @@ pub async fn health(State(state): State<Arc<RwLock<ServerState>>>) -> Json<Healt
     if runtime == "production" && !require_agent_type {
         warnings.push("Production runtime but SAURON_REQUIRE_AGENT_TYPE is off — operators can supply unverified checksums".into());
     }
+    if runtime == "production" && require_hardware_attestation && !require_preregistered_measurement
+    {
+        warnings.push(
+            "Hardware assurance is enabled without authoritative pre-registered measurements"
+                .into(),
+        );
+    }
+    if runtime == "production" && !policy_require_binding {
+        warnings.push("Production runtime permits protected agents without a bound policy".into());
+    }
+    if runtime == "production" && !egress_gateway_enabled {
+        warnings.push("Production runtime has the enforcing egress gateway disabled".into());
+    }
+    if runtime == "production" && global_max_action_usd.is_none() {
+        warnings
+            .push("Production runtime has no SAURON_MAX_ACTION_USD blast-radius ceiling".into());
+    }
     if runtime == "production"
         && matches!(
             policy_enforcement_mode,
@@ -860,6 +979,11 @@ pub async fn health(State(state): State<Arc<RwLock<ServerState>>>) -> Json<Healt
         runtime,
         call_sig_enforce,
         require_agent_type,
+        require_hardware_attestation,
+        require_preregistered_measurement,
+        policy_require_binding,
+        egress_gateway_enabled,
+        global_max_action_usd,
         policy_enforcement_mode: policy_enforcement_mode.as_str(),
         bitcoin_anchor,
         solana_anchor,

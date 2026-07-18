@@ -185,6 +185,22 @@ pub async fn verify_action_log_proof_with_vk(
         )));
     }
 
+    // Groth16 remains available only as a development/migration backend. A
+    // production operator must consciously opt into it after a ceremony and
+    // independent review; the default production proof backend is expected to
+    // be transparent (STARK) and is not silently emulated here.
+    let groth16_enabled = crate::runtime_mode::is_development_runtime()
+        && crate::runtime_mode::require_or_default(
+            "SAURON_ENABLE_GROTH16",
+            /* dev_default */ true,
+            /* prod_default */ false,
+        );
+    if !groth16_enabled {
+        return Err(ZkVerifyError::KeyNotFound(
+            "Groth16 verification is development-only; production accepts pinned native STARK receipts".into(),
+        ));
+    }
+
     // Decode proof JSON
     use base64::Engine;
     let proof_json_bytes = base64::engine::general_purpose::STANDARD
@@ -202,6 +218,8 @@ pub async fn verify_action_log_proof_with_vk(
     let vkey_bytes = std::fs::read(vkey_path)
         .map_err(|e| ZkVerifyError::KeyNotFound(format!("read {}: {e}", vkey_path.display())))?;
     enforce_dev_vkey_policy(&vkey_bytes, vkey_path, &payload.circuit)?;
+    enforce_vkey_identity(payload, &vkey_bytes, vkey_path)?;
+    enforce_circuit_bundle_identity(payload)?;
 
     // Spawn `snarkjs groth16 verify` — see the module-level doc comment for
     // the dep-choice rationale. Public-inputs + proof go via temp files
@@ -216,14 +234,25 @@ pub async fn verify_action_log_proof_with_vk(
     std::fs::write(&proof_path, &proof_json_bytes)
         .map_err(|e| ZkVerifyError::VerifierFailed(format!("write proof.json: {e}")))?;
 
-    let output = tokio::process::Command::new("snarkjs")
+    let timeout_secs = std::env::var("ZKP_VERIFY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.clamp(1, 120))
+        .unwrap_or(15);
+    let child = tokio::process::Command::new("snarkjs")
         .arg("groth16")
         .arg("verify")
         .arg(vkey_path)
         .arg(&pub_path)
         .arg(&proof_path)
-        .output()
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child)
         .await
+        .map_err(|_| {
+            ZkVerifyError::VerifierFailed(format!(
+                "snarkjs verification exceeded {timeout_secs}s timeout"
+            ))
+        })?
         .map_err(|e| ZkVerifyError::VerifierFailed(format!("spawn snarkjs: {e}")))?;
 
     let _ = std::fs::remove_file(&pub_path);
@@ -272,6 +301,16 @@ fn validate_payload_shape(payload: &ActionLogProofPayload) -> Result<(), ZkVerif
             "proof_b64 must not be empty".into(),
         ));
     }
+    if payload.proof_b64.len() > 1_048_576 {
+        return Err(ZkVerifyError::Malformed(
+            "proof_b64 exceeds 1 MiB limit".into(),
+        ));
+    }
+    if payload.public_inputs.len() > 4096 {
+        return Err(ZkVerifyError::Malformed(
+            "public_inputs exceeds 4096-element limit".into(),
+        ));
+    }
     // Reject obvious payload-injection attempts (path traversal / shell chars
     // in the circuit name — it is used as a filename component).
     if payload
@@ -289,7 +328,185 @@ fn validate_payload_shape(payload: &ActionLogProofPayload) -> Result<(), ZkVerif
             "expected at least [valid, root, ...] public_inputs".into(),
         ));
     }
+    let expected_prefix = if payload.vk_id.contains(".dev.vk@v") {
+        format!("{}.dev.vk@v", payload.circuit)
+    } else {
+        format!("{}.vk@v", payload.circuit)
+    };
+    let version_text = payload.vk_id.strip_prefix(&expected_prefix);
+    if version_text.is_none()
+        || version_text.is_some_and(|v| v.is_empty() || !v.chars().all(|c| c.is_ascii_digit()))
+    {
+        return Err(ZkVerifyError::Malformed(format!(
+            "vk_id must be '{}<decimal-version>' (or the .dev variant)",
+            format!("{}.vk@v", payload.circuit)
+        )));
+    }
+    let version: u64 = version_text.unwrap().parse().map_err(|_| {
+        ZkVerifyError::Malformed("vk_id version is outside the supported range".into())
+    })?;
+    let minimum = match payload.circuit.as_str() {
+        "ActionRangeProof"
+        | "ActionTimeWindow"
+        | "ActionSetMembership"
+        | "ActionSetNonMembership"
+        | "ActionSumBound"
+        | "ActionCountInRange"
+        | "StatsHonestComputation" => 1,
+        _ => 0,
+    };
+    if version < minimum {
+        return Err(ZkVerifyError::Malformed(format!(
+            "vk_id version v{version} predates the hardened {} circuit; minimum is v{minimum} and a new proving key is required",
+            payload.circuit
+        )));
+    }
     Ok(())
+}
+
+fn enforce_vkey_identity(
+    payload: &ActionLogProofPayload,
+    vkey_bytes: &[u8],
+    vkey_path: &Path,
+) -> Result<(), ZkVerifyError> {
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(vkey_bytes));
+    let configured = std::env::var("ZKP_VKEY_SHA256_JSON")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            v.get(&payload.vk_id)
+                .and_then(|x| x.as_str())
+                .map(str::to_owned)
+        });
+    match configured {
+        Some(expected) if expected.eq_ignore_ascii_case(&digest) => Ok(()),
+        Some(expected) => Err(ZkVerifyError::KeyNotFound(format!(
+            "verification-key digest mismatch for {}: configured {}, loaded {} ({})",
+            payload.vk_id,
+            expected,
+            digest,
+            vkey_path.display()
+        ))),
+        None if crate::runtime_mode::is_development_runtime() => {
+            tracing::warn!(
+                target: "sauron::zk_verifier",
+                vk_id = %payload.vk_id,
+                sha256 = %digest,
+                "verification key is not digest-pinned (development only)"
+            );
+            Ok(())
+        }
+        None => Err(ZkVerifyError::KeyNotFound(format!(
+            "no SHA-256 pin configured for vk_id '{}' in ZKP_VKEY_SHA256_JSON",
+            payload.vk_id
+        ))),
+    }
+}
+
+/// Bind a proving/verification key version to the reviewed circuit source
+/// bundle, including imported templates. Pinning only the vkey is insufficient:
+/// an operator could otherwise deploy a changed circuit while retaining a key
+/// and identifier whose reviewed semantics no longer match the source tree.
+fn enforce_circuit_bundle_identity(payload: &ActionLogProofPayload) -> Result<(), ZkVerifyError> {
+    let root = std::env::var("ZKP_CIRCUIT_SOURCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("zkp/circuits")
+        });
+    let digest = circuit_bundle_sha256(&root)?;
+    let configured = std::env::var("ZKP_CIRCUIT_BUNDLE_SHA256_JSON")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            v.get(&payload.vk_id)
+                .and_then(|x| x.as_str())
+                .map(str::to_owned)
+        });
+    match configured {
+        Some(expected) if expected.eq_ignore_ascii_case(&digest) => Ok(()),
+        Some(expected) => Err(ZkVerifyError::KeyNotFound(format!(
+            "circuit-source bundle digest mismatch for {}: configured {}, loaded {} ({})",
+            payload.vk_id,
+            expected,
+            digest,
+            root.display()
+        ))),
+        None if crate::runtime_mode::is_development_runtime() => {
+            tracing::warn!(
+                target: "sauron::zk_verifier",
+                vk_id = %payload.vk_id,
+                sha256 = %digest,
+                "circuit source bundle is not digest-pinned (development only)"
+            );
+            Ok(())
+        }
+        None => Err(ZkVerifyError::KeyNotFound(format!(
+            "no circuit-source SHA-256 pin configured for vk_id '{}' in ZKP_CIRCUIT_BUNDLE_SHA256_JSON",
+            payload.vk_id
+        ))),
+    }
+}
+
+fn circuit_bundle_sha256(root: &Path) -> Result<String, ZkVerifyError> {
+    use sha2::{Digest, Sha256};
+
+    fn visit(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), ZkVerifyError> {
+        let entries = std::fs::read_dir(dir).map_err(|e| {
+            ZkVerifyError::KeyNotFound(format!("read circuit directory {}: {e}", dir.display()))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|e| ZkVerifyError::KeyNotFound(e.to_string()))?;
+            let ty = entry
+                .file_type()
+                .map_err(|e| ZkVerifyError::KeyNotFound(e.to_string()))?;
+            if ty.is_symlink() {
+                return Err(ZkVerifyError::KeyNotFound(format!(
+                    "symlinks are refused in circuit source bundle: {}",
+                    entry.path().display()
+                )));
+            }
+            if ty.is_dir() {
+                visit(root, &entry.path(), files)?;
+            } else if ty.is_file()
+                && entry.path().extension().and_then(|s| s.to_str()) == Some("circom")
+            {
+                files.push(entry.path());
+            }
+        }
+        let _ = root;
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files)?;
+    files.sort_by(|a, b| {
+        a.strip_prefix(root)
+            .unwrap_or(a)
+            .cmp(b.strip_prefix(root).unwrap_or(b))
+    });
+    if files.is_empty() {
+        return Err(ZkVerifyError::KeyNotFound(format!(
+            "no .circom sources found under {}",
+            root.display()
+        )));
+    }
+    let mut hash = Sha256::new();
+    for file in files {
+        let relative = file.strip_prefix(root).unwrap_or(&file);
+        let relative = relative.to_string_lossy();
+        let bytes = std::fs::read(&file).map_err(|e| {
+            ZkVerifyError::KeyNotFound(format!("read circuit source {}: {e}", file.display()))
+        })?;
+        hash.update((relative.len() as u64).to_be_bytes());
+        hash.update(relative.as_bytes());
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+    }
+    Ok(hex::encode(hash.finalize()))
 }
 
 /// Enforce the DEV-vs-production policy on a verification key JSON.
@@ -304,6 +521,20 @@ fn enforce_dev_vkey_policy(
     vkey_path: &Path,
     circuit: &str,
 ) -> Result<(), ZkVerifyError> {
+    enforce_dev_vkey_policy_for_runtime(
+        vkey_bytes,
+        vkey_path,
+        circuit,
+        crate::runtime_mode::is_development_runtime(),
+    )
+}
+
+fn enforce_dev_vkey_policy_for_runtime(
+    vkey_bytes: &[u8],
+    vkey_path: &Path,
+    circuit: &str,
+    is_development: bool,
+) -> Result<(), ZkVerifyError> {
     let parsed: serde_json::Value = match serde_json::from_slice(vkey_bytes) {
         Ok(v) => v,
         Err(_) => return Ok(()), // malformed vk — snarkjs will reject below
@@ -315,7 +546,7 @@ fn enforce_dev_vkey_policy(
     if !has_disclaimer {
         return Ok(());
     }
-    if crate::runtime_mode::is_development_runtime() {
+    if is_development {
         warn_dev_key_once(circuit, vkey_path);
         Ok(())
     } else {
@@ -417,7 +648,7 @@ mod tests {
             circuit: circuit.into(),
             public_inputs: public_inputs.into_iter().map(|s| s.to_string()).collect(),
             proof_b64: base64::engine::general_purpose::STANDARD.encode(proof.as_bytes()),
-            vk_id: format!("{circuit}.dev.vk@v0"),
+            vk_id: format!("{circuit}.dev.vk@v1"),
         }
     }
 
@@ -492,27 +723,16 @@ mod tests {
 
     #[test]
     fn dev_disclaimer_rejected_in_production() {
-        // Build an in-memory vk JSON with the DEV disclaimer; force ENV=production
-        // by ensuring is_development_runtime() returns false (it defaults to
-        // "production" when ENV is unset). Note: we deliberately do NOT set
-        // SAURON_ENV here, since this test relies on the default fail-closed
-        // behaviour. If a parallel test sets ENV=dev this assertion would
-        // become a no-op; the lib-level test suite does not set ENV today.
         let vk = serde_json::json!({
             "protocol": "groth16",
             "_disclaimer": "DEV ONLY - forgeable by anyone with the matching dev zkey"
         });
         let bytes = serde_json::to_vec(&vk).unwrap();
-        // We can't safely flip ENV per-test without leaking into other tests,
-        // so we only assert the dev-runtime branch here when the harness is
-        // running in dev. The production branch is exercised by inspecting
-        // the error variant when ENV is unset (default).
-        let res = enforce_dev_vkey_policy(&bytes, std::path::Path::new("/tmp/x.vkey.json"), "Test");
-        if crate::runtime_mode::is_development_runtime() {
-            assert!(res.is_ok());
-        } else {
-            assert!(matches!(res, Err(ZkVerifyError::KeyNotFound(_))));
-        }
+        let path = std::path::Path::new("/tmp/x.vkey.json");
+        let production = enforce_dev_vkey_policy_for_runtime(&bytes, path, "Test", false);
+        assert!(matches!(production, Err(ZkVerifyError::KeyNotFound(_))));
+        let development = enforce_dev_vkey_policy_for_runtime(&bytes, path, "Test", true);
+        assert!(development.is_ok());
     }
 
     // Path to the committed DEV verification key for ActionRangeProof. Tests
@@ -570,7 +790,7 @@ mod tests {
             public_inputs: vec!["1".into(), "0".into(), "1".into(), "100".into(), "5".into()],
             proof_b64: base64::engine::general_purpose::STANDARD
                 .encode(serde_json::to_vec(&dummy_proof).unwrap()),
-            vk_id: "ActionRangeProof.dev.vk@v0".into(),
+            vk_id: "ActionRangeProof.dev.vk@v1".into(),
         };
         let res = verify_action_log_proof_with_vk(&payload, &"00".repeat(32), &vk).await;
         assert!(

@@ -59,37 +59,38 @@ This doc complements `docs/threat-model.md`. The threat model says *what* attack
 | If broken | Solana-side audit log becomes mutable, but the Bitcoin-side anchor still holds. Defence-in-depth: tampering requires forging *both* chains, which is the design intent. |
 | Cost note | Memo writes cost SOL; budget envelope documented in `docs/operations.md`. |
 
-## 6. OPRF on the Ristretto255 group
+## 6. Legacy OPRF on the Ristretto255 group
 
 | Field | Value |
 |---|---|
 | Assumption | Decisional Diffie-Hellman over the prime-order Ristretto255 group; BLAKE2-based PRF unlinkability. |
 | Source | de Valence 2017 (Ristretto); Jarecki–Krawczyk–Xu 2018 (HashDH OPRF). |
 | Expected margin | ≈ 128-bit. |
-| Used for | Per-tenant deterministic identifier derivation from passphrases (`core/src/oprf.rs`); ring identity unlinkability. The server holds `SAURON_OPRF_SEED`; clients blind their input so the server learns nothing about it during evaluation. |
+| Used for | Development/migration compatibility only. Production startup quarantines the unauthenticated legacy OPRF. Passwordless Ed25519 challenge/response is the production user-auth path; use a reviewed OPAQUE service only if passwords become a requirement. |
 | If broken | An attacker recovering the OPRF scalar can deterministically derive every per-tenant key-image from any input — effectively cross-link all users on the system. |
 | Operator note | `SAURON_OPRF_SEED` is loaded with the same envelope-encryption pipeline as `SAURON_JWT_SECRET` (`core/src/state.rs:170-254`, `core/src/secret_provider.rs`). Rotation = breaking change; see `docs/key-rotation.md`. |
 
-## 7. Merkle trees with Poseidon-in-circuit / SHA-256-out-of-circuit
+## 7. SHA-256 Merkle trees
 
 | Field | Value |
 |---|---|
-| Assumption | Out-of-circuit: SHA-256 collision + pre-image resistance (same as §3). In-circuit (ZK proofs): Poseidon hash is collision-resistant and behaves as a random oracle in the algebraic group model. |
-| Source | Grassi et al. 2021 (Poseidon); circom community analysis. |
-| Used for | Action-log merkle commitments (`core/src/merkle.rs`); ZK circuits at `zkp/circuits/Action*.circom`. |
-| If broken | Same blast radius as §3 plus: any ZK proof can claim arbitrary leaves were committed. |
-| Open issue | Poseidon parameters in our circuits should be cross-checked against the latest published preimage-resistance bounds before pentest. Tracked. |
+| Assumption | SHA-256 collision and pre-image resistance (same as §3). |
+| Source | NIST FIPS 180-4. |
+| Used for | Complete v2 action-receipt anchor batches in `core/src/agent_action_anchor.rs` and both transparent guests in `transparent-zk/methods/`. |
+| If broken | An attacker may substitute receipt leaves or batch contents without changing the externally anchored root. |
+| Legacy note | Poseidon/Circom material under `zkp/` is development compatibility only and is refused by the production proof path. |
 
-## 8. Groth16 zero-knowledge proofs
+## 8. Transparent RISC Zero STARK proofs
 
 | Field | Value |
 |---|---|
-| Assumption | Knowledge soundness in the Generic Group Model + Algebraic Group Model. Per-circuit *trusted setup* required. |
-| Source | Groth 2016; AGM bounds Fuchsbauer–Kiltz–Loss 2018. |
-| Used for | Aggregated stats proofs (`core/src/aggregation/verify.rs`, `core/src/zk_verifier.rs`), action-log proofs. |
-| Expected margin | ≈ 128-bit *iff* the trusted setup was honest (no party kept the toxic waste). |
-| **Honest gap** | **Today our verification keys come from a single-party local setup (`zkp/ceremony/dev_setup.sh`). Anyone with filesystem access to that dev machine can forge proofs that pass verification.** Production deployment requires the multi-party ceremony documented at `zkp/ceremony/README.md`. Until that ceremony runs, all ZK claims are unsound in the adversarial sense. We rely on the cross-checks (Bitcoin/Solana anchors, server-side spend ledger, policy re-evaluation) for actual security. |
-| If broken | An attacker with the trapdoor forges arbitrary proofs of arbitrary statements. The ZK layer becomes window-dressing. |
+| Assumption | Soundness and zero knowledge of RISC Zero's native STARK/FRI construction in the Fiat-Shamir random-oracle model; correct guest and verifier implementations. No per-circuit trusted setup. |
+| Source | RISC Zero proof-system specification and implementation pinned to `risc0-zkvm = 3.0.5`. |
+| Used for | Production stats and action-policy statements in `transparent-zk/`, verified by `core/src/transparent_proof.rs` or the standalone client verifier. |
+| Public identity | Clients pin the compiled guest image IDs in `transparent-zk/image-ids.json` and can reproduce them from committed source and lock files. |
+| Fail-closed rule | Production accepts native `Composite` or `Succinct` receipts only. Groth16-compressed, fake, unknown, wrong-program and wrong-checkpoint receipts are rejected. |
+| If broken | A prover may forge the computation statement or leak witness data. External Bitcoin anchoring still timestamps the committed root but cannot rescue a forged computation proof. |
+| Scope limit | The guest proves computation over the complete finalized receipt batch. It cannot prove that real-world source data was honest or that an event omitted before ingestion occurred. |
 
 ## 9. TPM 2.0 attestation
 
@@ -97,8 +98,9 @@ This doc complements `docs/threat-model.md`. The threat model says *what* attack
 |---|---|
 | Assumption | TPM vendor (Infineon / STMicro / Microsoft / Intel / AMD / IBM / Nuvoton) PKI root is honest; the TPM chip itself generates keys with the private half non-exportable; firmware boundary holds. |
 | Source | TCG TPM 2.0 Library Spec; per-vendor EK cert practice statements. |
-| Used for | Optional `Tpm2Quote` attestation kind on agent registration (`core/src/agent.rs:476`, `core/src/attestation.rs:823`). Recognised today; full vendor cert chain verifier roadmapped. |
-| If broken | Operator can lie about agent-host integrity. Falls back to `Ed25519Self` (operator-rooted) trust, which is weaker but still cryptographically bound. |
+| Used for | Optional `Tpm2Quote` registration evidence. The verifier binds challenge, PoP key, quote signature, PCR set and configured vendor chain; production does not require this tier. |
+| If broken | The optional claim that the key/measurement was hardware-bound fails. Gateway authorization and STARK computation proofs remain separate controls. |
+| Release evidence | The exact supported TPM devices, firmware and root bundle require real-device end-to-end validation before any hardware-tier marketing claim. |
 
 ## 10. AWS Nitro Enclaves
 
@@ -106,9 +108,9 @@ This doc complements `docs/threat-model.md`. The threat model says *what* attack
 |---|---|
 | Assumption | AWS Nitro PKI root + AWS not Byzantine; enclave firmware boundary holds; COSE_Sign1 attestation format is correctly parsed. |
 | Source | AWS Nitro Enclaves whitepaper; AWS root cert pinned at deploy time. |
-| Used for | Optional `NitroEnclave` attestation kind (`core/src/attestation.rs`). Recognised today; full verifier roadmapped. |
-| If broken | AWS-hosted operators lose the host-integrity guarantee; falls back to `Ed25519Self`. Non-AWS operators unaffected. |
-| Lock-in note | Operators wanting cloud-agnostic attestation use `Tpm2Quote` once that path lands. We are not AWS-only. |
+| Used for | Optional `NitroEnclave` registration evidence. Production requires the configured AWS root, signed COSE document, fresh challenge and PoP-key binding when this tier is enabled. |
+| If broken | The optional claim that code/key execution was enclave-bound fails; the transparent proof and gateway controls do not depend on Nitro. |
+| Release evidence | A real Nitro NSM end-to-end test for the exact enclave image is required before selling the optional hardware tier. |
 
 ## 11. Random number generation
 
@@ -123,10 +125,10 @@ This doc complements `docs/threat-model.md`. The threat model says *what* attack
 
 ## Honest gaps
 
-1. **Groth16 trusted setup not yet run.** All current vk files are dev-only. Production unsoundness is documented in §8 and `zkp/ceremony/README.md`.
-2. **Vendor attestation verifiers (TPM2 / SGX / SEV-SNP / Apple / Nitro) recognised but not yet enforcing the full cert chain.** `Ed25519Self` is the only fully verified path today (`core/src/attestation.rs`).
-3. **Quantum threat is out of scope.** Ed25519 + Ristretto + secp256k1 are all quantum-broken under Shor. Migration to PQ signatures is a future-sprint deliverable.
-4. **Poseidon parameter audit pending.** Used inside ZK circuits; relies on parameters generated upstream. Spot-check before external pentest.
+1. **No proof is unconditional mathematics.** Clients remove the setup-ceremony and prover trust, but still trust the reviewed guest/image binding, proof-system assumptions, hashes and verifier implementation.
+2. **Optional hardware evidence requires deployment evidence.** TPM/Nitro are not required by the production authorization or STARK path. Real-device tests are mandatory only before selling that separate assurance tier.
+3. **Quantum threat is out of scope.** Ed25519, Ristretto and the current chain signatures are quantum-broken under Shor; STARK hash assumptions do not make the rest of the protocol post-quantum.
+4. **External review remains required for a commercial cryptographic claim.** Review is not a trusted setup or online third party; it reduces implementation and specification risk that a proof cannot self-diagnose.
 
 ---
 

@@ -235,13 +235,11 @@ handler call-site sweep, see Known gaps below).
   may land in `default` instead of the operator's per-tenant
   partition. Tracking issue: see `core/src/tenancy/mod.rs::
   tenant_id_for_background_job` documented as deferred.
-- **`/admin/agents` handler is operator-aggregate today.** The SQL
-  (core/src/admin.rs:622) has no `WHERE tenant_id = ?` filter. The
-  per-tenant filtered variant is staged and pinned by the
-  `admin_agents_filters_to_callers_tenant` test; the patch is wiring
-  the existing `Extension<TenantId>` into the handler. Listed here so
-  customer-2 deployment knows to query at the storage layer until the
-  handler ships.
+- **Admin credential boundary.** `/admin/agents` and the related data views
+  are tenant-filtered. A static admin key is still an operator credential and
+  can select a tenant header; tenant/customer administration must use JWTs
+  with a `tnt` allowlist. Cross-tenant views require super-admin authority or
+  the explicit global flag.
 - **Per-tenant anchor batching.** Today the anchor batcher rolls
   receipts across tenants into a single root. This is correct for
   cross-tenant chain efficiency but means the chain anchor cannot

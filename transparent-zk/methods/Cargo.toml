@@ -1,0 +1,11 @@
+[package]
+name = "sauron-transparent-methods"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[build-dependencies]
+risc0-build = "=3.0.5"
+
+[package.metadata.risc0]
+methods = ["guest", "action-policy-guest"]

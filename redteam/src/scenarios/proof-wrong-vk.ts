@@ -29,14 +29,13 @@ async function main(): Promise<ScenarioResult> {
         return skipped(id, name, `server ${BASE_URL} unreachable or no admin key`);
     }
 
-    // Use /v1/proofs/action-log/verify which takes circuit + public_inputs
-    // + proof_b64 + vk_id + expected_root_hex.
+    // An unknown checkpoint fails before any prover-controlled key selection.
     const body = {
         circuit: "ThisCircuitDoesNotExist",
-        public_inputs: ["0"],
+        public_inputs: ["1", "0"],
         proof_b64: "e30=",
-        vk_id: "made-up-vk.vk@v999",
-        expected_root_hex: "00".repeat(32),
+        vk_id: "ThisCircuitDoesNotExist.vk@v999",
+        checkpoint_id: "zkc_does_not_exist",
     };
     const r = await fetch(`${BASE_URL}/v1/proofs/action-log/verify`, {
         method: "POST",

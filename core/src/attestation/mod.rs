@@ -56,7 +56,13 @@ pub use tpm2::{
     TPM_ST_ATTEST_QUOTE,
 };
 
+use base64::{
+    engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 // ─── AttestationKind ─────────────────────────────────────────────────────
 
@@ -219,6 +225,22 @@ pub fn enforce_registration_attestation(
         return Ok(RegistrationAttestation::default());
     }
 
+    // An operator-signed statement is useful evidence, but it is not hardware
+    // trust: the same operator key can sign arbitrary measurements. Production
+    // therefore accepts only the two hardware verifiers that are implemented
+    // in this build when the hardware gate is enabled.
+    if require_hw
+        && !matches!(
+            kind,
+            AttestationKind::Tpm2Quote | AttestationKind::NitroEnclave
+        )
+    {
+        return Err(AttestationError::BadCertChain(format!(
+            "SAURON_REQUIRE_HARDWARE_ATTESTATION=1: '{}' is not an implemented hardware-backed kind; use tpm2_quote or nitro_enclave",
+            kind.as_str()
+        )));
+    }
+
     let measurement = expected_measurement_hex.trim();
     if measurement.is_empty() {
         return Err(AttestationError::Malformed(
@@ -265,6 +287,171 @@ pub fn enforce_registration_attestation(
     Ok(RegistrationAttestation {
         pinned_measurement_hex: Some(measurement.to_string()),
     })
+}
+
+/// Registration verifier with freshness and proof-of-possession binding.
+///
+/// The ordinary verifier establishes the attestation signature/chain and
+/// measurement. This layer additionally proves that the document was minted
+/// for a server-issued, short-lived nonce and for the exact Ed25519 key the
+/// agent will use after registration. A previously valid quote is therefore
+/// neither replayable nor transferable to another PoP key.
+pub fn enforce_registration_attestation_bound(
+    kind: AttestationKind,
+    blob: &[u8],
+    trusted_pubkey_b64u: &str,
+    expected_measurement_hex: &str,
+    nonce: &str,
+    pop_public_key_b64u: &str,
+) -> Result<RegistrationAttestation, AttestationError> {
+    let verified = enforce_registration_attestation(
+        kind,
+        blob,
+        trusted_pubkey_b64u,
+        expected_measurement_hex,
+    )?;
+
+    match kind {
+        AttestationKind::None | AttestationKind::ServerDerived => return Ok(verified),
+        AttestationKind::Tpm2Quote => {
+            let payload = Tpm2QuotePayload::parse_json(blob)?;
+            let attest = B64
+                .decode(payload.attest_b64.as_bytes())
+                .map_err(|e| AttestationError::Malformed(format!("attest_b64 decode: {e}")))?;
+            let parsed = parse_tpms_attest(&attest)?;
+            let expected = Sha256::digest(crate::crypto_protocol::attestation_challenge_binding(
+                nonce,
+                pop_public_key_b64u,
+            ));
+            require_ct_equal(
+                &parsed.extra_data,
+                expected.as_slice(),
+                "TPM quote extraData does not bind the issued challenge and PoP key",
+            )?;
+        }
+        AttestationKind::NitroEnclave => {
+            let pop_key = URL_SAFE_NO_PAD
+                .decode(pop_public_key_b64u.trim())
+                .map_err(|e| AttestationError::Malformed(format!("PoP key base64url: {e}")))?;
+            if blob.first() == Some(&b'{') {
+                let doc = parse_nitro_dev(blob)?;
+                let doc_nonce = doc
+                    .nonce_b64
+                    .as_deref()
+                    .ok_or_else(|| {
+                        AttestationError::Malformed("Nitro document missing nonce".into())
+                    })
+                    .and_then(|v| {
+                        B64.decode(v.as_bytes()).map_err(|e| {
+                            AttestationError::Malformed(format!("Nitro nonce base64: {e}"))
+                        })
+                    })?;
+                let doc_key = B64.decode(doc.public_key_b64.as_bytes()).map_err(|e| {
+                    AttestationError::Malformed(format!("Nitro public_key base64: {e}"))
+                })?;
+                require_ct_equal(&doc_nonce, nonce.as_bytes(), "Nitro nonce mismatch")?;
+                require_ct_equal(
+                    &doc_key,
+                    &pop_key,
+                    "Nitro public key is not the agent PoP key",
+                )?;
+                require_fresh_timestamp(doc.timestamp)?;
+            } else {
+                let doc = parse_nitro_cose_blob(blob)?;
+                let doc_nonce = doc.nonce.as_deref().ok_or_else(|| {
+                    AttestationError::Malformed("Nitro document missing nonce".into())
+                })?;
+                let doc_key = doc.public_key.as_deref().ok_or_else(|| {
+                    AttestationError::Malformed("Nitro document missing public_key".into())
+                })?;
+                require_ct_equal(doc_nonce, nonce.as_bytes(), "Nitro nonce mismatch")?;
+                require_ct_equal(
+                    doc_key,
+                    &pop_key,
+                    "Nitro public key is not the agent PoP key",
+                )?;
+                require_fresh_timestamp(doc.timestamp)?;
+            }
+        }
+        AttestationKind::Ed25519Self => {
+            let blob_str = std::str::from_utf8(blob)
+                .map_err(|e| AttestationError::Decode(format!("blob is not utf-8: {e}")))?;
+            let payload_part = blob_str
+                .split_once('.')
+                .ok_or_else(|| {
+                    AttestationError::Decode("expected '<payload_b64u>.<sig_b64u>'".into())
+                })?
+                .0;
+            let payload_bytes = URL_SAFE_NO_PAD
+                .decode(payload_part)
+                .map_err(|e| AttestationError::Decode(format!("payload b64u: {e}")))?;
+            let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
+                .map_err(|e| AttestationError::Decode(format!("payload not JSON: {e}")))?;
+            let got_nonce = payload
+                .get("nonce")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AttestationError::Malformed("self-attestation payload missing nonce".into())
+                })?;
+            let got_key = payload
+                .get("pop_public_key_b64u")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AttestationError::Malformed(
+                        "self-attestation payload missing pop_public_key_b64u".into(),
+                    )
+                })?;
+            require_ct_equal(
+                got_nonce.as_bytes(),
+                nonce.as_bytes(),
+                "attestation nonce mismatch",
+            )?;
+            require_ct_equal(
+                got_key.as_bytes(),
+                pop_public_key_b64u.as_bytes(),
+                "attestation PoP key mismatch",
+            )?;
+            let ts = payload.get("ts").and_then(|v| v.as_u64()).ok_or_else(|| {
+                AttestationError::Malformed("self-attestation payload missing ts".into())
+            })?;
+            require_fresh_timestamp(ts)?;
+        }
+        _ => {
+            return Err(AttestationError::NotImplemented(
+                "fresh challenge binding for this attestation kind",
+            ));
+        }
+    }
+
+    Ok(verified)
+}
+
+fn require_ct_equal(got: &[u8], expected: &[u8], message: &str) -> Result<(), AttestationError> {
+    if got.len() != expected.len() || got.ct_eq(expected).unwrap_u8() == 0 {
+        return Err(AttestationError::Malformed(message.into()));
+    }
+    Ok(())
+}
+
+fn require_fresh_timestamp(timestamp: u64) -> Result<(), AttestationError> {
+    const MAX_SKEW_SECS: u64 = 300;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| AttestationError::Malformed("system clock before Unix epoch".into()))?
+        .as_secs();
+    // AWS Nitro uses milliseconds. Accept seconds as well for the explicit
+    // development/self-attestation formats.
+    let ts_secs = if timestamp >= 1_000_000_000_000 {
+        timestamp / 1000
+    } else {
+        timestamp
+    };
+    if now.abs_diff(ts_secs) > MAX_SKEW_SECS {
+        return Err(AttestationError::Malformed(
+            "attestation timestamp is outside the five-minute freshness window".into(),
+        ));
+    }
+    Ok(())
 }
 
 // ─── AttestationError ────────────────────────────────────────────────────
@@ -388,7 +575,7 @@ mod tests {
 
     // ── Registration-gate tests (gap #4) ────────────────────────────────────
 
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use ed25519_dalek::Signer;
 
     /// Build a valid ed25519_self blob signing `measurement_hex`, returning the
@@ -411,14 +598,12 @@ mod tests {
         (blob.into_bytes(), pk_b64u)
     }
 
-    const GATE_ENV: &[&str] = &[
-        "SAURON_REQUIRE_HARDWARE_ATTESTATION",
-        "SAURON_REQUIRE_PREREGISTERED_MEASUREMENT",
-        "SAURON_ATTESTATION_GOLDEN_MEASUREMENTS",
-    ];
-
     fn clear_gate_env() -> Vec<(&'static str, Option<&'static str>)> {
-        GATE_ENV.iter().map(|k| (*k, None)).collect()
+        vec![
+            ("SAURON_REQUIRE_HARDWARE_ATTESTATION", Some("0")),
+            ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("0")),
+            ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", None),
+        ]
     }
 
     #[test]
@@ -503,7 +688,7 @@ mod tests {
     fn gate_strict_rejects_non_golden_measurement() {
         with_env(
             &[
-                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
+                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", Some("0")),
                 ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
                 (
                     "SAURON_ATTESTATION_GOLDEN_MEASUREMENTS",
@@ -530,7 +715,7 @@ mod tests {
     fn gate_strict_accepts_golden_measurement_with_genuine_blob() {
         with_env(
             &[
-                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
+                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", Some("0")),
                 ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
                 (
                     "SAURON_ATTESTATION_GOLDEN_MEASUREMENTS",
@@ -557,7 +742,7 @@ mod tests {
     fn gate_strict_rejects_when_golden_set_empty() {
         with_env(
             &[
-                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", None),
+                ("SAURON_REQUIRE_HARDWARE_ATTESTATION", Some("0")),
                 ("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", Some("1")),
                 ("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS", None),
             ],

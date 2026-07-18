@@ -138,6 +138,7 @@ function buildOpts(over: Partial<WeeklyStatsSchedulerOptions> = {}): WeeklyStats
         receiptsProvider: async () => receipts,
         merkleProofProvider: async (rs) => ({
             root: "deadbeef",
+            checkpointId: "zkc_test",
             proofs: rs.map(() => ({ pathElements: ["0", "0"], pathIndices: [0, 0] })),
         }),
         ...over,
@@ -149,7 +150,7 @@ async function testHappyPath() {
     const { fetch: f, calls } = mockFetchFactory([
         {
             status: 200,
-            body: { stored: true, latency_ms_verify: 10, anchored_action_hash: "ah" },
+            body: { stored: true, latency_ms_verify: 10, statement_hash: "ah" },
         },
     ]);
     const onSubmit: string[] = [];
@@ -193,7 +194,7 @@ async function testEmptyReceiptsAllSkipped() {
     const { fetch: f, calls } = mockFetchFactory([
         {
             status: 200,
-            body: { stored: true, latency_ms_verify: 1, anchored_action_hash: "" },
+            body: { stored: true, latency_ms_verify: 1, statement_hash: "" },
         },
     ]);
     const skipped: string[] = [];
@@ -244,7 +245,7 @@ async function testFactoryAndOneShot() {
     const { fetch: f } = mockFetchFactory([
         {
             status: 200,
-            body: { stored: true, latency_ms_verify: 5, anchored_action_hash: "x" },
+            body: { stored: true, latency_ms_verify: 5, statement_hash: "x" },
         },
     ]);
     const sched = createWeeklyScheduler(buildOpts({ httpFetch: f }));

@@ -23,6 +23,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
+use sauron_core::crypto_protocol::{call_signature_payload, CallSignatureInput};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
@@ -139,6 +140,12 @@ fn cmd_sign_call(args: &[String]) -> Result<(), String> {
     let priv_path = require_arg(args, "priv")?;
     let agent_id = require_arg(args, "agent-id")?;
     let config_digest = require_arg(args, "config-digest")?;
+    let tenant_id = arg_value(args, "tenant").unwrap_or_else(|| "default".to_string());
+    let audience = arg_value(args, "audience").unwrap_or_else(|| "sauron-core".to_string());
+    let content_type = arg_value(args, "content-type")
+        .unwrap_or_else(|| "application/json".to_string())
+        .trim()
+        .to_ascii_lowercase();
 
     let priv_b64 = fs::read_to_string(&priv_path)
         .map_err(|e| format!("read {priv_path}: {e}"))?
@@ -161,8 +168,21 @@ fn cmd_sign_call(args: &[String]) -> Result<(), String> {
     rand::RngCore::fill_bytes(&mut OsRng, &mut nonce_bytes);
     let nonce = hex::encode(nonce_bytes);
     let body_hash_hex = hex::encode(Sha256::digest(body.as_bytes()));
-    let signing_payload = format!("{}|{}|{}|{}|{}", method, path, body_hash_hex, ts, nonce);
-    let sig = sk.sign(signing_payload.as_bytes());
+    let method = method.to_ascii_uppercase();
+    let ts_string = ts.to_string();
+    let signing_payload = call_signature_payload(&CallSignatureInput {
+        agent_id: &agent_id,
+        tenant_id: &tenant_id,
+        audience: &audience,
+        method: &method,
+        target_uri: &path,
+        content_type: &content_type,
+        body_sha256_hex: &body_hash_hex,
+        config_digest: &config_digest,
+        timestamp_ms: &ts_string,
+        nonce: &nonce,
+    });
+    let sig = sk.sign(&signing_payload);
     let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
     println!("# SauronID per-call headers for {method} {path}:");
@@ -170,6 +190,9 @@ fn cmd_sign_call(args: &[String]) -> Result<(), String> {
     println!("x-sauron-call-ts: {ts}");
     println!("x-sauron-call-nonce: {nonce}");
     println!("x-sauron-call-sig: {sig_b64}");
+    println!("x-sauron-call-audience: {audience}");
+    println!("x-sauron-protocol-version: 2");
+    println!("x-sauron-tenant-id: {tenant_id}");
     println!("x-sauron-agent-config-digest: {config_digest}");
     println!();
     println!("# curl example:");
@@ -180,6 +203,9 @@ fn cmd_sign_call(args: &[String]) -> Result<(), String> {
         -H 'x-sauron-call-ts: {ts}' \\\n  \
         -H 'x-sauron-call-nonce: {nonce}' \\\n  \
         -H 'x-sauron-call-sig: {sig_b64}' \\\n  \
+        -H 'x-sauron-call-audience: {audience}' \\\n  \
+        -H 'x-sauron-protocol-version: 2' \\\n  \
+        -H 'x-sauron-tenant-id: {tenant_id}' \\\n  \
         -H 'x-sauron-agent-config-digest: {config_digest}' \\\n  \
         -d {body:?}"
     );
@@ -215,7 +241,8 @@ fn cmd_register(args: &[String]) -> Result<(), String> {
     };
     let human_ki = readln("human_key_image (from /user/auth)");
     let pop_b64 = readln("pop_public_key_b64u (from `sauronid-cli keypair`'s public output)");
-    let pop_jkt = readln("pop_jkt (operator label, any string)");
+    let pop_jkt = sauron_core::crypto_protocol::ed25519_jwk_thumbprint(&pop_b64)
+        .map_err(|e| format!("invalid pop_public_key_b64u: {e}"))?;
     let public_key_hex = readln("ring public_key_hex (from agent-action-tool keygen)");
     let ring_ki = readln("ring_key_image_hex (from agent-action-tool keygen)");
     let intent_csv = readln("intent_scope (comma-separated, e.g. payment_initiation,prove_age)");

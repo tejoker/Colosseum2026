@@ -1,0 +1,243 @@
+//! Canonical, versioned byte encodings for security-critical signatures.
+//!
+//! JSON stringification is deliberately not used here: key ordering, escaping,
+//! whitespace, and number formatting differ across SDK languages.  Every value
+//! is instead encoded as a fixed-order, length-prefixed UTF-8 field.  The field
+//! names are included in the signed bytes so that adding, removing, or
+//! reordering a field is a protocol change rather than an ambiguous parse.
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use hkdf::Hkdf;
+use sha2::{Digest, Sha256};
+
+pub const CALL_SIGNATURE_VERSION: &str = "2";
+pub const CALL_SIGNATURE_DOMAIN: &str = "sauron.call.v2";
+pub const PARTNER_REGISTRATION_DOMAIN: &str = "sauron.partner-registration.v2";
+pub const ATTESTATION_CHALLENGE_DOMAIN: &str = "sauron.attestation-challenge.v1";
+pub const USER_AUTH_CHALLENGE_DOMAIN: &str = "sauron.user-auth-challenge.v1";
+
+/// Derive an independent 256-bit key from the deployment master secret.
+/// Security mechanisms must use distinct domain strings so compromise or
+/// cryptanalysis of one protocol key cannot cross into another protocol.
+pub fn derive_subkey(master_secret: &[u8], domain: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(b"sauronid-hkdf-sha256-v1"), master_secret);
+    let mut out = [0u8; 32];
+    hk.expand(domain.as_bytes(), &mut out)
+        .expect("32-byte HKDF expansion cannot exceed RFC 5869 limit");
+    out
+}
+
+/// Encode a domain and fixed-order `(name, value)` fields.
+///
+/// Wire format: `u32be(len) || bytes`, repeated for the domain, then each field
+/// name and value.  Field counts are fixed by the calling protocol.
+pub fn canonical_fields(domain: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_len_prefixed(&mut out, domain.as_bytes());
+    for (name, value) in fields {
+        push_len_prefixed(&mut out, name.as_bytes());
+        push_len_prefixed(&mut out, value.as_bytes());
+    }
+    out
+}
+
+fn push_len_prefixed(out: &mut Vec<u8>, value: &[u8]) {
+    let len = u32::try_from(value.len()).expect("security protocol field exceeds u32::MAX");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(value);
+}
+
+#[derive(Debug)]
+pub struct CallSignatureInput<'a> {
+    pub agent_id: &'a str,
+    pub tenant_id: &'a str,
+    pub audience: &'a str,
+    pub method: &'a str,
+    pub target_uri: &'a str,
+    pub content_type: &'a str,
+    pub body_sha256_hex: &'a str,
+    pub config_digest: &'a str,
+    pub timestamp_ms: &'a str,
+    pub nonce: &'a str,
+}
+
+pub fn call_signature_payload(input: &CallSignatureInput<'_>) -> Vec<u8> {
+    canonical_fields(
+        CALL_SIGNATURE_DOMAIN,
+        &[
+            ("version", CALL_SIGNATURE_VERSION),
+            ("agent_id", input.agent_id),
+            ("tenant_id", input.tenant_id),
+            ("audience", input.audience),
+            ("method", input.method),
+            ("target_uri", input.target_uri),
+            ("content_type", input.content_type),
+            ("body_sha256", input.body_sha256_hex),
+            ("config_digest", input.config_digest),
+            ("timestamp_ms", input.timestamp_ms),
+            ("nonce", input.nonce),
+        ],
+    )
+}
+
+#[derive(Debug)]
+pub struct PartnerRegistrationInput<'a> {
+    pub tenant_id: &'a str,
+    pub public_key_hex: &'a str,
+    pub key_image_hex: &'a str,
+    pub first_name: &'a str,
+    pub last_name: &'a str,
+    pub email: &'a str,
+    pub date_of_birth: &'a str,
+    pub nationality: &'a str,
+    pub commitment: &'a str,
+    pub auth_public_key_b64u: &'a str,
+}
+
+pub fn partner_registration_payload(input: &PartnerRegistrationInput<'_>) -> Vec<u8> {
+    canonical_fields(
+        PARTNER_REGISTRATION_DOMAIN,
+        &[
+            ("tenant_id", input.tenant_id),
+            ("public_key_hex", input.public_key_hex),
+            ("key_image_hex", input.key_image_hex),
+            ("first_name", input.first_name),
+            ("last_name", input.last_name),
+            ("email", input.email),
+            ("date_of_birth", input.date_of_birth),
+            ("nationality", input.nationality),
+            ("commitment", input.commitment),
+            ("auth_public_key_b64u", input.auth_public_key_b64u),
+        ],
+    )
+}
+
+pub fn user_auth_challenge_payload(
+    challenge_id: &str,
+    tenant_id: &str,
+    key_image_hex: &str,
+    nonce: &str,
+    expires_at: i64,
+) -> Vec<u8> {
+    let expires_at = expires_at.to_string();
+    canonical_fields(
+        USER_AUTH_CHALLENGE_DOMAIN,
+        &[
+            ("challenge_id", challenge_id),
+            ("tenant_id", tenant_id),
+            ("key_image_hex", key_image_hex),
+            ("nonce", nonce),
+            ("expires_at", &expires_at),
+        ],
+    )
+}
+
+/// RFC 7638 JWK thumbprint for an Ed25519 OKP public key represented by its
+/// raw, base64url-no-pad `x` coordinate.
+pub fn ed25519_jwk_thumbprint(public_key_b64u: &str) -> Result<String, String> {
+    let raw = URL_SAFE_NO_PAD
+        .decode(public_key_b64u.trim())
+        .map_err(|e| format!("PoP public key is not base64url: {e}"))?;
+    if raw.len() != 32 {
+        return Err(format!(
+            "PoP public key must decode to 32 bytes, got {}",
+            raw.len()
+        ));
+    }
+    // RFC 7638 requires lexicographic member order and no insignificant
+    // whitespace.  For OKP the required members are crv, kty, x.
+    let canonical = format!(
+        "{{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"{}\"}}",
+        public_key_b64u.trim()
+    );
+    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes())))
+}
+
+pub fn attestation_challenge_binding(nonce: &str, pop_public_key_b64u: &str) -> Vec<u8> {
+    canonical_fields(
+        ATTESTATION_CHALLENGE_DOMAIN,
+        &[
+            ("nonce", nonce),
+            ("pop_public_key_b64u", pop_public_key_b64u),
+        ],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_fields_are_unambiguous() {
+        assert_ne!(
+            canonical_fields("d", &[("a", "x|y"), ("b", "z")]),
+            canonical_fields("d", &[("a", "x"), ("b", "y|z")])
+        );
+    }
+
+    #[test]
+    fn call_payload_changes_for_every_security_field() {
+        let base = CallSignatureInput {
+            agent_id: "a",
+            tenant_id: "t",
+            audience: "aud",
+            method: "POST",
+            target_uri: "/x?q=1",
+            content_type: "application/json",
+            body_sha256_hex: "00",
+            config_digest: "sha256:11",
+            timestamp_ms: "1",
+            nonce: "n",
+        };
+        let encoded = call_signature_payload(&base);
+        let changed = CallSignatureInput {
+            tenant_id: "other",
+            ..base
+        };
+        assert_ne!(encoded, call_signature_payload(&changed));
+    }
+
+    #[test]
+    fn ed25519_thumbprint_rejects_wrong_length() {
+        assert!(ed25519_jwk_thumbprint("AA").is_err());
+    }
+
+    #[test]
+    fn subkeys_are_domain_separated() {
+        let master = [7u8; 32];
+        assert_ne!(
+            derive_subkey(&master, "session-hmac-v1"),
+            derive_subkey(&master, "action-receipt-hmac-v1")
+        );
+    }
+
+    #[test]
+    fn partner_registration_cannot_be_relabelled_to_another_tenant() {
+        let input = PartnerRegistrationInput {
+            tenant_id: "tenant-a",
+            public_key_hex: "pk",
+            key_image_hex: "ki",
+            first_name: "A",
+            last_name: "B",
+            email: "a@example.com",
+            date_of_birth: "2000-01-01",
+            nationality: "FR",
+            commitment: "c",
+            auth_public_key_b64u: "auth",
+        };
+        let first = partner_registration_payload(&input);
+        let relabelled = PartnerRegistrationInput {
+            tenant_id: "tenant-b",
+            ..input
+        };
+        assert_ne!(first, partner_registration_payload(&relabelled));
+    }
+
+    #[test]
+    fn authentication_challenge_is_tenant_bound() {
+        assert_ne!(
+            user_auth_challenge_payload("id", "tenant-a", "ki", "nonce", 42),
+            user_auth_challenge_payload("id", "tenant-b", "ki", "nonce", 42)
+        );
+    }
+}

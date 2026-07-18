@@ -122,26 +122,78 @@ pub async fn verify_stats_submission<L: VKeyLoader>(
     // 3. Additional binding: public_inputs must also expose claimed_value,
     // n_records, period_start, period_end in the order declared in the
     // circuit's `main`:
-    //   [valid, root, metric_id, claimed_value, n_records, period_start, period_end]
+    //   [valid, root, metric_id, claimed_value, n_records, period_start,
+    //    period_end, tree_size, tenant_hash, agent_hash]
     //
     // We assert the count matches before paying for the subprocess so a
     // wrong-shape proof rejects in microseconds.
-    if sub.public_inputs.len() < 7 {
+    if sub.public_inputs.len() < 10 {
         return Err(AggError::Malformed(format!(
-            "expected ≥7 public inputs [valid, root, metric_id, claimed_value, \
-             n_records, period_start, period_end]; got {}",
+            "expected ≥10 public inputs [valid, root, metric_id, claimed_value, \
+             n_records, period_start, period_end, tree_size, tenant_hash, agent_hash]; got {}",
             sub.public_inputs.len()
         )));
     }
+    let expected_metric_index = PROVABLE_METRICS_WITH_CATALOG_INDEX
+        .iter()
+        .find_map(|(name, idx)| (*name == sub.metric_id).then_some(*idx))
+        .ok_or_else(|| AggError::Malformed("metric is not mapped to a circuit index".into()))?;
+    check_decimal_equals(&sub.public_inputs[2], expected_metric_index, "metric_id")?;
     check_decimal_equals(&sub.public_inputs[3], sub.claimed_value, "claimed_value")?;
     check_decimal_equals(&sub.public_inputs[4], sub.n_records, "n_records")?;
     check_decimal_equals(&sub.public_inputs[5], sub.period_start, "period_start")?;
     check_decimal_equals(&sub.public_inputs[6], sub.period_end, "period_end")?;
+    check_decimal_equals(&sub.public_inputs[7], sub.n_records, "tree_size")?;
+    check_big_decimal_equals(
+        &sub.public_inputs[8],
+        &stats_scope_hash(&sub.tenant_id),
+        "tenant_hash",
+    )?;
+    let expected_agent_hash = sub
+        .agent_id_or_none
+        .as_deref()
+        .map(stats_scope_hash)
+        .unwrap_or_else(|| "0".into());
+    check_big_decimal_equals(&sub.public_inputs[9], &expected_agent_hash, "agent_hash")?;
 
     // 4. Hand off to the existing verifier (Merkle-root binding + snarkjs).
     zk_verifier::verify_action_log_proof(&payload, &sub.merkle_root, vk_loader)
         .await
         .map_err(AggError::from)
+}
+
+const PROVABLE_METRICS_WITH_CATALOG_INDEX: &[(&str, i64)] = &[
+    ("success_rate", 0),
+    ("error_rate", 3),
+    ("tool_call_count", 4),
+    ("cost_total", 6),
+    ("policy_violations_blocked", 7),
+    ("avg_session_duration", 9),
+];
+
+/// Canonical SHA-256-to-BN254 reduction used by every SDK to bind tenant and
+/// optional agent scope into the stats circuit's public statement.
+pub fn stats_scope_hash(value: &str) -> String {
+    use num_bigint::BigUint;
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.as_bytes());
+    let n = BigUint::from_bytes_be(&digest);
+    let modulus = BigUint::parse_bytes(
+        b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
+        10,
+    )
+    .expect("BN254 modulus constant");
+    (n % modulus).to_str_radix(10)
+}
+
+fn check_big_decimal_equals(claimed: &str, expected: &str, field: &str) -> Result<(), AggError> {
+    if claimed.trim() != expected {
+        return Err(AggError::Invalid(format!(
+            "{field} mismatch: body-derived={expected} proof={}",
+            claimed.trim()
+        )));
+    }
+    Ok(())
 }
 
 fn check_decimal_equals(claimed: &str, expected: i64, field: &str) -> Result<(), AggError> {
@@ -181,7 +233,8 @@ mod tests {
             period_end: 60,
             merkle_root: "00".repeat(32),
             proof_b64: "e30=".into(), // {}
-            vk_id: "StatsHonestComputation.dev.vk@v0".into(),
+            vk_id: "StatsHonestComputation.dev.vk@v1".into(),
+            checkpoint_id: "zkc_test".into(),
             public_inputs: vec![
                 "1".into(),   // valid
                 "0".into(),   // root (decimal 0 → 0x00..00)
@@ -190,6 +243,9 @@ mod tests {
                 "4".into(),   // n_records
                 "0".into(),   // period_start
                 "60".into(),  // period_end
+                "4".into(),   // tree_size
+                stats_scope_hash("t"),
+                "0".into(), // tenant aggregate
             ],
         }
     }

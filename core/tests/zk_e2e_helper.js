@@ -59,7 +59,7 @@ const circomlibjs = require(path.join(SDK_NM, "circomlibjs"));
 const snarkjs = require(path.join(SDK_NM, "snarkjs"));
 
 const LEVELS = 20;          // ActionSumBound main: depth 20
-const ENTRY_FIELDS = 6;     // tool, amount_usd, timestamp, agent_id, _pad, _pad
+const ENTRY_FIELDS = 6;     // status, latency, amount, tool, agent, timestamp
 const N = 4;                // ActionSumBound main: window size
 
 (async () => {
@@ -67,18 +67,18 @@ const N = 4;                // ActionSumBound main: window size
     const F = poseidon.F;
     const toDec = (x) => F.toObject(x).toString();
 
-    // Synthetic 10-receipt action log. Fields: [tool, amount_usd, ts, agent_id, 0, 0].
+    // Synthetic 10-receipt action log. Amount is the protocol-fixed offset 2.
     // Σ of first 4 amounts = 10 + 20 + 30 + 40 = 100. Budget 1000. 100 ≤ 1000.
     const NUM_RECEIPTS = 10;
     const entries = [];
     for (let i = 0; i < NUM_RECEIPTS; i++) {
         entries.push([
-            BigInt(1000 + i),          // tool id
-            BigInt((i + 1) * 10),      // amount_usd
-            BigInt(1716000000 + i),    // timestamp
-            BigInt(7),                 // agent_id
-            0n,
-            0n,
+            1n,                         // status
+            BigInt(50 + i),             // latency
+            BigInt((i + 1) * 10),       // amount
+            BigInt(1000 + i),           // tool id
+            BigInt(7),                  // agent id/hash
+            BigInt(1716000000 + i),     // timestamp
         ]);
     }
 
@@ -143,8 +143,6 @@ const N = 4;                // ActionSumBound main: window size
     const paths = [];
     for (let k = 0; k < N; k++) paths.push(pathFor(k));
 
-    const amountSelector = [0, 1, 0, 0, 0, 0]; // pick index-1 = amount_usd
-
     const input = {
         root: toDec(rootField),
         budget: "1000",
@@ -153,7 +151,6 @@ const N = 4;                // ActionSumBound main: window size
         entries: window.map((e) => e.map((x) => x.toString())),
         pathElements: paths.map((p) => p.pathElements),
         pathIndices: paths.map((p) => p.pathIndices),
-        amountSelector: amountSelector.map((x) => x.toString()),
     };
 
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(input, WASM, ZKEY);
@@ -174,7 +171,7 @@ const N = 4;                // ActionSumBound main: window size
         circuit: "ActionSumBound",
         public_inputs: publicSignals,
         proof_b64: Buffer.from(JSON.stringify(proof), "utf8").toString("base64"),
-        vk_id: "ActionSumBound.dev.vk@v0",
+        vk_id: "ActionSumBound.dev.vk@v1",
     };
 
     fs.writeFileSync(path.join(outDir, "payload.json"), JSON.stringify(payload, null, 2));
