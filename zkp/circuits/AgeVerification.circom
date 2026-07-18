@@ -60,6 +60,20 @@ template AgeVerification() {
     signal ageThresholdScaled;
     ageThresholdScaled <== ageThreshold * 10000;
 
+    // Comparators do not range-constrain their inputs. Explicit bit
+    // decomposition prevents BN254 modular underflow/wraparound from turning
+    // a future/malformed birth date into a passing age difference.
+    component dobBits = Num2Bits(32);
+    component currentDateBits = Num2Bits(32);
+    component thresholdBits = Num2Bits(8);
+    component thresholdScaledBits = Num2Bits(32);
+    component ageDiffBits = Num2Bits(32);
+    dobBits.in <== dateOfBirth;
+    currentDateBits.in <== currentDate;
+    thresholdBits.in <== ageThreshold;
+    thresholdScaledBits.in <== ageThresholdScaled;
+    ageDiffBits.in <== ageDiff;
+
     // ─── Step 4: Check ageDiff >= ageThresholdScaled ─────────
     // Using 32-bit comparator GreaterEqualThan (sufficient for YYYYMMDD range)
     // Note: The template is actually GreaterEqThan in circomlib.

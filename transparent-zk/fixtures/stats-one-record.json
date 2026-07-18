@@ -1,0 +1,42 @@
+{
+  "tenant_id": "default",
+  "checkpoint_id": "zkcp_demo",
+  "action_anchor_id": "act_demo",
+  "expected_merkle_root": "ccc6bfcfb8e7c8354fb5215f2ebc40f97a80806a5d3d8e1a851de46c675b2917",
+  "agent_id_or_none": "agent-demo",
+  "metric_id": "success_rate",
+  "period_start": 1800000000,
+  "period_end": 1950000000,
+  "records": [
+    {
+      "envelope": {
+        "agent_id": "agent-demo",
+        "human_key_image": "0000000000000000000000000000000000000000000000000000000000000000",
+        "action": "tool_call",
+        "resource": "https://example.com/v1/jobs/7",
+        "merchant_id": "example.com",
+        "amount_minor": 125,
+        "currency": "USD",
+        "nonce": "0123456789abcdef",
+        "expires_at": 2000000000,
+        "policy_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "ajwt_jti": "jti-demo"
+      },
+      "receipt": {
+        "tenant_id": "default",
+        "receipt_id": "ar_demo",
+        "action_hash": "ce3953f70ef507618f194d335208250ca85a03dddf30906dda9168bc1cc49148",
+        "agent_id": "agent-demo",
+        "ring_key_image_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "policy_version": "sauron-kya-policy-v1",
+        "ajwt_jti": "jti-demo",
+        "pop_jkt": "pop-demo",
+        "status": "authorized",
+        "signature": "signed-demo",
+        "created_at": 1900000000,
+        "ring_id": "",
+        "config_digest": ""
+      }
+    }
+  ]
+}

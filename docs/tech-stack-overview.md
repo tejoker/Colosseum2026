@@ -8,7 +8,13 @@ Audience: investors, prospective customers, new engineers onboarding, partners d
 
 ## One-line summary
 
-SauronID is a Rust HTTP service that issues, verifies, and audits cryptographically bound AI-agent action receipts, with TypeScript and Python SDKs for client integration, a Next.js dashboard for operators, Circom-based zero-knowledge circuits for compliance proofs, and dual on-chain anchoring (Bitcoin via OpenTimestamps, Solana via the Memo Program) for tamper-evident audit trails.
+SauronID is a Rust authorization gateway that issues and verifies
+tenant-bound AI-agent capabilities, proxies policy-constrained egress, and
+anchors complete action-receipt batches. TypeScript, Python and Go clients
+integrate the protocol; native transparent RISC Zero STARK guests prove
+compliance computations without a per-circuit trusted setup. Circom/Groth16,
+custom Paillier and unauthenticated OPRF code remain development compatibility
+surfaces and are quarantined in production.
 
 ---
 
@@ -17,13 +23,13 @@ SauronID is a Rust HTTP service that issues, verifies, and audits cryptographica
 | Layer | Primary technology | Role |
 |---|---|---|
 | Backend service | Rust + axum + tokio | HTTP API, policy evaluation, cryptographic verification, audit anchoring |
-| Persistent storage | SQLite (default) and PostgreSQL (production) | Agents, actions, policies, anchors, audit, multi-tenant state |
-| Client SDKs | TypeScript (Node) and Python | In-process call signing, policy enforcement, stat submission |
+| Persistent storage | SQLite (load-bearing) plus partial PostgreSQL paths | Single-node agents, actions, policies, anchors, audit, multi-tenant state; no HA claim |
+| Client SDKs | TypeScript, Python, and Go | Call signing, passwordless auth, policy/capability integration, stats submission |
 | Frontend | Next.js (App Router) + React 19 + Tailwind | Operator dashboard, policy authoring, cohort views |
-| Zero-knowledge proofs | Circom + circomlib + snarkjs (Groth16) | Compliance claims over committed action logs |
+| Transparent proofs | RISC Zero zkVM native STARK (`risc0-zkvm` 3.0.5) | Ceremony-free stats and action-policy claims over complete anchored batches |
 | On-chain anchoring | Bitcoin (OpenTimestamps) + Solana (Memo Program, optional custom Anchor program) | Public, tamper-evident timestamping |
-| Privacy primitives | Custom Rust Differential Privacy + Paillier Homomorphic Encryption | Privacy-preserving benchmark aggregation |
-| Hardware attestation | Pure-Rust verifiers for ed25519, AWS Nitro, TPM2, SGX, SEV-SNP, ARM CCA, Apple Secure Enclave | Tamper-proof execution environment proofs |
+| Privacy primitives | Differential privacy; legacy custom Paillier quarantined in production | Budgeted cohort publication without a production custom-HE claim |
+| Hardware attestation | Optional Ed25519/TPM2/Nitro evidence | Separate deployment assurance tier, not required by authorization or STARK proofs |
 | Cryptography | curve25519-dalek, ed25519-dalek, ring, sha2, hmac, subtle | Signatures, hashes, constant-time comparisons |
 | Testing | Cargo test, Vitest, Pytest, custom redteam harness | Unit, integration, empirical adversarial suite |
 | CI | GitHub Actions (test, audit, SBOM, security, release-gate, redteam-e2e) | Continuous verification |

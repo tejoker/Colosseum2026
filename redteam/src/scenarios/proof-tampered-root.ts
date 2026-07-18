@@ -2,8 +2,8 @@
  * S12 redteam — proof-tampered-root.
  *
  * Threat-model citation: docs/threat-model.md "STRIDE per component → ZK
- * prover → Tampering". The verifier binds `expected_root_hex` to the
- * proof's public inputs (core/src/aggregation/verify.rs::verify_stats_submission).
+ * prover → Tampering". The verifier resolves the root from a finalized,
+ * tenant-scoped checkpoint and binds it to the proof's public inputs.
  * Flipping a single byte in merkle_root must produce a mismatch and a
  * rejection.
  *
@@ -27,16 +27,32 @@ async function main(): Promise<ScenarioResult> {
         return skipped(id, name, `server ${BASE_URL} unreachable or no admin key`);
     }
 
-    // Use the /v1/proofs/action-log/verify route directly; we control
-    // both the public inputs AND the expected_root_hex, so we can produce
-    // a deliberate mismatch.
-    const tamperedRoot = "ff" + "00".repeat(31); // flip the leading byte
+    const finalized = await fetch(`${BASE_URL}/v1/proofs/checkpoint/finalize`, {
+        method: "POST",
+        headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${ADMIN_KEY}`,
+            "x-sauron-tenant-id": "default",
+        },
+        body: JSON.stringify({
+            circuit: "ActionSumBound",
+            merkle_root: "00".repeat(32),
+            tree_size: 4,
+        }),
+    });
+    if (!finalized.ok) {
+        return skipped(id, name, `checkpoint service unavailable: ${finalized.status}`);
+    }
+    const checkpoint = (await finalized.json()) as { checkpoint_id: string; finalized: boolean };
+    if (!checkpoint.finalized) {
+        return skipped(id, name, "checkpoint is awaiting OpenTimestamps finalization");
+    }
     const body = {
-        circuit: "ActionLogProof",
-        public_inputs: ["0", "0", "0"],
+        circuit: "ActionSumBound",
+        public_inputs: ["1", "1", "0"], // proof claims root=1; checkpoint says root=0
         proof_b64: "e30=",
-        vk_id: "ActionLogProof.dev.vk@v0",
-        expected_root_hex: tamperedRoot,
+        vk_id: "ActionSumBound.dev.vk@v1",
+        checkpoint_id: checkpoint.checkpoint_id,
     };
     const r = await fetch(`${BASE_URL}/v1/proofs/action-log/verify`, {
         method: "POST",
@@ -58,7 +74,7 @@ async function main(): Promise<ScenarioResult> {
         pass: rejected,
         note:
             "Tampering merkle_root in a submission MUST flip the verifier's verdict. " +
-            "Server bound expected_root_hex to the proof's public signals — any " +
+            "Server resolved the root from an anchored checkpoint — any " +
             "byte-flip breaks the equality check.",
         evidence: { status: r.status, body: text.slice(0, 200) },
     };

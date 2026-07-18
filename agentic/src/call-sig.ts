@@ -1,9 +1,9 @@
 /**
  * SauronID per-call signature (DPoP-style request binding).
  *
- * Each protected call carries an Ed25519 signature over:
- *
- *   method | path | sha256(body) | timestamp_ms | nonce
+ * Version 2 signs a fixed-order, length-prefixed field sequence. This avoids
+ * delimiter ambiguity and binds tenant, audience, query string, content type,
+ * body, and the registered config digest in one signature.
  *
  * signed by the agent's PoP private key. Server verifies with the registered
  * `pop_public_key_b64u` and consumes the nonce atomically (single-use).
@@ -19,7 +19,10 @@ export interface CallSignatureHeaders {
     "x-sauron-call-ts": string;
     "x-sauron-call-nonce": string;
     "x-sauron-call-sig": string;
+    "x-sauron-call-audience": string;
+    "x-sauron-protocol-version": "2";
     "x-sauron-agent-config-digest": string;
+    "x-sauron-tenant-id": string;
 }
 
 export interface SignCallInput {
@@ -42,10 +45,32 @@ export interface SignCallInput {
      * silent system-prompt / tool-list flip.
      */
     agentConfigDigest: string;
+    /** Tenant selected for this request. Default: `default`. */
+    tenantId?: string;
+    /** Resource-server audience. Must match SAURON_CALL_AUDIENCE. */
+    audience?: string;
+    /** Exact Content-Type header value. Default: empty. */
+    contentType?: string;
     /** Optional override for timestamp (unix ms). Default: now. */
     timestampMs?: number;
     /** Optional override for nonce. Default: 16 random bytes hex. */
     nonce?: string;
+}
+
+function canonicalFields(domain: string, fields: Array<[string, string]>): Buffer {
+    const chunks: Buffer[] = [];
+    const push = (value: string) => {
+        const bytes = Buffer.from(value, "utf8");
+        const len = Buffer.allocUnsafe(4);
+        len.writeUInt32BE(bytes.length, 0);
+        chunks.push(len, bytes);
+    };
+    push(domain);
+    for (const [name, value] of fields) {
+        push(name);
+        push(value);
+    }
+    return Buffer.concat(chunks);
 }
 
 /**
@@ -62,9 +87,25 @@ export function signCall(input: SignCallInput): CallSignatureHeaders {
         typeof input.body === "string" ? Buffer.from(input.body, "utf8") : Buffer.from(input.body);
     const bodyHashHex = crypto.createHash("sha256").update(bodyBytes).digest("hex");
 
-    const signingPayload = `${input.method}|${input.path}|${bodyHashHex}|${ts}|${nonce}`;
+    const method = input.method.toUpperCase();
+    const tenantId = input.tenantId ?? "default";
+    const audience = input.audience ?? "sauron-core";
+    const contentType = (input.contentType ?? "").trim().toLowerCase();
+    const signingPayload = canonicalFields("sauron.call.v2", [
+        ["version", "2"],
+        ["agent_id", input.agentId],
+        ["tenant_id", tenantId],
+        ["audience", audience],
+        ["method", method],
+        ["target_uri", input.path],
+        ["content_type", contentType],
+        ["body_sha256", bodyHashHex],
+        ["config_digest", input.agentConfigDigest],
+        ["timestamp_ms", String(ts)],
+        ["nonce", nonce],
+    ]);
 
-    const sig = crypto.sign(null, Buffer.from(signingPayload, "utf8"), input.privateKey);
+    const sig = crypto.sign(null, signingPayload, input.privateKey);
     const sigB64u = sig.toString("base64url");
 
     return {
@@ -72,7 +113,10 @@ export function signCall(input: SignCallInput): CallSignatureHeaders {
         "x-sauron-call-ts": String(ts),
         "x-sauron-call-nonce": nonce,
         "x-sauron-call-sig": sigB64u,
+        "x-sauron-call-audience": audience,
+        "x-sauron-protocol-version": "2",
         "x-sauron-agent-config-digest": input.agentConfigDigest,
+        "x-sauron-tenant-id": tenantId,
     };
 }
 

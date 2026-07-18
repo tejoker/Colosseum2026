@@ -198,7 +198,7 @@ async function testComplianceDispatchesSurfacesErrors() {
                         entries: [fakeEntry(0)],
                         paths: [fakePath()],
                         budget: 1000n,
-                        amountSelector: [1, 0, 0, 0, 0, 0],
+                        amountSelector: [0, 0, 1, 0, 0, 0],
                     },
                 },
                 { circuitsDir: tmp },

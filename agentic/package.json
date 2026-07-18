@@ -1,6 +1,6 @@
 {
     "name": "@sauronid/agentic",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "SauronID A-JWT Client-Side Shim Library — Agent identity, intent tokens, and delegation chains",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",

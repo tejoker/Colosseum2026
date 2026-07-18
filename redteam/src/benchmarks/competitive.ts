@@ -33,6 +33,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import * as http from "http";
 import * as os from "os";
 import { resolve } from "path";
+import { signCallV2 } from "../call-sig-v2";
+import { popThumbprint } from "../core-api";
 
 // Shared keep-alive agent so conc>1 doesn't pay TCP-handshake overhead per req.
 const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 256 });
@@ -306,7 +308,10 @@ const sauronTarget: BenchTarget = (() => {
         const reg = await postJson<{ agent_id: string; ajwt: string }>(
             `${SAURON_BASE}/agent/register`,
             {
-                headers: { "x-sauron-session": session },
+                headers: {
+                    "x-sauron-session": session,
+                    "x-sauron-tenant-id": "default",
+                },
                 body: {
                     human_key_image: keyImage,
                     agent_type: "llm",
@@ -319,7 +324,7 @@ const sauronTarget: BenchTarget = (() => {
                     intent_json: JSON.stringify({ scope: ["payment_initiation"] }),
                     public_key_hex: keys.public_key_hex,
                     ring_key_image_hex: keys.ring_key_image_hex,
-                    pop_jkt: `bench-${sfx}`,
+                    pop_jkt: popThumbprint(jwk.x),
                     pop_public_key_b64u: jwk.x,
                     ttl_secs: 3600,
                 },
@@ -347,23 +352,21 @@ const sauronTarget: BenchTarget = (() => {
             status_code: 200,
         });
 
-        const ts = Date.now();
-        const nonce = randomBytes(16).toString("hex");
-        const bodyHash = createHash("sha256").update(body).digest("hex");
-        const payload = `POST|${path}|${bodyHash}|${ts}|${nonce}`;
-
         const tSig0 = Date.now();
-        const sig = edSign(null, Buffer.from(payload, "utf8"), privateKey);
+        const signedHeaders = signCallV2({
+            agentId,
+            privateKey,
+            method: "POST",
+            targetUri: path,
+            body,
+            configDigest,
+        });
         const sign_ms = Date.now() - tSig0;
 
         const tReq0 = Date.now();
         const res = await rawPost(`${SAURON_BASE}${path}`, body, {
             "content-type": "application/json",
-            "x-sauron-agent-id": agentId,
-            "x-sauron-call-ts": String(ts),
-            "x-sauron-call-nonce": nonce,
-            "x-sauron-call-sig": sig.toString("base64url"),
-            "x-sauron-agent-config-digest": configDigest,
+            ...signedHeaders,
         });
         const total_ms = Date.now() - tReq0 + sign_ms;
         return {

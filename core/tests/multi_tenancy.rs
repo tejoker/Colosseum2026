@@ -446,20 +446,15 @@ fn admin_stats_aggregates_across_tenants() {
     assert_eq!(only_a, 2);
 }
 
-/// `/admin/agents` is wired to the global SQL in `core/src/admin.rs::
-/// get_agents` (operator-aggregate today). This test pins what the
-/// *tenant-scoped variant* WILL look like once Sprint 11.5 closes the
-/// handler-side sweep: a filter by caller's tenant_id MUST hide
-/// other tenants' rows. The audit document records the call-site as a
-/// known gap (see "Known gaps" section).
+/// `/admin/agents` uses this tenant-filtered shape unless the authenticated
+/// principal has explicit cross-tenant authority.
 #[test]
 fn admin_agents_filters_to_callers_tenant() {
     let (_repo, db) = build_test_repo("admin_agents_filter");
     seed_agent_row(&db, "tenant_a", "agt_a_only", "ki-a");
     seed_agent_row(&db, "tenant_b", "agt_b_only", "ki-b");
 
-    // What the tenant-scoped admin path WILL run (mirrors the planned
-    // patch — see docs/multi-tenancy-audit.md Known gaps).
+    // Mirrors the tenant-scoped admin query.
     let listed_a: Vec<String> = {
         let conn = db.lock().unwrap();
         let mut stmt = conn

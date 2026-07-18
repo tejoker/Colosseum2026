@@ -48,6 +48,52 @@ export interface LLMConfig {
     [key: string]: unknown;
 }
 
+/** Registration payload understood by core's typed `llm` checksum contract. */
+export function llmChecksumInputs(config: AgentConfig): Record<string, unknown> {
+    return {
+        model_id: config.llmConfig.model,
+        system_prompt: config.systemPrompt,
+        tools: config.tools,
+        llm_config: config.llmConfig,
+        ...(config.version === undefined ? {} : { version: config.version }),
+    };
+}
+
+/**
+ * Compute the exact checksum core will persist for a typed registration.
+ * Object keys are sorted recursively; array order is deliberately preserved
+ * because it can be semantically meaningful and Rust serde does the same.
+ */
+export function computeTypedChecksum(
+    agentType: string,
+    inputs: Record<string, unknown>
+): string {
+    const canonical = JSON.stringify(canonicalizeForCore(inputs));
+    return `sha256:${crypto
+        .createHash("sha256")
+        .update(`${agentType}|${canonical}`)
+        .digest("hex")}`;
+}
+
+/** Exact checksum used by `AgentShimClient` for its typed LLM registration. */
+export function computeLlmRegistrationChecksum(config: AgentConfig): string {
+    return computeTypedChecksum("llm", llmChecksumInputs(config));
+}
+
+function canonicalizeForCore(value: unknown): unknown {
+    if (Array.isArray(value)) {
+        return value.map(canonicalizeForCore);
+    }
+    if (value !== null && typeof value === "object") {
+        const result: Record<string, unknown> = {};
+        for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+            result[key] = canonicalizeForCore((value as Record<string, unknown>)[key]);
+        }
+        return result;
+    }
+    return value;
+}
+
 /**
  * Compute the agent_checksum: a deterministic SHA-256 hash of the agent's
  * behavioral configuration.

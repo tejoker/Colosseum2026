@@ -70,6 +70,11 @@ pub fn init_schema(conn: &Connection) {
             tokens_b        INTEGER NOT NULL DEFAULT 0,
             client_type     TEXT    NOT NULL CHECK(client_type IN ('FULL_KYC', 'ZKP_ONLY', 'BANK'))
         );
+        CREATE TABLE IF NOT EXISTS client_tenant_bindings (
+            client_name TEXT NOT NULL,
+            tenant_id   TEXT NOT NULL,
+            PRIMARY KEY (client_name, tenant_id)
+        );
 
         -- Registered users
         CREATE TABLE IF NOT EXISTS users (
@@ -80,6 +85,31 @@ pub fn init_schema(conn: &Connection) {
             email           TEXT NOT NULL DEFAULT '',
             date_of_birth   TEXT NOT NULL DEFAULT '',
             nationality     TEXT NOT NULL DEFAULT ''
+        );
+
+        -- Passwordless production authentication. The credential is bound by
+        -- the partner/bank-signed registration payload; SauronID stores only
+        -- an Ed25519 public key. Challenges are one-use and short-lived.
+        CREATE TABLE IF NOT EXISTS user_auth_credentials (
+            key_image_hex          TEXT PRIMARY KEY,
+            ed25519_public_key_b64u TEXT UNIQUE NOT NULL,
+            created_at             INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_auth_challenges (
+            challenge_id  TEXT PRIMARY KEY,
+            tenant_id     TEXT NOT NULL,
+            key_image_hex TEXT NOT NULL,
+            nonce         TEXT NOT NULL,
+            expires_at    INTEGER NOT NULL,
+            used_at       INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_auth_challenges_expiry
+            ON user_auth_challenges(expires_at, used_at);
+        CREATE TABLE IF NOT EXISTS user_auth_tenant_bindings (
+            tenant_id    TEXT NOT NULL,
+            key_image_hex TEXT NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (tenant_id, key_image_hex)
         );
 
         -- Optional mapping from bank customer IDs to user key images
@@ -154,7 +184,6 @@ pub fn init_schema(conn: &Connection) {
             expires_at       INTEGER NOT NULL,
             revoked          INTEGER NOT NULL DEFAULT 0
         );
-
         -- Agent VCs (self-sovereign KYA path)
         CREATE TABLE IF NOT EXISTS agent_vcs (
             agent_id        TEXT    PRIMARY KEY,
@@ -232,6 +261,22 @@ pub fn init_schema(conn: &Connection) {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_pop_challenges_exp ON agent_pop_challenges(exp);
 
+        -- One-time attestation challenges issued before /agent/register.
+        -- Binding the challenge to tenant, authenticated human and the exact
+        -- Ed25519 PoP key prevents replaying a valid hardware quote for a
+        -- different registration or swapping the runtime signing key.
+        CREATE TABLE IF NOT EXISTS agent_attestation_challenges (
+            id                  TEXT PRIMARY KEY NOT NULL,
+            tenant_id           TEXT NOT NULL,
+            human_key_image     TEXT NOT NULL,
+            nonce               TEXT NOT NULL,
+            pop_public_key_b64u TEXT NOT NULL,
+            expires_at          INTEGER NOT NULL,
+            used_at             INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_attestation_challenges_exp
+            ON agent_attestation_challenges(expires_at);
+
         -- Server-computed agent checksum inputs.
         -- Operators submit a structured config object at /agent/register; the server
         -- canonicalises it to JSON, computes SHA-256, and stores BOTH the raw inputs
@@ -284,6 +329,23 @@ pub fn init_schema(conn: &Connection) {
             allowed       INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_agent_egress_log_agent_ts ON agent_egress_log(agent_id, ts);
+
+        -- One-use egress capabilities. Only the SHA-256 of the bearer token is
+        -- stored. Every capability is bound to the exact tenant, agent,
+        -- method, URL and pre-redaction request body hash.
+        CREATE TABLE IF NOT EXISTS agent_egress_capabilities (
+            token_hash_hex   TEXT PRIMARY KEY NOT NULL,
+            tenant_id       TEXT NOT NULL,
+            agent_id        TEXT NOT NULL,
+            method          TEXT NOT NULL,
+            url             TEXT NOT NULL,
+            body_hash_hex   TEXT NOT NULL,
+            action_receipt_id TEXT NOT NULL,
+            expires_at      INTEGER NOT NULL,
+            used_at         INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_egress_capabilities_exp
+            ON agent_egress_capabilities(expires_at);
 
         -- Per-call signature nonces: single-use replay protection for the
         -- DPoP-style call signature over body+method+path+ts+nonce.
@@ -431,6 +493,9 @@ pub fn init_schema(conn: &Connection) {
             to_created_at    INTEGER NOT NULL,
             btc_anchor_id    TEXT NOT NULL DEFAULT '',
             sol_anchor_id    TEXT NOT NULL DEFAULT '',
+            anchor_status    TEXT NOT NULL DEFAULT 'pending',
+            anchor_error     TEXT NOT NULL DEFAULT '',
+            leaf_version     INTEGER NOT NULL DEFAULT 1,
             created_at       INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_root ON agent_action_anchors(batch_root_hex);
@@ -540,6 +605,7 @@ pub fn init_schema(conn: &Connection) {
             merkle_root   TEXT NOT NULL,
             proof_b64     TEXT NOT NULL,
             vk_id         TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
             submitted_at  INTEGER NOT NULL,
             PRIMARY KEY (tenant_id, agent_id, metric_id, period_start)
         );
@@ -547,6 +613,33 @@ pub fn init_schema(conn: &Connection) {
             ON customer_stats(tenant_id, period_start, period_end);
         CREATE INDEX IF NOT EXISTS idx_customer_stats_metric_period
             ON customer_stats(metric_id, period_start, period_end);
+        -- Statement hashes for accepted stats proofs. Kept separate from
+        -- agent_action_receipts because there is no agent-signed action
+        -- envelope preimage for this synthetic record; mixing it into an
+        -- action anchor would make complete transparent proofs impossible.
+        CREATE TABLE IF NOT EXISTS stats_submission_receipts (
+            statement_hash TEXT PRIMARY KEY,
+            tenant_id      TEXT NOT NULL,
+            checkpoint_id  TEXT NOT NULL,
+            metric_id      TEXT NOT NULL,
+            submitted_at   INTEGER NOT NULL
+        );
+
+        -- Server-authoritative proof statements. Verification requests name a
+        -- checkpoint; they never supply the trusted root directly. Rows are
+        -- written only by the anchoring/checkpoint worker after finalization.
+        CREATE TABLE IF NOT EXISTS zk_proof_checkpoints (
+            checkpoint_id  TEXT PRIMARY KEY NOT NULL,
+            tenant_id      TEXT NOT NULL,
+            circuit        TEXT NOT NULL,
+            merkle_root    TEXT NOT NULL,
+            tree_size      INTEGER NOT NULL,
+            anchor_id      TEXT NOT NULL,
+            finalized_at   INTEGER NOT NULL,
+            UNIQUE (tenant_id, circuit, anchor_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_zk_proof_checkpoints_lookup
+            ON zk_proof_checkpoints(tenant_id, checkpoint_id, circuit);
 
         -- Sprint 8: operator-managed cohort definitions for DP-published
         -- cross-tenant benchmarks. Global (NOT tenant-scoped) — see
@@ -725,6 +818,10 @@ pub fn init_schema(conn: &Connection) {
         "ALTER TABLE cohort_definitions ADD COLUMN delta_cap_per_cycle REAL",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE customer_stats ADD COLUMN checkpoint_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
 
     // OpenTimestamps: per-anchor partial proof bytes (calendar attestations).
     // Promoted to full Bitcoin proofs by the background upgrade task once the
@@ -781,6 +878,18 @@ pub fn init_schema(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_action_receipts ADD COLUMN config_digest TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_anchors ADD COLUMN anchor_status TEXT NOT NULL DEFAULT 'pending'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_anchors ADD COLUMN anchor_error TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_anchors ADD COLUMN leaf_version INTEGER NOT NULL DEFAULT 1",
         [],
     );
 
@@ -855,6 +964,31 @@ pub fn init_schema(conn: &Connection) {
             &format!("ALTER TABLE {tbl} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"),
             [],
         );
+    }
+    // Compatibility for databases created between passwordless-auth v1 and
+    // the tenant-bound v2 protocol. New databases already have this column.
+    let _ = conn.execute(
+        "ALTER TABLE user_auth_challenges ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+        [],
+    );
+    // Existing single-tenant installations retain their clients in `default`;
+    // new client enrollment writes an explicit authenticated tenant binding.
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO client_tenant_bindings (client_name, tenant_id)
+         SELECT name, 'default' FROM clients",
+        [],
+    );
+
+    // Enforce key uniqueness at the database boundary as well as in the
+    // registration pre-check. This closes concurrent-register TOCTOU races.
+    // Empty legacy values are excluded; production registration rejects them.
+    for sql in [
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_active_public_key ON agents(tenant_id, public_key_hex) WHERE revoked = 0 AND public_key_hex != ''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_active_ring_key_image ON agents(tenant_id, ring_key_image_hex) WHERE revoked = 0 AND ring_key_image_hex != ''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_active_pop_key ON agents(tenant_id, pop_public_key_b64u) WHERE revoked = 0 AND pop_public_key_b64u IS NOT NULL AND pop_public_key_b64u != ''",
+    ] {
+        conn.execute(sql, [])
+            .expect("active agent key uniqueness migration failed; revoke duplicate active keys before startup");
     }
 
     // Composite indexes that make every tenant-scoped query hit a single

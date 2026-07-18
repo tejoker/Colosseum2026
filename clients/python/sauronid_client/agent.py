@@ -9,7 +9,9 @@ operators will use. It produces all five required headers:
   - x-sauron-call-sig
   - x-sauron-agent-config-digest
 
-and routes the request through the SauronID core.
+and routes the request through the SauronID core. Protocol v2 signs tenant,
+audience, path+query, content type, body hash, and config digest using an
+unambiguous length-prefixed encoding.
 """
 
 from __future__ import annotations
@@ -18,8 +20,9 @@ import base64
 import hashlib
 import json
 import secrets
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
-from typing import Any, List, Mapping, Optional, Sequence
+from typing import Any, Callable, List, Mapping, Optional, Sequence
 
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -50,8 +53,35 @@ def _make_pop_keypair() -> tuple[Ed25519PrivateKey, str]:
     return sk, _b64u(pk_bytes)
 
 
+def _pop_thumbprint(public_key_b64u: str) -> str:
+    """RFC 7638 thumbprint for an Ed25519 OKP JWK."""
+    canonical = json.dumps(
+        {"crv": "Ed25519", "kty": "OKP", "x": public_key_b64u},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return _b64u(hashlib.sha256(canonical).digest())
+
+
 def _ed25519_sign(sk: Ed25519PrivateKey, msg: bytes) -> str:
     return _b64u(sk.sign(msg))
+
+
+def _canonical_fields(domain: str, fields: Sequence[tuple[str, str]]) -> bytes:
+    out = bytearray()
+
+    def push(value: str) -> None:
+        encoded = value.encode("utf-8")
+        if len(encoded) > 0xFFFFFFFF:
+            raise ValueError("protocol field exceeds u32 length")
+        out.extend(len(encoded).to_bytes(4, "big"))
+        out.extend(encoded)
+
+    push(domain)
+    for name, value in fields:
+        push(name)
+        push(value)
+    return bytes(out)
 
 
 def _jwt_claim(token: str, claim: str) -> str:
@@ -86,6 +116,8 @@ class SignedAgent:
     # via the default keypair generation; None when the operator supplied only
     # the public key + key image (they sign action envelopes externally).
     ring_secret_hex: Optional[str] = field(default=None, repr=False)
+    tenant_id: str = "default"
+    audience: str = "sauron-core"
 
     # ─────────────────────────────────────────────────────────────────────
 
@@ -118,7 +150,12 @@ class SignedAgent:
             headers["content-type"] = "application/json"
 
         if not skip_sig:
-            sig_headers = self._sign_call_headers(method, path, body_bytes)
+            content_type = next(
+                (v for k, v in headers.items() if k.lower() == "content-type"), ""
+            )
+            sig_headers = self._sign_call_headers(
+                method, path, body_bytes, content_type=content_type
+            )
             headers.update(sig_headers)
 
         url = f"{self.client.base_url}{path}"
@@ -127,13 +164,31 @@ class SignedAgent:
         )
 
     def _sign_call_headers(
-        self, method: str, path: str, body_bytes: bytes
+        self,
+        method: str,
+        path: str,
+        body_bytes: bytes,
+        *,
+        content_type: str = "application/json",
     ) -> dict:
         ts = _now_ms()
         nonce = secrets.token_hex(16)
         body_hash_hex = hashlib.sha256(body_bytes).hexdigest()
-        signing_payload = f"{method.upper()}|{path}|{body_hash_hex}|{ts}|{nonce}".encode(
-            "utf-8"
+        signing_payload = _canonical_fields(
+            "sauron.call.v2",
+            [
+                ("version", "2"),
+                ("agent_id", self.agent_id),
+                ("tenant_id", self.tenant_id),
+                ("audience", self.audience),
+                ("method", method.upper()),
+                ("target_uri", path),
+                ("content_type", content_type.strip().lower()),
+                ("body_sha256", body_hash_hex),
+                ("config_digest", self.config_digest),
+                ("timestamp_ms", str(ts)),
+                ("nonce", nonce),
+            ],
         )
         sig_b64u = _ed25519_sign(self.private_key, signing_payload)
         return {
@@ -141,7 +196,12 @@ class SignedAgent:
             "x-sauron-call-ts": str(ts),
             "x-sauron-call-nonce": nonce,
             "x-sauron-call-sig": sig_b64u,
+            "x-sauron-call-audience": self.audience,
+            "x-sauron-protocol-version": "2",
             "x-sauron-agent-config-digest": self.config_digest,
+            # This exact header is consumed by core's tenant middleware. Using
+            # the older x-sauron-tenant spelling silently selected "default".
+            "x-sauron-tenant-id": self.tenant_id,
         }
 
     # ─────────────────────────────────────────────────────────────────────
@@ -233,7 +293,11 @@ class SignedAgent:
         # 1. Mint the A-JWT (agent token) — requires the user session.
         r = requests.post(
             f"{base}/agent/token",
-            headers={"content-type": "application/json", "x-sauron-session": user_session},
+            headers={
+                "content-type": "application/json",
+                "x-sauron-session": user_session,
+                "x-sauron-tenant-id": self.tenant_id,
+            },
             data=json.dumps({"agent_id": self.agent_id, "ttl_secs": ttl_secs}),
             timeout=timeout,
         )
@@ -245,7 +309,11 @@ class SignedAgent:
         # 2. PoP challenge + JWS (proves possession of the agent's per-call key).
         r = requests.post(
             f"{base}/agent/pop/challenge",
-            headers={"content-type": "application/json", "x-sauron-session": user_session},
+            headers={
+                "content-type": "application/json",
+                "x-sauron-session": user_session,
+                "x-sauron-tenant-id": self.tenant_id,
+            },
             data=json.dumps({"agent_id": self.agent_id}),
             timeout=timeout,
         )
@@ -344,12 +412,106 @@ class SignedAgent:
         if not r.ok:
             raise SauronIDError(r.status_code, r.text)
 
+    def egress_request(
+        self,
+        *,
+        user_session: str,
+        method: str,
+        url: str,
+        body: str = "",
+        headers: Optional[Mapping[str, str]] = None,
+        ttl_secs: int = 300,
+    ) -> Mapping[str, Any]:
+        """Execute one outbound HTTP request through the enforcing gateway.
+
+        The method obtains an A-JWT, ring-signs an action challenge over the
+        exact URL, obtains a body-bound capability, and consumes it once. A
+        failed network attempt spends the capability, preventing ambiguous
+        retries. URL query strings are intentionally refused by core.
+        """
+        if not self.ring_secret_hex:
+            raise ValueError("ring secret unavailable; sign egress authorization externally")
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("url must be absolute http(s)")
+        if parsed.query or parsed.fragment or parsed.username or parsed.password:
+            raise ValueError("url userinfo, query, and fragment are not supported")
+
+        token_response = requests.post(
+            f"{self.client.base_url}/agent/token",
+            headers={
+                "content-type": "application/json",
+                "x-sauron-session": user_session,
+                "x-sauron-tenant-id": self.tenant_id,
+            },
+            data=json.dumps(
+                {"agent_id": self.agent_id, "ttl_secs": ttl_secs},
+                separators=(",", ":"),
+            ),
+            timeout=self.client.timeout,
+        )
+        if not token_response.ok:
+            raise SauronIDError(token_response.status_code, token_response.text)
+        ajwt = token_response.json()["ajwt"]
+        ajwt_jti = _jwt_claim(ajwt, "jti")
+
+        challenge_body = {
+            "agent_id": self.agent_id,
+            "human_key_image": self.human_key_image,
+            "action": "egress",
+            "resource": url,
+            "merchant_id": parsed.hostname,
+            "amount_minor": 0,
+            "currency": "",
+            "ajwt_jti": ajwt_jti,
+            "ttl_secs": 120,
+        }
+        challenge_response = self.call(
+            "POST", "/agent/action/challenge", json_body=challenge_body
+        )
+        if not challenge_response.ok:
+            raise SauronIDError(challenge_response.status_code, challenge_response.text)
+        action_proof = self.sign_action_challenge(challenge_response.json())
+
+        body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        capability_body = {
+            "agent_id": self.agent_id,
+            "ajwt": ajwt,
+            "method": method.upper(),
+            "url": url,
+            "body_hash_hex": body_hash,
+            "agent_action": action_proof,
+        }
+        capability_response = self.call(
+            "POST", "/agent/egress/capability", json_body=capability_body
+        )
+        if not capability_response.ok:
+            raise SauronIDError(capability_response.status_code, capability_response.text)
+        capability = capability_response.json()["capability"]
+
+        proxy_body = {
+            "capability": capability,
+            "method": method.upper(),
+            "url": url,
+            "headers": dict(headers or {}),
+            "body": body,
+        }
+        proxy_response = self.call(
+            "POST", "/agent/egress/proxy", json_body=proxy_body
+        )
+        if not proxy_response.ok:
+            raise SauronIDError(proxy_response.status_code, proxy_response.text)
+        return proxy_response.json()
+
     # ─────────────────────────────────────────────────────────────────────
 
     def revoke(self, user_session: str) -> None:
         r = requests.delete(
             f"{self.client.base_url}/agent/{self.agent_id}",
-            headers={"x-sauron-session": user_session},
+            headers={
+                "x-sauron-session": user_session,
+                "x-sauron-tenant-id": self.tenant_id,
+            },
             timeout=self.client.timeout,
         )
         if not r.ok:
@@ -460,6 +622,57 @@ def _intent_json(
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
+AttestationProvider = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+
+def _registration_headers(client: SauronIDClient, user_session: str) -> dict[str, str]:
+    return {
+        "content-type": "application/json",
+        "x-sauron-session": user_session,
+        "x-sauron-tenant-id": client.tenant_id,
+    }
+
+
+def _registration_attestation(
+    client: SauronIDClient,
+    user_session: str,
+    pop_public_key_b64u: str,
+    provider: Optional[AttestationProvider],
+) -> dict[str, Any]:
+    """Obtain a one-use, PoP-bound challenge and ask hardware to attest it.
+
+    The provider should embed `nonce` and the exact `pop_public_key_b64u` in
+    the TPM/Nitro document and return the corresponding registration fields.
+    No challenge is minted for development registrations without a provider.
+    """
+    if provider is None:
+        return {}
+    response = requests.post(
+        f"{client.base_url}/agent/attestation/challenge",
+        headers=_registration_headers(client, user_session),
+        data=json.dumps(
+            {"pop_public_key_b64u": pop_public_key_b64u},
+            separators=(",", ":"),
+        ),
+        timeout=client.timeout,
+    )
+    if not response.ok:
+        raise SauronIDError(response.status_code, response.text)
+    challenge = response.json()
+    if challenge.get("pop_jkt") != _pop_thumbprint(pop_public_key_b64u):
+        raise RuntimeError("attestation challenge PoP thumbprint mismatch")
+    fields = dict(provider(challenge))
+    kind = fields.get("attestation_kind")
+    if not isinstance(kind, str) or not kind or kind == "none":
+        raise ValueError(
+            "attestation_provider must return a non-empty hardware attestation_kind"
+        )
+    # Challenge identity is server-controlled and cannot be substituted by the
+    # provider implementation.
+    fields["attestation_challenge_id"] = challenge["attestation_challenge_id"]
+    return fields
+
+
 def register_llm_agent(
     client: SauronIDClient,
     *,
@@ -476,6 +689,7 @@ def register_llm_agent(
     pop_jkt: Optional[str] = None,
     ttl_secs: int = 3600,
     extra_inputs: Optional[Mapping[str, Any]] = None,
+    attestation_provider: Optional[AttestationProvider] = None,
 ) -> SignedAgent:
     """Register an LLM agent. The model + system_prompt + tool list become
     the binding checksum; flipping any of them at runtime without rotating
@@ -496,7 +710,11 @@ def register_llm_agent(
     if egress_allowlist is not None:
         inputs["egress_allowlist"] = list(egress_allowlist)
 
+    attestation = _registration_attestation(
+        client, user_session, pop_b64u, attestation_provider
+    )
     body = {
+        **attestation,
         "human_key_image": user_key_image,
         "agent_type": "llm",
         "checksum_inputs": inputs,
@@ -504,17 +722,14 @@ def register_llm_agent(
         "intent_json": _intent_json(intent, egress_allowlist),
         "public_key_hex": pk_hex,
         "ring_key_image_hex": ring_ki,
-        "pop_jkt": pop_jkt or f"sauronid-py-{secrets.token_hex(8)}",
+        "pop_jkt": pop_jkt or _pop_thumbprint(pop_b64u),
         "pop_public_key_b64u": pop_b64u,
         "ttl_secs": ttl_secs,
     }
     resp = requests.post(
         f"{client.base_url}/agent/register",
-        headers={
-            "content-type": "application/json",
-            "x-sauron-session": user_session,
-        },
-        data=json.dumps(body),
+        headers=_registration_headers(client, user_session),
+        data=json.dumps(body, separators=(",", ":")),
         timeout=client.timeout,
     )
     if not resp.ok:
@@ -534,6 +749,7 @@ def register_llm_agent(
         intent_scope=intent,
         ring_secret_hex=ring_secret_hex,
         human_key_image=user_key_image,
+        tenant_id=client.tenant_id,
     )
 
 
@@ -552,6 +768,7 @@ def register_mcp_agent(
     pop_jkt: Optional[str] = None,
     ttl_secs: int = 3600,
     extra_inputs: Optional[Mapping[str, Any]] = None,
+    attestation_provider: Optional[AttestationProvider] = None,
 ) -> SignedAgent:
     """Register an MCP server-style agent."""
     sk, pop_b64u = _make_pop_keypair()
@@ -567,7 +784,11 @@ def register_mcp_agent(
         inputs.update(extra_inputs)
     if egress_allowlist is not None:
         inputs["egress_allowlist"] = list(egress_allowlist)
+    attestation = _registration_attestation(
+        client, user_session, pop_b64u, attestation_provider
+    )
     body = {
+        **attestation,
         "human_key_image": user_key_image,
         "agent_type": "mcp_server",
         "checksum_inputs": inputs,
@@ -575,17 +796,14 @@ def register_mcp_agent(
         "intent_json": _intent_json(intent, egress_allowlist),
         "public_key_hex": pk_hex,
         "ring_key_image_hex": ring_ki,
-        "pop_jkt": pop_jkt or f"sauronid-py-{secrets.token_hex(8)}",
+        "pop_jkt": pop_jkt or _pop_thumbprint(pop_b64u),
         "pop_public_key_b64u": pop_b64u,
         "ttl_secs": ttl_secs,
     }
     resp = requests.post(
         f"{client.base_url}/agent/register",
-        headers={
-            "content-type": "application/json",
-            "x-sauron-session": user_session,
-        },
-        data=json.dumps(body),
+        headers=_registration_headers(client, user_session),
+        data=json.dumps(body, separators=(",", ":")),
         timeout=client.timeout,
     )
     if not resp.ok:
@@ -601,6 +819,7 @@ def register_mcp_agent(
         intent_scope=intent,
         ring_secret_hex=ring_secret_hex,
         human_key_image=user_key_image,
+        tenant_id=client.tenant_id,
     )
 
 
@@ -617,6 +836,7 @@ def register_custom_agent(
     egress_allowlist: Optional[Sequence[Any]] = None,
     pop_jkt: Optional[str] = None,
     ttl_secs: int = 3600,
+    attestation_provider: Optional[AttestationProvider] = None,
 ) -> SignedAgent:
     """Register a custom-type agent. `inputs` is hashed verbatim — operator
     decides what goes in. Recommended fields per docs/threat-model.md.
@@ -629,7 +849,11 @@ def register_custom_agent(
     custom_inputs = dict(inputs)
     if egress_allowlist is not None:
         custom_inputs["egress_allowlist"] = list(egress_allowlist)
+    attestation = _registration_attestation(
+        client, user_session, pop_b64u, attestation_provider
+    )
     body = {
+        **attestation,
         "human_key_image": user_key_image,
         "agent_type": "custom",
         "checksum_inputs": custom_inputs,
@@ -637,17 +861,14 @@ def register_custom_agent(
         "intent_json": _intent_json(intent, egress_allowlist),
         "public_key_hex": pk_hex,
         "ring_key_image_hex": ring_ki,
-        "pop_jkt": pop_jkt or f"sauronid-py-{secrets.token_hex(8)}",
+        "pop_jkt": pop_jkt or _pop_thumbprint(pop_b64u),
         "pop_public_key_b64u": pop_b64u,
         "ttl_secs": ttl_secs,
     }
     resp = requests.post(
         f"{client.base_url}/agent/register",
-        headers={
-            "content-type": "application/json",
-            "x-sauron-session": user_session,
-        },
-        data=json.dumps(body),
+        headers=_registration_headers(client, user_session),
+        data=json.dumps(body, separators=(",", ":")),
         timeout=client.timeout,
     )
     if not resp.ok:
@@ -662,4 +883,5 @@ def register_custom_agent(
         intent_scope=intent,
         ring_secret_hex=ring_secret_hex,
         human_key_image=user_key_image,
+        tenant_id=client.tenant_id,
     )

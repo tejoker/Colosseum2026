@@ -75,7 +75,8 @@ async function main(): Promise<ScenarioResult> {
         period_end: period + 3600,
         merkle_root: "00".repeat(32),
         proof_b64: "e30=", // base64 of "{}"
-        vk_id: "stats_honest_computation.dev.vk@v0",
+        vk_id: "StatsHonestComputation.dev.vk@v1",
+        checkpoint_id: "zkc_nonexistent",
         public_inputs: ["0", "0", "0"],
     };
 

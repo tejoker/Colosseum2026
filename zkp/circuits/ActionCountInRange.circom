@@ -17,17 +17,13 @@ include "../node_modules/circomlib/circuits/bitify.circom";
  * F == V MUST be flagged b_k = 1. (Over-counting is impossible because Σ b_k
  * is the published count value and is bounded by ≤ limit.)
  *
- * Threat model: a malicious prover could omit a matching entry (under-count)
- * and supply a low Σ b_k to satisfy ≤ limit. To prevent this, callers pair
- * this with a global Merkle root attestation: production deployments wrap
- * this circuit inside an outer "cover every index in [iLo, iHi]" recursion.
- * For M1 (hackathon DEV verification keys), the basic count bound is what we
- * ship; the doc threat-model section is explicit.
+ * The shipped fixed-arity circuit covers every index in [iLo, iHi] because it
+ * enforces iHi=iLo+N-1 and verifies entry k at iLo+k. A larger range requires
+ * a new versioned circuit or a reviewed recursive construction.
  *
  * Public inputs:
  *   - root        : action-log Merkle root
- *   - F           : field offset selector (one-hot is passed privately;
- *                   F is the public scalar identifying which field is counted)
+ *   - F           : public numeric tuple offset selected inside the circuit
  *   - V           : value being counted
  *   - limit       : upper bound on the count
  *   - iLo, iHi    : range of entry indices considered (iHi = iLo + N - 1)
@@ -36,7 +32,6 @@ include "../node_modules/circomlib/circuits/bitify.circom";
  *   - entries[N][entryFields]      : candidate matching entries
  *   - pathElements[N][levels]      : Merkle siblings per entry
  *   - pathIndices[N][levels]       : left/right indicators per entry
- *   - fieldSelector[entryFields]   : one-hot selector for field F
  *   - matchFlag[N]                 : 0/1, 1 iff entry matches F==V
  *
  * Depth ≤ 20; N = 4 in `main`.
@@ -54,32 +49,22 @@ template ActionCountInRange(levels, entryFields, N) {
     signal input entries[N][entryFields];
     signal input pathElements[N][levels];
     signal input pathIndices[N][levels];
-    signal input fieldSelector[entryFields];
     signal input matchFlag[N];
 
     // Public output
     signal output valid;
 
-    // ─── 0. Selector validity ───
+    // ─── 0. Public numeric field index → circuit-derived selector ───
+    component fieldIndexEq[entryFields];
     signal selectorSum[entryFields + 1];
     selectorSum[0] <== 0;
     for (var f = 0; f < entryFields; f++) {
-        fieldSelector[f] * (1 - fieldSelector[f]) === 0;
-        selectorSum[f + 1] <== selectorSum[f] + fieldSelector[f];
+        fieldIndexEq[f] = IsEqual();
+        fieldIndexEq[f].in[0] <== F;
+        fieldIndexEq[f].in[1] <== f;
+        selectorSum[f + 1] <== selectorSum[f] + fieldIndexEq[f].out;
     }
     selectorSum[entryFields] === 1;
-
-    // F is the public commitment to which field is being counted. The circuit
-    // binds F to the prover's selector by hashing the selector into a Poseidon
-    // commitment and checking against F (so the prover cannot lie about F).
-    component selectorCommit = Poseidon(entryFields);
-    for (var f = 0; f < entryFields; f++) {
-        selectorCommit.inputs[f] <== fieldSelector[f];
-    }
-    component fCheck = IsEqual();
-    fCheck.in[0] <== selectorCommit.out;
-    fCheck.in[1] <== F;
-    fCheck.out === 1;
 
     // iHi = iLo + N - 1
     iHi === iLo + (N - 1);
@@ -100,7 +85,7 @@ template ActionCountInRange(levels, entryFields, N) {
         // Extract entry[F]
         partials[k][0] <== 0;
         for (var f = 0; f < entryFields; f++) {
-            partials[k][f + 1] <== partials[k][f] + fieldSelector[f] * entries[k][f];
+            partials[k][f + 1] <== partials[k][f] + fieldIndexEq[f].out * entries[k][f];
         }
         extracted[k] <== partials[k][entryFields];
 
@@ -155,6 +140,9 @@ template ActionCountInRange(levels, entryFields, N) {
     }
     signal total;
     total <== counts[N];
+
+    component limitBits = Num2Bits(32);
+    limitBits.in <== limit;
 
     component le = LessEqThan(32);
     le.in[0] <== total;

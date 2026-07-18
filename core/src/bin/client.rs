@@ -10,7 +10,12 @@ use rand::RngCore;
 ///   prove_zk <email> <password> <token_b> <site_name> [--min-age <age>] [--nationality <nat>]
 ///   add_tokens <site_name> <amount>
 ///   balance
-use sauron_core::{identity::Identity, identity::UserData, oprf, ring};
+use sauron_core::{
+    crypto_protocol::{partner_registration_payload, PartnerRegistrationInput},
+    identity::Identity,
+    identity::UserData,
+    oprf, ring,
+};
 use serde::{Deserialize, Serialize};
 use std::env;
 
@@ -94,12 +99,15 @@ struct RegisterRequest {
     key_image: Vec<u8>,
     profile: UserData,
     client_signature: ring::RingSignature,
+    commitment: Option<String>,
     blinded_token_a: String,
+    auth_public_key_b64u: String,
 }
 
 #[derive(Deserialize)]
 struct RegisterResponse {
-    signed_token_a: String,
+    status: String,
+    merkle_root: Option<String>,
 }
 
 async fn cmd_register(args: &[String]) {
@@ -111,16 +119,33 @@ async fn cmd_register(args: &[String]) {
     let (first_name, last_name) = (&args[2], &args[3]);
 
     let client = reqwest::Client::new();
+    let tenant_id = std::env::var("SAURON_TENANT_ID").unwrap_or_else(|_| "default".into());
     let identity = derive_identity(&client, email, password).await;
     let pk_bytes = identity.public.compress().as_bytes().to_vec();
     let ki_bytes = identity.key_image().compress().as_bytes().to_vec();
     let profile = UserData::new(first_name, last_name, email);
+    let auth_signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+    use base64::Engine as _;
+    let auth_public_key_b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(auth_signing_key.verifying_key().as_bytes());
 
     let mut random_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut random_bytes);
     let blinded_token_a = hex::encode(random_bytes);
     let hex_pk = hex::encode(&pk_bytes);
-    let msg = format!("{}:{}", hex_pk, blinded_token_a);
+    let hex_ki = hex::encode(&ki_bytes);
+    let msg = partner_registration_payload(&PartnerRegistrationInput {
+        tenant_id: &tenant_id,
+        public_key_hex: &hex_pk,
+        key_image_hex: &hex_ki,
+        first_name: &profile.first_name,
+        last_name: &profile.last_name,
+        email: &profile.email,
+        date_of_birth: &profile.date_of_birth,
+        nationality: &profile.nationality,
+        commitment: "",
+        auth_public_key_b64u: &auth_public_key_b64u,
+    });
 
     // Récupérer les sites FULL_KYC dynamiques depuis le serveur.
     let issuers = fetch_full_kyc_clients(&client).await;
@@ -140,18 +165,21 @@ async fn cmd_register(args: &[String]) {
             CompressedRistretto::from_slice(&arr).ok()?.decompress()
         })
         .collect();
-    let client_signature = ring::sign(msg.as_bytes(), &ring_keys, &issuer_identity, idx);
+    let client_signature = ring::sign(&msg, &ring_keys, &issuer_identity, idx);
 
     let req = RegisterRequest {
         public_key: pk_bytes,
         key_image: ki_bytes,
         profile,
         client_signature,
+        commitment: None,
         blinded_token_a,
+        auth_public_key_b64u,
     };
 
     let resp = client
         .post(format!("{}/register", SERVER))
+        .header("x-sauron-tenant-id", &tenant_id)
         .json(&req)
         .send()
         .await
@@ -159,9 +187,14 @@ async fn cmd_register(args: &[String]) {
 
     if resp.status().is_success() {
         let body: RegisterResponse = resp.json().await.unwrap();
-        println!("OK Registered!");
-        println!("TOKEN_A={}", body.signed_token_a);
-        println!("→ Use 'exchange <TOKEN_A>' to get Token B.");
+        println!("OK Registered: {}", body.status);
+        println!(
+            "AUTH_PRIVATE_KEY_B64U={}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(auth_signing_key.to_bytes())
+        );
+        if let Some(root) = body.merkle_root {
+            println!("MERKLE_ROOT={root}");
+        }
     } else {
         eprintln!(
             "FAIL Registration failed: {} — {}",

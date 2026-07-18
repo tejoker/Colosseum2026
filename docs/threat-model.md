@@ -69,22 +69,23 @@ To make the runtime "honest" about its digest, the PoP signing key must live in 
 
 | Kind | Hardware | Cloud-agnostic | Attestation format | Status this commit |
 |---|---|:-:|---|---|
-| `tpm2_quote` | TPM 2.0 chip (every motherboard since ~2016) | yes | `TPMS_ATTEST` + signed by AIK, AIK cert chained to TPM-vendor root | recognised, verifier roadmapped |
+| `tpm2_quote` | TPM 2.0 chip (every motherboard since ~2016) | yes | `TPMS_ATTEST` + signed by AIK, AIK cert chained to configured vendor root | verifier implemented; real-device release evidence required for hardware-tier claims |
 | `sgx_quote` | Intel Xeon | yes | DCAP quote + Intel root | recognised, verifier roadmapped |
 | `sev_snp` | AMD EPYC | yes | SEV-SNP report + AMD root | recognised, verifier roadmapped |
 | `arm_cca` | ARM CPUs | yes | CCA token + ARM root | recognised, verifier roadmapped |
-| `nitro_enclave` | AWS Nitro | AWS-only | COSE_Sign1 + AWS root | recognised, verifier roadmapped |
+| `nitro_enclave` | AWS Nitro | AWS-only | COSE_Sign1 + configured AWS root | verifier implemented; real-enclave release evidence required for hardware-tier claims |
 | `apple_secure` | Apple Silicon | macOS/iOS only | DeviceCheck assertion | recognised, verifier roadmapped |
 | `ed25519_self` | any (operator-controlled root key) | yes | Ed25519 signature over runtime measurement | **fully verified** in this commit |
 
 `ed25519_self` is the operator-rooted path: the operator signs measurements with their own key (HSM, YubiKey, air-gapped laptop). Cryptographically prevents tampering once signed. The operator must honestly compute the measurement — this is a weaker root of trust than a TPM/SGX manufacturer root, but stronger than no attestation at all.
 
-The vendor-rooted kinds (`tpm2_quote` etc.) are recognised but return `AttestationError::NotImplemented` until the per-vendor cert chain validators land. Each is a contained crypto-only addition — no AWS or other cloud SDK dependency. Roadmap:
+Unsupported vendor-rooted kinds return `AttestationError::NotImplemented`. TPM2
+and Nitro have parser, freshness/PoP binding, signature, certificate-chain and
+measurement checks in-tree; this is code coverage, not evidence from a real
+device. Remaining roadmap:
 
-- `Tpm2Quote`: parse `TPMS_ATTEST` with `nom`, verify EK→AIK chain via `webpki`, signature via `ring`. Vendor roots ship as static bytes (Infineon, STMicro, Microsoft, Intel, AMD, IBM).
 - `SgxQuote`: parse DCAP quote, verify against Intel SGX root cert.
 - `SevSnpReport`: parse SEV-SNP report, verify against AMD root.
-- `NitroEnclave`: COSE_Sign1 verification against AWS Nitro root cert. Equivalent to `aws-nitro-enclaves-cose` but standalone — no AWS API calls.
 
 **There is no AWS lock-in.** Operators on bare metal, on Azure, on GCP, or on any cloud can use `Tpm2Quote` (every modern x86 / ARM motherboard has one) once that verifier path lands. Operators wanting maximum control today use `Ed25519Self` with their own operator-controlled root key.
 
@@ -102,14 +103,16 @@ Previously the attestation verifiers were reachable only via the standalone `POS
 
 Coverage today: `ed25519_self` (full), `tpm2_quote` (M2 verifier), `nitro_enclave` (COSE path). `sgx` / `sev_snp` / `arm_cca` / `apple_secure` still return `NotImplemented` and so cannot pass the gate.
 
-## Gap 2 mitigation: agent egress logging
+## Agent egress enforcement
 
-`POST /agent/egress/log` records every outbound third-party API call the agent makes. The endpoint is itself per-call-sig-protected, so log entries are bound to the specific agent + signed by its PoP key + carry the matching config digest. Each row is included in the next agent-action anchor batch and committed to Bitcoin (OTS) and Solana (Memo) — making after-the-fact tampering require forging both chains.
-
-**Voluntary reporting today.** Operators must wire their agent runtime to call this endpoint before making any outbound request. Enforcement requires either:
-
-- **Network policy**: kubectl NetworkPolicy / iptables / firewall rule blocking outbound traffic except via the SauronID egress proxy.
-- **Forward proxy** (Phase 5): SauronID listens on an internal port as an HTTP CONNECT proxy. Agent's HTTP client routes through it. SauronID validates each call against `intent_json.egress_allowlist` and signs+forwards only allowed targets.
+Production disables voluntary egress logging. An exact signed action first
+authorizes a short-lived, one-use capability, then `/agent/egress/proxy` consumes
+it before forwarding. The proxy enforces tenant/agent/method/exact URL/body
+digest, SSRF-safe pinned DNS, structured host/method/path policy, explicit
+headers and disclosure modes, request/response byte caps, no redirects and
+server-side credential injection. `deploy/kubernetes/agent-network-isolation.yaml`
+denies direct agent egress so the proxy is the only application path. A cluster
+probe must still demonstrate that its CNI actually enforces the policy.
 
 The forward-proxy implementation is documented but not shipped this session. Operators wanting strict enforcement should either layer Cloudflare AI Gateway / Anthropic MCP in front of the agent (battle-tested) or wait for the next-session deliverable.
 
@@ -197,16 +200,16 @@ The STRIDE matrix below decomposes the system into five components and walks eac
 | **Denial of service** | Long-poll exhaustion | Dashboard uses bounded SSE; no unbounded polls | n/a |
 | **Elevation of privilege** | Read-only user runs a write action | Server-side scope check on the admin key/JWT; UI hides buttons but does not enforce | Always server-enforced |
 
-### ZK prover (`zkp/sdk`, circuits in `zkp/circuits/`)
+### Transparent proof path (`transparent-zk/`)
 
 | Category | Threat | Mitigation | Residual risk |
 |---|---|---|---|
-| **Spoofing** | Prover submits a proof under a different `vk_id` | Verifier checks `vk_id` matches the metric catalog (`core/src/zk_verifier.rs:44`, `core/src/aggregation/verify.rs`) | Redteam `proof-wrong-vk.ts` covers |
-| **Tampering** | Prover flips a public input | Public-input hash signed into the proof; Groth16 verify fails on mismatch | Redteam `proof-tampered-root.ts` |
+| **Spoofing** | Prover selects an attacker guest or proof format | Program ID resolves to a production-pinned image ID; only native RISC Zero `Composite`/`Succinct` STARK receipts are accepted | Reproducible image-ID review is a release obligation |
+| **Tampering** | Prover changes tenant, predicate, metric, value, period, root, size, or anchor | The guest journal binds the statement and the server requires an exact match to a tenant-scoped finalized checkpoint | A malicious source can still lie before data enters the protected log |
 | **Repudiation** | Prover claims they never produced a proof | All accepted proofs are stored with their submission timestamp and anchored in the next batch | n/a |
-| **Information disclosure** | Proof leaks private inputs | Groth16 is statistically zero-knowledge under the trusted setup assumption | If trusted setup is compromised, ZK property fails — see `docs/cryptographic-assumptions.md` §8 |
-| **Denial of service** | Heavy verifier load | Per-tenant verify rate limit; verify spawns external `snarkjs` with a timeout | Pentest: measure verify-CPU per malformed-proof shape |
-| **Elevation of privilege** | Forge a proof of an arbitrary statement | Knowledge soundness of Groth16 under honest setup | **Current dev ceremony makes this possible.** Production requires multi-party ceremony per `zkp/ceremony/README.md`. Loudly flagged in `docs/cryptographic-assumptions.md` §8. |
+| **Information disclosure** | Receipt leaks private witness data | Native STARK zero-knowledge under the pinned RISC Zero proof-system assumptions | Independent review must check guest outputs and dependency/version assumptions |
+| **Denial of service** | Heavy receipt parsing or verifier load | Strict receipt/journal size limits, bounded concurrent verifier slots, queue timeout, and blocking-worker capacity retention after timeout | Pentest malformed and worst-case valid receipts under production resources |
+| **Elevation of privilege** | Forge a computation statement | STARK soundness plus pinned guest image ID; fake, Groth16-compressed and unknown receipt variants fail closed | No proof system proves that real-world input was truthful |
 
 ### Anchor providers (Bitcoin OTS, Solana RPC)
 
@@ -228,13 +231,13 @@ Non-exhaustive list of hostile scenarios pentest should specifically rehearse. E
 |---|---|---|---|
 | **Policy bypass via tampered SDK** | Attacker patches the agentic SDK locally to skip the `bind()` wrapper or lie about classification / budget. | Server-side `POST /v1/policy/evaluate` re-evaluates with truthful data + authoritative spend ledger. SDK is advisory only. | `policy-bypass.ts`, `binding-*.ts` (5 scripts) |
 | **Server admin key leak** | `SAURON_ADMIN_KEY` ends up in a public git history / cloud snapshot / .env in a Docker image. | Multi-key support enables zero-downtime rotation (`core/src/admin.rs::build_admin_auth_config`); production startup rejects keys < 32 B. Procedure: `docs/key-rotation.md` §1. | n/a (key-management process, not a runtime attack) |
-| **Ceremony coordinator collusion** | The party running the ZK trusted setup keeps the toxic waste secretly. | Multi-party ceremony per `zkp/ceremony/README.md`. As long as ≥ 1 honest party deletes their share, soundness holds. Until that ceremony runs, dev vk is unsound — loudly flagged. | `proof-*.ts` (5 scripts, including `proof-wrong-vk.ts`) |
+| **Proof supply-chain substitution** | Operator publishes an image ID built from a different guest or dependency graph. | Publish source, lock files, toolchain versions and `transparent-zk/image-ids.json`; customers rebuild/pin the reviewed ID and verify locally. | Independent reproducible-build comparison remains release evidence |
 | **Anchor provider downtime** | Bitcoin calendars + Solana RPCs all return errors simultaneously. | Backlog tolerated; queued anchors drain on recovery. Bitcoin-only or Solana-only mode acceptable for short outages. Runbooks: `docs/disaster-recovery.md` §1-2. | n/a (infrastructure attack, not a runtime attack) |
 | **Solana RPC censorship** | RPC silently drops our memo writes. | Multi-RPC failover (`SAURON_SOLANA_RPC_FALLBACK_URLS`); Bitcoin-only fallback. We detect by comparing in-flight queue depth against expected drain rate. | n/a |
 | **Stale-policy replay window** | Server-side revoke happens; SDK cache still has the old policy until refresh interval. | Documented window. Future sprint: server-pushed revocation feed. | `binding-revoke-replay.ts` |
 | **Cross-tenant existence probe** | Attacker enumerates UUIDs hoping to learn which `(tenant, policy_id)` pairs exist. | `404 Not Found` returned uniformly for misses, no `403 Forbidden` that would leak existence. | `tenant-list-leak.ts`, `tenant-spend-leak.ts` |
 | **DP cohort de-anonymisation** | Attacker pulls cohort numbers across N snapshots hoping to average out the noise. | Per-period ε budget caps total privacy loss; k-anonymity suppresses small cohorts | `dp-cohort-deanonymize.ts` |
-| **Egress voluntary-log gap** | Attacker compromises agent host; emits an `agent_egress_log` entry claiming an action that never happened, or omits one that did. | Log entries are signed under PoP + bound to `agent_id` + anchored; pentest scenario documents the trust model. **Voluntary by design today** — forward-proxy enforcement deferred. | `egress-leak-claim.ts` |
+| **Gateway bypass** | Compromised agent opens a direct socket and omits the protected egress path. | In-band one-use capability proxy plus the deny-by-default Kubernetes NetworkPolicy reference; production egress policies require exact host/method/path/disclosure/byte contracts. | The deployment must prove its CNI/firewall actually blocks the negative direct-egress probe |
 | **TEE revocation cascade** | Agent registered with `Tpm2Quote` / `NitroEnclave`; agent then revoked; attacker reuses the attestation blob for a new agent registration. | Revoke cascades on the agent record; attestation hash + agent_id uniqueness check prevents reuse. | `tee-revoke.ts` |
 
 ## Out of scope: what SauronID does NOT protect against

@@ -12,7 +12,7 @@ include "../node_modules/circomlib/circuits/bitify.circom";
  * Merkle-committed set of action receipts. Each receipt is a 6-field tuple
  * Poseidon-hashed into a Merkle leaf; the prover supplies the leaf + path
  * and the circuit recomputes the root, the aggregation, and checks the
- * claimed value matches.
+ * claimed value matches. The typed receipt tuple has seven fields.
  *
  * Public inputs:
  *   - root          : action-log Merkle root (bound by the verifier).
@@ -42,8 +42,8 @@ include "../node_modules/circomlib/circuits/bitify.circom";
  * require a permutation argument over a sorted private witness, which is a
  * separate circuit (see docs/stats-submission.md "What we don't cover yet").
  *
- * Depth bound: N <= 64 receipts per proof. Larger periods batch into multiple
- * proofs (recursion is future work — track at zkp/ceremony/circuits-list.json).
+ * The shipped main has N=4 receipts per proof and requires authoritative
+ * tree_size=4. Larger arities require a new circuit version and proving key.
  */
 template StatsHonestComputation(levels, entryFields, N) {
     // Public inputs
@@ -53,6 +53,9 @@ template StatsHonestComputation(levels, entryFields, N) {
     signal input n_records;
     signal input period_start;
     signal input period_end;
+    signal input tree_size;
+    signal input tenant_hash;
+    signal input agent_hash;
 
     // Private inputs
     signal input entries[N][entryFields];
@@ -72,18 +75,58 @@ template StatsHonestComputation(levels, entryFields, N) {
     component mux[N][levels];
     component hashers[N][levels];
     component rootCheck[N];
+    component indexBits[N];
+    component latencyBits[N];
+    component amountBits[N];
+    component createdBits[N];
+    component createdAfterStart[N];
+    component createdBeforeEnd[N];
+    component agentScopeIsZero = IsZero();
+    agentScopeIsZero.in <== agent_hash;
+    component periodStartBits = Num2Bits(64);
+    component periodEndBits = Num2Bits(64);
+    periodStartBits.in <== period_start;
+    periodEndBits.in <== period_end;
 
     signal pathLevels[N][levels + 1];
 
     for (var k = 0; k < N; k++) {
+        // Typed receipt schema:
+        // [status, latency_ms, amount_milli, tool_id,
+        //  tenant_hash, agent_hash, created_at].
+        entries[k][0] * (1 - entries[k][0]) === 0;
+        latencyBits[k] = Num2Bits(64);
+        latencyBits[k].in <== entries[k][1];
+        amountBits[k] = Num2Bits(64);
+        amountBits[k].in <== entries[k][2];
+        createdBits[k] = Num2Bits(64);
+        createdBits[k].in <== entries[k][6];
+        entries[k][4] === tenant_hash;
+        (1 - agentScopeIsZero.out) * (entries[k][5] - agent_hash) === 0;
+
+        createdAfterStart[k] = GreaterEqThan(64);
+        createdAfterStart[k].in[0] <== entries[k][6];
+        createdAfterStart[k].in[1] <== period_start;
+        createdAfterStart[k].out === 1;
+        createdBeforeEnd[k] = LessEqThan(64);
+        createdBeforeEnd[k].in[0] <== entries[k][6];
+        createdBeforeEnd[k].in[1] <== period_end;
+        createdBeforeEnd[k].out === 1;
+
         leafHasher[k] = Poseidon(entryFields);
         for (var f = 0; f < entryFields; f++) {
             leafHasher[k].inputs[f] <== entries[k][f];
         }
         pathLevels[k][0] <== leafHasher[k].out;
 
+        // Complete-tree coverage for this fixed-arity circuit: every index
+        // 0..N-1 is proved exactly once. The verifier separately binds
+        // tree_size to its authoritative checkpoint.
+        indexBits[k] = Num2Bits(levels);
+        indexBits[k].in <== k;
+
         for (var i = 0; i < levels; i++) {
-            pathIndices[k][i] * (1 - pathIndices[k][i]) === 0;
+            pathIndices[k][i] === indexBits[k].out[i];
 
             mux[k][i] = MultiMux1(2);
             mux[k][i].c[0][0] <== pathLevels[k][i];
@@ -244,6 +287,10 @@ template StatsHonestComputation(levels, entryFields, N) {
     period_check.in[1] <== period_end;
     period_check.out === 1;
 
+    component claimedBits = Num2Bits(64);
+    claimedBits.in <== claimed_value;
+    tree_size === N;
+
     // n_records must equal N (the active arity). Keeps the public input
     // bound to the prover's actual contribution count.
     n_records === N;
@@ -252,6 +299,5 @@ template StatsHonestComputation(levels, entryFields, N) {
 }
 
 // Depth ≤ 20 levels (matches the action-log circuits family).
-// entryFields = 6, N = 4 — operators recompile for larger windows; the SDK
-// hard-caps at N = 64 (see agentic/src/stats/integrity-proof.ts).
-component main {public [root, metric_id, claimed_value, n_records, period_start, period_end]} = StatsHonestComputation(20, 6, 4);
+// entryFields = 7, N = 4 — larger windows require a versioned circuit/key.
+component main {public [root, metric_id, claimed_value, n_records, period_start, period_end, tree_size, tenant_hash, agent_hash]} = StatsHonestComputation(20, 7, 4);

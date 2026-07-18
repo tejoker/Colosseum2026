@@ -41,6 +41,7 @@ pub struct AgentActionProof {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionReceipt {
+    pub tenant_id: String,
     pub receipt_id: String,
     pub action_hash: String,
     pub agent_id: String,
@@ -61,6 +62,7 @@ pub struct AgentActionValidation {
 }
 
 pub struct ValidateAgentActionOptions<'a> {
+    pub tenant_id: &'a str,
     pub agent_id: &'a str,
     pub human_key_image: &'a str,
     pub ajwt_jti: &'a str,
@@ -160,26 +162,30 @@ pub fn expected_policy_hash(action: &str) -> String {
     hex::encode(h.finalize())
 }
 
-fn receipt_signing_payload(receipt: &ActionReceipt) -> String {
-    format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        receipt.receipt_id,
-        receipt.action_hash,
-        receipt.agent_id,
-        receipt.ring_key_image_hex,
-        receipt.policy_version,
-        receipt.ajwt_jti,
-        receipt.pop_jkt,
-        receipt.timestamp,
-        receipt.status,
+fn receipt_signing_payload(receipt: &ActionReceipt) -> Vec<u8> {
+    let timestamp = receipt.timestamp.to_string();
+    crate::crypto_protocol::canonical_fields(
+        "sauron.agent-action-receipt.v2",
+        &[
+            ("tenant_id", &receipt.tenant_id),
+            ("receipt_id", &receipt.receipt_id),
+            ("action_hash", &receipt.action_hash),
+            ("agent_id", &receipt.agent_id),
+            ("ring_key_image_hex", &receipt.ring_key_image_hex),
+            ("policy_version", &receipt.policy_version),
+            ("ajwt_jti", &receipt.ajwt_jti),
+            ("pop_jkt", &receipt.pop_jkt),
+            ("timestamp", &timestamp),
+            ("status", &receipt.status),
+        ],
     )
 }
 
 pub fn sign_receipt(jwt_secret: &[u8], receipt: &ActionReceipt) -> String {
-    let mut mac = HmacSha256::new_from_slice(jwt_secret).expect("HMAC key length");
-    mac.update(b"SAURON_AGENT_ACTION_RECEIPT|");
-    mac.update(receipt_signing_payload(receipt).as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    let key = crate::crypto_protocol::derive_subkey(jwt_secret, "action-receipt-hmac-v2");
+    let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC key length");
+    mac.update(&receipt_signing_payload(receipt));
+    format!("v2.{}", hex::encode(mac.finalize().into_bytes()))
 }
 
 pub fn verify_receipt_signature(jwt_secret: &[u8], receipt: &ActionReceipt) -> bool {
@@ -308,8 +314,8 @@ pub fn validate_agent_action(
         ) = db
             .query_row(
                 "SELECT human_key_image, revoked, expires_at, IFNULL(public_key_hex, ''), IFNULL(ring_key_image_hex, ''), IFNULL(pop_jkt, '')
-                 FROM agents WHERE agent_id = ?1",
-                params![opts.agent_id],
+                 FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
+                params![opts.agent_id, opts.tenant_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .map_err(|_| (StatusCode::NOT_FOUND, "Agent not found".to_string()))?;
@@ -393,6 +399,7 @@ pub fn validate_agent_action(
         }
 
         let mut receipt = ActionReceipt {
+            tenant_id: opts.tenant_id.to_string(),
             receipt_id: format!("ar_{}", crate::ajwt_support::random_hex_32()),
             action_hash: action_hash.clone(),
             agent_id: opts.agent_id.to_string(),
@@ -408,8 +415,8 @@ pub fn validate_agent_action(
         if ring_ok {
             db.execute(
                 "INSERT OR REPLACE INTO agent_action_receipts
-                 (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, tenant_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     receipt.receipt_id,
                     receipt.action_hash,
@@ -421,6 +428,7 @@ pub fn validate_agent_action(
                     receipt.status,
                     receipt.signature,
                     receipt.timestamp,
+                    opts.tenant_id,
                 ],
             )
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -609,6 +617,7 @@ pub fn validate_anon_action(
     // 5. Receipt with NO agent identity. ring_id + config_digest are also
     //    committed by action_hash (which is in the signed payload).
     let mut receipt = ActionReceipt {
+        tenant_id: env.tenant_id.clone(),
         receipt_id: format!("ar_{}", crate::ajwt_support::random_hex_32()),
         action_hash: action_hash.clone(),
         agent_id: String::new(),
@@ -871,6 +880,7 @@ mod tests {
     #[test]
     fn receipt_signature_detects_tampering() {
         let mut r = ActionReceipt {
+            tenant_id: "default".into(),
             receipt_id: "ar_1".into(),
             action_hash: "hash".into(),
             agent_id: "agt".into(),
@@ -885,6 +895,9 @@ mod tests {
         let secret = b"01234567890123456789012345678901";
         r.signature = sign_receipt(secret, &r);
         assert!(verify_receipt_signature(secret, &r));
+        r.tenant_id = "other-tenant".into();
+        assert!(!verify_receipt_signature(secret, &r));
+        r.tenant_id = "default".into();
         r.status = "changed".into();
         assert!(!verify_receipt_signature(secret, &r));
     }

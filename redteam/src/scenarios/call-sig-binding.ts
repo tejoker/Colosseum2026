@@ -1,5 +1,6 @@
 import { generateKeyPairSync, randomBytes, createHash, sign } from "crypto";
 import { CoreApi, randSuffix } from "../core-api";
+import { signCallV2 } from "../call-sig-v2";
 
 /**
  * Per-call signature (DPoP-style) end-to-end check against `/agent/payment/authorize`.
@@ -95,18 +96,16 @@ export async function scenarioCallSigBinding(
         });
 
     function signHeaders(body: string, ts?: number, nonce?: string) {
-        const t = ts ?? Date.now();
-        const n = nonce ?? randomBytes(16).toString("hex");
-        const bodyHash = createHash("sha256").update(body).digest("hex");
-        const payload = `POST|${path}|${bodyHash}|${t}|${n}`;
-        const sigBuf = sign(null, Buffer.from(payload, "utf8"), privateKey);
-        return {
-            "x-sauron-agent-id": agentId,
-            "x-sauron-call-ts": String(t),
-            "x-sauron-call-nonce": n,
-            "x-sauron-call-sig": sigBuf.toString("base64url"),
-            "x-sauron-agent-config-digest": configDigest,
-        };
+        return signCallV2({
+            agentId,
+            privateKey,
+            method: "POST",
+            targetUri: path,
+            body,
+            configDigest,
+            timestampMs: ts,
+            nonce,
+        });
     }
 
     async function callRaw(body: string, headers: Record<string, string>) {

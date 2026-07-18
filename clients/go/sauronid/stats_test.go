@@ -21,7 +21,8 @@ func validSubmission() StatsSubmission {
 		PeriodEnd:    2_000,
 		MerkleRoot:   "0xabc",
 		ProofB64:     "Zm9v",
-		VkID:         "StatsHonestComputation.dev.vk@v0",
+		VkID:         "StatsHonestComputation.dev.vk@v1",
+		CheckpointID: "zkc_test",
 		PublicInputs: []string{"42"},
 	}
 }
@@ -41,7 +42,7 @@ func TestSubmitStats_Happy(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(SubmitResponse{
-			Stored: true, LatencyMsVerify: 5, AnchoredActionHash: "0xfeed",
+			Stored: true, LatencyMsVerify: 5, StatementHash: "0xfeed",
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -65,7 +66,7 @@ func TestSubmitStats_Idempotent(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/stats/submit", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(SubmitResponse{
-			Stored: true, AnchoredActionHash: "0xidempotent",
+			Stored: true, StatementHash: "0xidempotent",
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -80,8 +81,8 @@ func TestSubmitStats_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r1.AnchoredActionHash != r2.AnchoredActionHash {
-		t.Fatalf("expected matching hashes: %s vs %s", r1.AnchoredActionHash, r2.AnchoredActionHash)
+	if r1.StatementHash != r2.StatementHash {
+		t.Fatalf("expected matching hashes: %s vs %s", r1.StatementHash, r2.StatementHash)
 	}
 }
 

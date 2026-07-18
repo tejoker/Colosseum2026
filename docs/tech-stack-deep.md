@@ -1,5 +1,14 @@
 # Technical Stack — Deep Reference
 
+> **Migration note (2026-07):** this long reference contains historical
+> Circom/Groth16, custom Paillier, OPRF, voluntary-egress and mandatory-hardware
+> design material. Those paths are development compatibility only and are
+> quarantined in production. The current security contract is
+> [`crypto-migration-boundary.md`](crypto-migration-boundary.md), the current
+> proof implementation is [`../transparent-zk/`](../transparent-zk/), and the
+> commercial gate is [`production-readiness.md`](production-readiness.md).
+> Treat any conflicting section below as historical until it is fully rewritten.
+
 This document is the full technical reference for the SauronID codebase. It describes every component at a level of detail sufficient to reimplement the system from scratch.
 
 Companion to [tech-stack-overview.md](tech-stack-overview.md), which is the shallow what-and-why version.
@@ -787,11 +796,17 @@ Every database access function takes `tenant_id: &str` as a non-default paramete
 
 ### 9.4 Admin endpoints
 
-`/admin/*` endpoints are gated by `SAURON_ADMIN_KEY`. The admin scope is global; admins can list across all tenants. A future tier will introduce tenant-scoped admin keys.
+`/admin/*` endpoints accept static operator keys or scoped admin JWTs. Data
+handlers are tenant-filtered by default; a JWT `tnt` allowlist pins an operator
+to named tenants. Only an `admin:super` principal or an explicit
+`SAURON_ADMIN_CROSS_TENANT=1` deployment can request cross-tenant views.
 
-### 9.5 Known gaps
+### 9.5 Residual boundary
 
-The redteam suite does not yet include cross-tenant attack scenarios. This is on the roadmap; until landed, multi-tenant deployments should be considered Beta.
+The red-team suite includes tenant-list, binding, proof, rate-limit, spend and
+anchor-extraction scenarios. Static admin keys remain deployment-global
+credentials even though their queries default to the selected tenant; expose
+tenant administration through tenant-locked JWTs, not by sharing a static key.
 
 See [multi-tenancy.md](multi-tenancy.md) for the full design.
 
@@ -813,7 +828,9 @@ See [multi-tenancy.md](multi-tenancy.md) for the full design.
 
 Noise is drawn from `rand::rngs::OsRng` (cryptographically secure OS entropy). The Laplace sampler uses the standard `sgn(U) * b * ln(1 - 2|U|)` transformation where `U ~ Uniform(-0.5, 0.5)`.
 
-**Caveat:** the floating-point Laplace mechanism has known precision issues that can leak bits via timing or rounding. The current implementation does not use the "snapping" mitigation; this is a known gap pending cryptographer review.
+**Guarantee boundary:** the floating-point inverse-CDF sampler is documented as
+approximately `(ε, δ≈2⁻⁵²)` rather than pure `(ε,0)` DP. Do not market a pure-DP
+guarantee; use a reviewed discrete/snapping mechanism if pure DP is required.
 
 ### 10.3 Composition
 
@@ -1054,7 +1071,9 @@ export async function prove(circuit: string, inputs: object): Promise<Proof> {
 
 ### 13.5 Verifier (Rust core)
 
-`core/src/zk_verifier.rs` loads the verification key from disk and verifies Groth16 proofs using `ark-groth16` (planned; currently disabled).
+`core/src/zk_verifier.rs` loads a pinned verification key and invokes
+`snarkjs groth16 verify` with proof-size and timeout limits. Groth16 defaults
+off in production; the transparent replacement is not yet implemented.
 
 ```rust
 pub fn verify_proof(

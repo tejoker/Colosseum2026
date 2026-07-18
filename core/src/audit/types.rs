@@ -69,7 +69,7 @@ pub enum SectionEvidence {
         value: f64,
         /// Number of records covered by the submission.
         n_records: u32,
-        /// Verifying-key identifier (e.g. `"StatsHonestComputation.dev.vk@v0"`).
+        /// Verifying-key identifier (e.g. `"StatsHonestComputation.dev.vk@v1"`).
         vk_id: String,
     },
     /// Aggregate policy-evaluation outcome from `security_audit_log`.
@@ -197,7 +197,7 @@ mod tests {
             metric_id: "success_rate".into(),
             value: 0.95,
             n_records: 100,
-            vk_id: "StatsHonestComputation.dev.vk@v0".into(),
+            vk_id: "StatsHonestComputation.dev.vk@v1".into(),
         };
         let s = serde_json::to_string(&e).unwrap();
         let back: SectionEvidence = serde_json::from_str(&s).unwrap();

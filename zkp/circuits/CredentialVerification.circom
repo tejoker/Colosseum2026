@@ -4,6 +4,7 @@ include "../node_modules/circomlib/circuits/poseidon.circom";
 include "../node_modules/circomlib/circuits/comparators.circom";
 include "../node_modules/circomlib/circuits/eddsaposeidon.circom";
 include "../node_modules/circomlib/circuits/mux1.circom";
+include "../node_modules/circomlib/circuits/bitify.circom";
 
 /**
  * PoseidonHasher2 — Hash two values with Poseidon.
@@ -121,6 +122,19 @@ template CredentialVerification(treeLevels) {
     ageDiff <== currentDate - dateOfBirth;
     signal ageThresholdScaled;
     ageThresholdScaled <== ageThreshold * 10000;
+
+    component dobBits = Num2Bits(32);
+    component expiryBits = Num2Bits(32);
+    component currentDateBits = Num2Bits(32);
+    component thresholdBits = Num2Bits(8);
+    component thresholdScaledBits = Num2Bits(32);
+    component ageDiffBits = Num2Bits(32);
+    dobBits.in <== dateOfBirth;
+    expiryBits.in <== expiryDate;
+    currentDateBits.in <== currentDate;
+    thresholdBits.in <== ageThreshold;
+    thresholdScaledBits.in <== ageThresholdScaled;
+    ageDiffBits.in <== ageDiff;
 
     component ageCheck = GreaterEqThan(32);
     ageCheck.in[0] <== ageDiff;

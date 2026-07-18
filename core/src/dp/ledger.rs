@@ -549,11 +549,16 @@ mod tests {
         let ledger = DpBudgetLedger::new(db);
         ledger.ensure_cycle("coh_a", "m", 0, 1.0, 1e-5).unwrap();
         // First charge to the cap succeeds.
-        ledger.record_publication("coh_a", "m", 0, 1.0, 1e-7, 4.0).unwrap();
+        ledger
+            .record_publication("coh_a", "m", 0, 1.0, 1e-7, 4.0)
+            .unwrap();
         // A second charge (simulating a racing request that also passed
         // can_publish against zero spend) must be rejected — not overspend.
         let second = ledger.record_publication("coh_a", "m", 0, 0.5, 1e-7, 4.0);
-        assert!(second.is_err(), "over-cap charge must be rejected atomically");
+        assert!(
+            second.is_err(),
+            "over-cap charge must be rejected atomically"
+        );
         // Cap is fully consumed — any further request is denied (no overspend).
         match ledger.can_publish("coh_a", "m", 0, 0.0001, 0.0).unwrap() {
             BudgetDecision::Denied { .. } => {}

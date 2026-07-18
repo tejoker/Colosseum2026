@@ -1,6 +1,6 @@
 [project]
 name = "sauronid-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "SauronID Python client + LangChain/OpenAI/Anthropic adapters for AI-agent binding."
 readme = "sauronid_client/README.md"
 requires-python = ">=3.9"

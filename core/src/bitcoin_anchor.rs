@@ -350,6 +350,11 @@ pub fn spawn_ots_upgrader(db: Arc<DbHandle>) {
                                      WHERE anchor_id = ?2",
                                     params![b.to_vec(), anchor_id],
                                 );
+                                let _ = conn.execute(
+                                    "UPDATE zk_proof_checkpoints SET finalized_at = ?1
+                                     WHERE anchor_id = ?2 AND finalized_at = 0",
+                                    params![now_secs(), anchor_id],
+                                );
                                 tracing::info!(
                                     target: "sauron::bitcoin_anchor",
                                     anchor_id = %anchor_id,

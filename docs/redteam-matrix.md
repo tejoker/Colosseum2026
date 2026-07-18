@@ -15,7 +15,7 @@ The existing `docs/empirical-comparison.md` keeps the A1-A16 invariant matrix vs
 | P2 | proof-forgery | Submit proof under unknown `vk_id`. | Verifier rejects (400 / 404). | dynamic — `proof-wrong-vk.ts` |
 | P3 | proof-forgery | Flip a byte in `merkle_root`. | Verifier rejects (status != 200). | dynamic — `proof-tampered-root.ts` |
 | P4 | proof-forgery | Tenant A submits proof; tenant B's cohort row must be untouched. | B's row count unchanged. | dynamic — `proof-cross-tenant.ts` |
-| P5 | proof-forgery | Period_start 6 months ago. | Server accepts today (known gap, documented) OR rejects (fix landed). | dynamic — `proof-stale-period.ts` |
+| P5 | proof-forgery | Period_start 6 months ago. | Server rejects outside the configured freshness/duration window. | dynamic — `proof-stale-period.ts` |
 | R1 | replay | Replay A-JWT JTI. | Second call rejected (UNIQUE `ajwt_used_jtis`). | source-review — full path in `redteam/src/scenarios/jti-replay.ts` (existing); S12 anchor in `replay-ajwt-jti.ts` |
 | R2 | replay | Replay per-call nonce. | UNIQUE`(agent_id, nonce)` on `agent_call_nonces` rejects. | source-review — full path in `call-sig-binding.ts` (existing); S12 anchor in `replay-call-nonce.ts` |
 | R3 | replay | Concurrent burst of `/kyc/retrieve` with same consent_token. | 1 winner, rest 409. | dynamic (when `SAURON_TEST_CONSENT_TOKEN` set) — `replay-consent-token.ts` |

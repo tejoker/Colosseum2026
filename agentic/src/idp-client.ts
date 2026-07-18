@@ -3,8 +3,13 @@
  * for agent token acquisition, delegation, and revocation.
  */
 
-import { AgentConfig, computeChecksum } from "./checksum";
+import {
+    AgentConfig,
+    computeLlmRegistrationChecksum,
+    llmChecksumInputs,
+} from "./checksum";
 import { PopKeyPair, generatePopKeyPair, signPopChallenge } from "./pop-keys";
+import { signCall } from "./call-sig";
 import {
     AgentIntent,
     AJWTPayload,
@@ -58,6 +63,8 @@ export interface IdPClientConfig {
     humanSession?: string;
     /** Human `key_image_hex` (must match session when session is used). */
     humanKeyImage: string;
+    /** Tenant selected by core's request middleware and bound into signatures. */
+    tenantId?: string;
     /** Agent behavioral config (checksum source). */
     agentConfig: AgentConfig;
     /**
@@ -79,12 +86,43 @@ export interface IdPClientConfig {
     workflowId?: string;
     /** JSON string for `delegation_chain` claim (core mirrors into A-JWT). */
     delegationChainJson?: string;
+    /**
+     * Hardware attester invoked after core issues a one-time, PoP-bound nonce.
+     * Optional hardware-assurance tier. Core requires this only when the
+     * operator explicitly enables hardware attestation; policy containment does
+     * not trust the agent host. The callback returns /agent/register evidence.
+     */
+    attestationProvider?: (
+        challenge: AgentAttestationChallenge,
+        popKeyPair: PopKeyPair
+    ) => Promise<AgentAttestationFields> | AgentAttestationFields;
     /** Return the Sauron core RingSignature JSON for a canonical action envelope. */
     agentActionSigner?: (
         canonical: string,
         envelope: AgentActionEnvelope,
         challenge: AgentActionChallenge
     ) => Promise<unknown> | unknown;
+}
+
+export interface AgentAttestationChallenge {
+    attestation_challenge_id: string;
+    nonce: string;
+    pop_jkt: string;
+    expires_at: number;
+}
+
+export interface AgentAttestationFields {
+    attestation_kind: string;
+    attestation_blob?: string;
+    expected_measurement_hex?: string;
+    attestation_pubkey_b64u?: string;
+    tpm2_quote_b64?: string;
+    tpm2_attest_b64?: string;
+    tpm2_signature_b64?: string;
+    tpm2_aik_cert_pem?: string;
+    tpm2_ek_cert_chain_pem?: string;
+    tpm2_pcr_set?: string;
+    tpm2_attestation_pubkey_b64u?: string;
 }
 
 export interface AgentActionEnvelope {
@@ -142,7 +180,7 @@ export class AgentShimClient {
         assertRistrettoPublicKeyHex("publicKeyHex", config.publicKeyHex);
         assertRistrettoPublicKeyHex("ringKeyImageHex", config.ringKeyImageHex);
         this.config = config;
-        this.checksum = computeChecksum(config.agentConfig);
+        this.checksum = computeLlmRegistrationChecksum(config.agentConfig);
     }
 
     /**
@@ -166,12 +204,57 @@ export class AgentShimClient {
         }
     }
 
+    private sessionHeaders(): Record<string, string> {
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "x-sauron-tenant-id": this.config.tenantId ?? "default",
+        };
+        if (this.config.humanSession) {
+            headers["x-sauron-session"] = this.config.humanSession;
+        }
+        return headers;
+    }
+
+    private async attestationFields(popKeyPair: PopKeyPair): Promise<Record<string, unknown>> {
+        if (!this.config.attestationProvider) return {};
+        const popPublicKey = popKeyPair.publicJwk.x;
+        if (typeof popPublicKey !== "string" || popPublicKey.length === 0) {
+            throw new Error("PoP public JWK has no x coordinate");
+        }
+        const response = await this.fetchWithTimeout(
+            `${this.config.idpUrl}/agent/attestation/challenge`,
+            {
+                method: "POST",
+                headers: this.sessionHeaders(),
+                body: JSON.stringify({ pop_public_key_b64u: popPublicKey }),
+            }
+        );
+        if (!response.ok) {
+            throw new Error(
+                `Attestation challenge failed (${response.status}): ${await response.text()}`
+            );
+        }
+        const challenge = (await response.json()) as AgentAttestationChallenge;
+        if (challenge.pop_jkt !== popKeyPair.thumbprint) {
+            throw new Error("Attestation challenge PoP thumbprint mismatch");
+        }
+        const fields = await this.config.attestationProvider(challenge, popKeyPair);
+        if (!fields.attestation_kind || fields.attestation_kind === "none") {
+            throw new Error("attestationProvider must return a non-empty hardware attestation_kind");
+        }
+        return {
+            ...fields,
+            // Never let a provider substitute a challenge minted for another key.
+            attestation_challenge_id: challenge.attestation_challenge_id,
+        };
+    }
+
     async initialize(): Promise<{
         checksum: string;
         popThumbprint: string;
     }> {
         this.popKeyPair = await generatePopKeyPair();
-        this.checksum = computeChecksum(this.config.agentConfig);
+        this.checksum = computeLlmRegistrationChecksum(this.config.agentConfig);
         this.initialized = true;
 
         return {
@@ -186,7 +269,7 @@ export class AgentShimClient {
     async requestToken(intent: AgentIntent, ttlSeconds: number = 3600): Promise<string> {
         this.ensureInitialized();
 
-        const currentChecksum = computeChecksum(this.config.agentConfig);
+        const currentChecksum = computeLlmRegistrationChecksum(this.config.agentConfig);
         if (currentChecksum !== this.checksum) {
             throw new Error(
                 `Agent integrity violation! Checksum changed: ${this.checksum} → ${currentChecksum}. ` +
@@ -194,14 +277,15 @@ export class AgentShimClient {
             );
         }
 
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (this.config.humanSession) {
-            headers["x-sauron-session"] = this.config.humanSession;
-        }
+        const headers = this.sessionHeaders();
+        const attestation = await this.attestationFields(this.popKeyPair as PopKeyPair);
 
         const registerBody: Record<string, unknown> = {
+            ...attestation,
             human_key_image: this.config.humanKeyImage,
-            agent_checksum: this.checksum,
+            agent_type: "llm",
+            checksum_inputs: llmChecksumInputs(this.config.agentConfig),
+            agent_checksum: "",
             intent_json: JSON.stringify(intent),
             public_key_hex: this.config.publicKeyHex,
             ring_key_image_hex: this.config.ringKeyImageHex,
@@ -238,13 +322,19 @@ export class AgentShimClient {
         }
         try {
             const raw = parseJwtPayloadJson(data.ajwt);
+            if (raw.agent_checksum !== currentChecksum) {
+                throw new Error("core returned an A-JWT with an unexpected agent checksum");
+            }
+            this.checksum = currentChecksum;
             const merged: AJWTPayload = {
                 ...(raw as unknown as AJWTPayload),
                 intent,
             };
             this.tokenPayload = merged;
-        } catch {
-            /* ignore parse errors */
+        } catch (error) {
+            this.currentToken = null;
+            this.lastAgentId = null;
+            throw error;
         }
 
         return data.ajwt;
@@ -275,7 +365,7 @@ export class AgentShimClient {
         const parentIntent = coerceIntent(parentRaw.intent);
         assertNarrowedDelegation(parentIntent, scope);
 
-        const childChecksum = computeChecksum(childConfig);
+        const childChecksum = computeLlmRegistrationChecksum(childConfig);
         const childPopKeyPair = await generatePopKeyPair();
 
         const intent: AgentIntent = {
@@ -283,15 +373,16 @@ export class AgentShimClient {
             constraints: { delegated_from: this.checksum, scope },
         };
 
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (this.config.humanSession) {
-            headers["x-sauron-session"] = this.config.humanSession;
-        }
+        const headers = this.sessionHeaders();
+        const attestation = await this.attestationFields(childPopKeyPair);
 
         const parentId = this.config.parentAgentId ?? this.lastAgentId;
         const delegateBody: Record<string, unknown> = {
+            ...attestation,
             human_key_image: this.config.humanKeyImage,
-            agent_checksum: childChecksum,
+            agent_type: "llm",
+            checksum_inputs: llmChecksumInputs(childConfig),
+            agent_checksum: "",
             intent_json: JSON.stringify(intent),
             public_key_hex: opts.childPublicKeyHex,
             ring_key_image_hex: opts.childRingKeyImageHex,
@@ -313,6 +404,10 @@ export class AgentShimClient {
             throw new Error(`Delegation failed: ${await response.text()}`);
         }
         const data = (await response.json()) as { ajwt: string; agent_id?: string };
+        const claims = parseJwtPayloadJson(data.ajwt);
+        if (claims.agent_checksum !== childChecksum) {
+            throw new Error("core returned a delegated A-JWT with an unexpected agent checksum");
+        }
 
         return { token: data.ajwt, childChecksum, childPopKeyPair };
     }
@@ -326,20 +421,31 @@ export class AgentShimClient {
             throw new Error("agentActionSigner is required to build a cryptographic leash proof.");
         }
 
+        const body = JSON.stringify({
+            agent_id: this.lastAgentId,
+            human_key_image: this.config.humanKeyImage,
+            action: input.action,
+            resource: input.resource ?? "",
+            merchant_id: input.merchantId ?? "",
+            amount_minor: input.amountMinor ?? 0,
+            currency: input.currency ?? "",
+            ajwt_jti: input.ajwtJti ?? this.tokenPayload.jti,
+            ttl_secs: input.ttlSeconds ?? 120,
+        });
+        const signedHeaders = signCall({
+            agentId: this.lastAgentId,
+            method: "POST",
+            path: "/agent/action/challenge",
+            body,
+            privateKey: (this.popKeyPair as PopKeyPair).privateKey,
+            agentConfigDigest: this.checksum,
+            tenantId: this.config.tenantId ?? "default",
+            contentType: "application/json",
+        });
         const response = await this.fetchWithTimeout(`${this.config.idpUrl}/agent/action/challenge`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                agent_id: this.lastAgentId,
-                human_key_image: this.config.humanKeyImage,
-                action: input.action,
-                resource: input.resource ?? "",
-                merchant_id: input.merchantId ?? "",
-                amount_minor: input.amountMinor ?? 0,
-                currency: input.currency ?? "",
-                ajwt_jti: input.ajwtJti ?? this.tokenPayload.jti,
-                ttl_secs: input.ttlSeconds ?? 120,
-            }),
+            headers: { "Content-Type": "application/json", ...signedHeaders },
+            body,
         });
 
         if (!response.ok) {
@@ -359,7 +465,7 @@ export class AgentShimClient {
     }
 
     verifyIntegrity(): { intact: boolean; currentChecksum: string; expectedChecksum: string } {
-        const currentChecksum = computeChecksum(this.config.agentConfig);
+        const currentChecksum = computeLlmRegistrationChecksum(this.config.agentConfig);
         return {
             intact: currentChecksum === this.checksum,
             currentChecksum,

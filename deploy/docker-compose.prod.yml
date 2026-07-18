@@ -18,6 +18,9 @@ services:
       - SAURON_JWT_SECRET=${SAURON_JWT_SECRET:?SAURON_JWT_SECRET is required}
       - SAURON_OPRF_SEED=${SAURON_OPRF_SEED:?SAURON_OPRF_SEED is required}
       - SAURON_AUDIT_HMAC_KEY=${SAURON_AUDIT_HMAC_KEY:?SAURON_AUDIT_HMAC_KEY is required}
+      # Real external timestamping; the mock provider makes production health fail.
+      - SAURON_BITCOIN_ANCHOR_PROVIDER=${SAURON_BITCOIN_ANCHOR_PROVIDER:-opentimestamps}
+      - SAURON_OTS_CALENDARS=${SAURON_OTS_CALENDARS:-https://alice.btc.calendar.opentimestamps.org,https://bob.btc.calendar.opentimestamps.org}
       - SAURON_ISSUER_URLS=${SAURON_ISSUER_URLS:-http://zkp-issuer:4000}
       - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:?SAURON_ISSUER_SHARED_SECRET is required}
       # Sprint 1 — advisory → enforce flip. ENV=production already
@@ -42,6 +45,26 @@ services:
       - SAURON_POLICY_ENFORCEMENT_MODE=${SAURON_POLICY_ENFORCEMENT_MODE:-enforce}
       - SAURON_POLICY_REQUIRE_BINDING=${SAURON_POLICY_REQUIRE_BINDING:-1}
       - SAURON_EGRESS_GATEWAY=${SAURON_EGRESS_GATEWAY:-1}
+      # Mandatory global damage ceiling even if a tenant policy is accidentally broad.
+      - SAURON_MAX_ACTION_USD=${SAURON_MAX_ACTION_USD:?SAURON_MAX_ACTION_USD is required}
+      # Agents are treated as hostile; hardware evidence is optional and is not
+      # a root of policy enforcement. Set both flags to 1 plus a golden list only
+      # when selling a separately validated TPM/Nitro assurance tier.
+      - SAURON_REQUIRE_HARDWARE_ATTESTATION=${SAURON_REQUIRE_HARDWARE_ATTESTATION:-0}
+      - SAURON_REQUIRE_PREREGISTERED_MEASUREMENT=${SAURON_REQUIRE_PREREGISTERED_MEASUREMENT:-0}
+      - SAURON_ATTESTATION_GOLDEN_MEASUREMENTS=${SAURON_ATTESTATION_GOLDEN_MEASUREMENTS:-}
+      # Pinned reviewed guest programs for native, ceremony-free STARK receipts.
+      - SAURON_TRANSPARENT_IMAGE_IDS_JSON=${SAURON_TRANSPARENT_IMAGE_IDS_JSON:?pinned transparent guest image IDs are required}
+      - SAURON_ENFORCE_STATS_FRESHNESS=${SAURON_ENFORCE_STATS_FRESHNESS:-1}
+      # Unreviewed/legacy protocol surfaces remain fail-closed.
+      - SAURON_ENABLE_LEGACY_OPRF=0
+      - SAURON_ENABLE_LEGACY_OPRF_AUTH=0
+      - SAURON_ENABLE_UNAUDITED_PAILLIER=0
+      - SAURON_ENABLE_VOLUNTARY_EGRESS_LOG=0
+      - SAURON_ENABLE_LEGACY_TOKEN_MAC=0
+      - SAURON_ENABLE_GROTH16=0
+      - SAURON_ENABLE_KYC_GROTH16=0
+      - SAURON_ANON_RINGS=0
     restart: unless-stopped
 
   dashboard:

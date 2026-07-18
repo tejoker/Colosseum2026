@@ -1,5 +1,5 @@
 /**
- * Sprint 7 — weekly stats auto-submission scheduler.
+ * Legacy Circom/Groth16 weekly stats auto-submission scheduler.
  *
  * Long-running customers wire `createWeeklyScheduler` once at startup. Each
  * tick (default 7 days):
@@ -15,6 +15,9 @@
  *
  * `runOnce()` is the imperative entry point used by tests and one-shot
  * `submitWeeklyStats(opts)`. `start()` / `stop()` wraps it on a timer.
+ *
+ * @deprecated Production rejects this endpoint. Use `submitTransparentStats`
+ * with a receipt from the version-pinned `transparent-zk` prover.
  */
 
 import {
@@ -39,6 +42,8 @@ import {
 
 export interface MerkleBundle {
     root: string;
+    /** Finalized server checkpoint that binds root + tree size + anchor. */
+    checkpointId: string;
     /** 1:1 with `receipts` — pathElements + pathIndices per row. */
     proofs: MerkleProof[];
 }
@@ -77,7 +82,7 @@ export interface WeeklyStatsSchedulerOptions {
 export interface SubmitResponse {
     stored: boolean;
     latency_ms_verify: number;
-    anchored_action_hash: string;
+    statement_hash: string;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -164,6 +169,11 @@ export class WeeklyStatsScheduler {
                     receipts,
                     bundle.proofs,
                     bundle.root,
+                    {
+                        tenantId: this.opts.tenantId ?? "default",
+                        agentId: this.opts.agentId,
+                        checkpointId: bundle.checkpointId,
+                    },
                 );
                 const resp = await this.submitToCore(m, proof);
                 outcome[id] = "submitted";
@@ -201,7 +211,8 @@ export class WeeklyStatsScheduler {
             period_end: metric.period.end,
             merkle_root: proof.root,
             proof_b64: Buffer.from(JSON.stringify(proof.proof)).toString("base64"),
-            vk_id: "StatsHonestComputation.dev.vk@v0",
+            vk_id: "StatsHonestComputation.dev.vk@v1",
+            checkpoint_id: proof.checkpointId,
             public_inputs: proof.public_inputs,
         };
         const res = await fetchImpl(url, {

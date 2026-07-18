@@ -19,7 +19,7 @@ use rand::RngCore;
 
 use super::DpError;
 
-/// `(ε, 0)`-DP additive-noise mechanism for numeric queries.
+/// Floating-point `(ε, δ≈2⁻⁵²)` additive-noise mechanism for numeric queries.
 ///
 /// Calibrated to `L1` sensitivity. `ε` is the privacy budget.
 #[derive(Debug, Clone, Copy)]

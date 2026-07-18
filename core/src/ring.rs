@@ -154,7 +154,10 @@ mod tests {
             responses: vec![],
             key_image: RistrettoPoint::identity(),
         };
-        assert!(!verify(b"anything", &[], &forged), "empty ring must never verify");
+        assert!(
+            !verify(b"anything", &[], &forged),
+            "empty ring must never verify"
+        );
         // Also via the group wrapper (mirrors an empty client_group at /register).
         let empty = AdultGroup::new();
         assert!(!empty.verify_proof(b"anything", &forged));

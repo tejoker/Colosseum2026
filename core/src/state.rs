@@ -51,6 +51,9 @@ pub fn verify_token(secret: &[u8], domain: &str, token: &str) -> bool {
     if expected_hmac.as_bytes().ct_eq(token.as_bytes()).into() {
         return true;
     }
+    if !crate::runtime_mode::require_or_default("SAURON_ENABLE_LEGACY_TOKEN_MAC", true, false) {
+        return false;
+    }
     let expected_legacy = sign_token_legacy_sha256(secret, domain, parts[0]);
     expected_legacy.as_bytes().ct_eq(parts[1].as_bytes()).into()
 }

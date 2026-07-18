@@ -33,15 +33,15 @@ pub struct CreateReportRequest {
 }
 
 /// Response envelope for `POST /v1/audit/reports` — the freshly-built
-/// report plus its HMAC signature.
+/// report plus its internal integrity MAC.
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateReportResponse {
     /// The full report (also accessible via
     /// `GET /v1/audit/reports/:id`).
     pub report: AuditReport,
-    /// Hex-encoded HMAC-SHA256 signature over the report's canonical
-    /// form.
+    /// Hex-encoded, domain-separated HMAC-SHA256 integrity tag over the
+    /// report's canonical form. This is not a public signature.
     pub signature: String,
 }
 
@@ -74,9 +74,8 @@ pub async fn create_report_handler(
         let st = state
             .read()
             .map_err(|_| AppError::Internal("state lock".into()))?;
-        // HMAC over the report uses the same secret as the
-        // device-token signer. In production an operator would swap
-        // this for an Ed25519 key surfaced through their KMS.
+        // sign_report derives a dedicated HKDF subkey, so device tokens and
+        // report MACs never use the same effective key.
         (st.db.clone(), st.token_secret.clone())
     };
 

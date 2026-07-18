@@ -131,15 +131,11 @@ pub fn global_max_action_usd() -> Option<f64> {
 /// Whether every protected agent MUST have a valid, loadable bound policy.
 /// When `SAURON_POLICY_REQUIRE_BINDING` is truthy AND enforcement mode is
 /// `Enforce`, an action from an agent with no binding is denied (rather than
-/// allowed through the legacy no-op path). Off by default so deployments that
-/// intentionally leave some agents unmanaged keep working; commercial
-/// enforcement deployments turn it on. Independent of `PolicyUnavailable`,
-/// which always fails closed in `Enforce` mode regardless of this flag.
+/// allowed through the legacy no-op path). It defaults on in production and
+/// off in development. Independent of `PolicyUnavailable`, which always fails
+/// closed in `Enforce` mode regardless of this flag.
 pub fn policy_require_binding() -> bool {
-    std::env::var("SAURON_POLICY_REQUIRE_BINDING")
-        .ok()
-        .and_then(|v| parse_truthy(&v))
-        .unwrap_or(false)
+    require_or_default("SAURON_POLICY_REQUIRE_BINDING", false, true)
 }
 
 /// Assert that the running configuration is safe before the server binds
@@ -164,7 +160,13 @@ pub fn assert_production_enforcement_safe() -> Result<(), String> {
         return Ok(());
     }
     // Critical require-flags: if any are explicitly disabled, refuse start.
-    for var in ["SAURON_REQUIRE_CALL_SIG", "SAURON_REQUIRE_AGENT_TYPE"] {
+    for var in [
+        "SAURON_REQUIRE_CALL_SIG",
+        "SAURON_REQUIRE_AGENT_TYPE",
+        "SAURON_POLICY_REQUIRE_BINDING",
+        "SAURON_EGRESS_GATEWAY",
+        "SAURON_ENFORCE_STATS_FRESHNESS",
+    ] {
         if let Ok(raw) = std::env::var(var) {
             if matches!(parse_truthy(&raw), Some(false)) {
                 return Err(format!(
@@ -173,10 +175,77 @@ pub fn assert_production_enforcement_safe() -> Result<(), String> {
             }
         }
     }
-    if matches!(policy_enforcement_mode(), PolicyEnforcementMode::Off) {
+    if !matches!(policy_enforcement_mode(), PolicyEnforcementMode::Enforce) {
         return Err(
-            "production runtime refuses to start with SAURON_POLICY_ENFORCEMENT_MODE=off (set SAURON_UNSAFE_ALLOW_ADVISORY_IN_PROD=1 to override)".into(),
+            "production runtime requires SAURON_POLICY_ENFORCEMENT_MODE=enforce (set SAURON_UNSAFE_ALLOW_ADVISORY_IN_PROD=1 to override)".into(),
         );
+    }
+    for legacy_flag in [
+        "SAURON_ENABLE_LEGACY_OPRF",
+        "SAURON_ENABLE_LEGACY_OPRF_AUTH",
+        "SAURON_ENABLE_UNAUDITED_PAILLIER",
+        "SAURON_ENABLE_VOLUNTARY_EGRESS_LOG",
+        "SAURON_ALLOW_SERVER_DERIVED_POP",
+        "SAURON_ALLOW_CUSTOM_CHECKSUM",
+        "SAURON_ENABLE_LEGACY_TOKEN_MAC",
+    ] {
+        if std::env::var(legacy_flag)
+            .ok()
+            .and_then(|v| parse_truthy(&v))
+            == Some(true)
+        {
+            return Err(format!(
+                "production runtime refuses insecure compatibility flag {legacy_flag}=1"
+            ));
+        }
+    }
+    if global_max_action_usd().is_none() {
+        return Err(
+            "production runtime requires a finite positive SAURON_MAX_ACTION_USD blast-radius ceiling"
+                .into(),
+        );
+    }
+    // Hardware evidence is optional and orthogonal to the cryptographic proof
+    // system.  If an operator opts into a hardware assurance claim, however,
+    // production requires authoritative pre-registration rather than TOFU.
+    let require_hw = require_or_default("SAURON_REQUIRE_HARDWARE_ATTESTATION", false, false);
+    let require_golden =
+        require_or_default("SAURON_REQUIRE_PREREGISTERED_MEASUREMENT", false, false);
+    if require_hw && !require_golden {
+        return Err("hardware-attestation opt-in requires SAURON_REQUIRE_PREREGISTERED_MEASUREMENT=1 in production".into());
+    }
+    if require_golden
+        && !std::env::var("SAURON_ATTESTATION_GOLDEN_MEASUREMENTS")
+            .ok()
+            .map(|raw| raw.split(',').any(|value| !value.trim().is_empty()))
+            .unwrap_or(false)
+    {
+        return Err("hardware-attestation opt-in requires a non-empty SAURON_ATTESTATION_GOLDEN_MEASUREMENTS allowlist".into());
+    }
+    crate::transparent_proof::validate_production_configuration()?;
+    if std::env::var("SAURON_ANON_RINGS")
+        .ok()
+        .and_then(|v| parse_truthy(&v))
+        == Some(true)
+    {
+        return Err("production runtime refuses SAURON_ANON_RINGS=1 until the transparent guests support anonymous receipt preimages".into());
+    }
+    if std::env::var("SAURON_ENABLE_GROTH16")
+        .ok()
+        .and_then(|v| parse_truthy(&v))
+        == Some(true)
+    {
+        return Err(
+            "production runtime refuses SAURON_ENABLE_GROTH16=1; use the pinned native STARK verifier"
+                .into(),
+        );
+    }
+    if std::env::var("SAURON_ENABLE_KYC_GROTH16")
+        .ok()
+        .and_then(|v| parse_truthy(&v))
+        == Some(true)
+    {
+        return Err("production runtime refuses SAURON_ENABLE_KYC_GROTH16=1".into());
     }
     // The security-audit hash chain is only tamper-evident if its HMAC key is
     // secret. Without SAURON_AUDIT_HMAC_KEY the code falls back to a PUBLIC dev

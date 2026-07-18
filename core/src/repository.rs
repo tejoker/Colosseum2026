@@ -1144,6 +1144,7 @@ impl Repo {
     /// A user's consent history: (request_id, site_name, granted_at, token_used, revoked).
     pub async fn list_user_consents(
         &self,
+        tenant_id: &str,
         user_key_image: &str,
     ) -> Result<Vec<(String, String, i64, i64, i64)>, RepoError> {
         match self {
@@ -1152,12 +1153,12 @@ impl Repo {
                 let mut stmt = conn
                     .prepare(
                         "SELECT request_id, site_name, granted_at, token_used, revoked \
-                         FROM consent_log WHERE user_key_image = ?1 \
+                         FROM consent_log WHERE tenant_id = ?1 AND user_key_image = ?2 \
                          ORDER BY granted_at DESC LIMIT 100",
                     )
                     .map_err(|e| RepoError::Backend(e.to_string()))?;
                 let rows = stmt
-                    .query_map(rusqlite::params![user_key_image], |r| {
+                    .query_map(rusqlite::params![tenant_id, user_key_image], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
                     })
                     .map_err(|e| RepoError::Backend(e.to_string()))?
@@ -1168,9 +1169,10 @@ impl Repo {
             Repo::Postgres(pool) => {
                 let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
                     "SELECT request_id, site_name, granted_at, token_used, revoked \
-                     FROM consent_log WHERE user_key_image = $1 \
+                     FROM consent_log WHERE tenant_id = $1 AND user_key_image = $2 \
                      ORDER BY granted_at DESC LIMIT 100",
                 )
+                .bind(tenant_id)
                 .bind(user_key_image)
                 .fetch_all(pool)
                 .await
@@ -1183,6 +1185,7 @@ impl Repo {
     /// Revoke a user's consent by request id. Returns rows affected.
     pub async fn revoke_consent(
         &self,
+        tenant_id: &str,
         request_id: &str,
         user_key_image: &str,
     ) -> Result<u64, RepoError> {
@@ -1192,8 +1195,8 @@ impl Repo {
                 let n = conn
                     .execute(
                         "UPDATE consent_log SET revoked = 1 \
-                         WHERE request_id = ?1 AND user_key_image = ?2",
-                        rusqlite::params![request_id, user_key_image],
+                         WHERE tenant_id = ?1 AND request_id = ?2 AND user_key_image = ?3",
+                        rusqlite::params![tenant_id, request_id, user_key_image],
                     )
                     .map_err(|e| RepoError::Backend(e.to_string()))?;
                 Ok(n as u64)
@@ -1201,8 +1204,9 @@ impl Repo {
             Repo::Postgres(pool) => {
                 let res = sqlx::query(
                     "UPDATE consent_log SET revoked = 1 \
-                     WHERE request_id = $1 AND user_key_image = $2",
+                     WHERE tenant_id = $1 AND request_id = $2 AND user_key_image = $3",
                 )
+                .bind(tenant_id)
                 .bind(request_id)
                 .bind(user_key_image)
                 .execute(pool)

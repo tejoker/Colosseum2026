@@ -9,10 +9,12 @@ use axum::{
     Router,
 };
 use curve25519_dalek::ristretto::CompressedRistretto;
+use curve25519_dalek::traits::Identity as _;
 use curve25519_dalek::{RistrettoPoint, Scalar};
 use hmac::{Hmac, Mac};
 use rusqlite::params;
 use sauron_core::compliance;
+use sauron_core::crypto_protocol::{partner_registration_payload, PartnerRegistrationInput};
 use sauron_core::issuer_runtime::IssuerVerifyError;
 use sauron_core::middleware::{
     audit_log_middleware, global_rate_limit_middleware, init_audit_sink,
@@ -308,6 +310,10 @@ async fn main() {
         )
         .route("/agent/token", post(agent::issue_agent_token))
         .route("/agent/verify", post(agent::verify_agent_token))
+        .route(
+            "/agent/attestation/challenge",
+            post(agent::agent_attestation_challenge),
+        )
         .route("/agent/pop/challenge", post(agent::agent_pop_challenge))
         .route(
             "/agent/action/challenge",
@@ -355,6 +361,12 @@ async fn main() {
         // Same per-call-sig gate as /egress/log — the ring sig proves the bound
         // agent; the handler enforces intent_json.egress_allowlist before forwarding.
         .route(
+            "/agent/egress/capability",
+            post(sauron_core::egress_gateway::issue_egress_capability).route_layer(
+                middleware::from_fn_with_state(Arc::clone(&state), agent::require_call_signature),
+            ),
+        )
+        .route(
             "/agent/egress/proxy",
             post(sauron_core::egress_gateway::agent_egress_proxy).route_layer(
                 middleware::from_fn_with_state(Arc::clone(&state), agent::require_call_signature),
@@ -377,6 +389,8 @@ async fn main() {
         )
         // User self-service (manage own consents + agents)
         .route("/user/auth", post(user_auth))
+        .route("/user/auth/challenge", post(user_auth_challenge))
+        .route("/user/auth/finish", post(user_auth_finish))
         .route("/user/consents", get(user_consents))
         .route("/user/credential", get(user_get_credential))
         .route("/user/consent/{request_id}", delete(user_revoke_consent))
@@ -485,6 +499,8 @@ async fn main() {
                     HeaderName::from_static("x-sauron-call-ts"),
                     HeaderName::from_static("x-sauron-call-nonce"),
                     HeaderName::from_static("x-sauron-call-sig"),
+                    HeaderName::from_static("x-sauron-call-audience"),
+                    HeaderName::from_static("x-sauron-protocol-version"),
                     HeaderName::from_static("x-sauron-agent-config-digest"),
                     // Issuer-side enrollment
                     HeaderName::from_static("x-sauron-issuer-key"),
@@ -546,14 +562,35 @@ struct OprfResponse {
 async fn handle_oprf(
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<OprfRequest>,
-) -> Result<Json<OprfResponse>, StatusCode> {
-    let bytes: [u8; 32] = payload
-        .blinded_point
-        .try_into()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let compressed =
-        CompressedRistretto::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let point = compressed.decompress().ok_or(StatusCode::BAD_REQUEST)?;
+) -> Result<Json<OprfResponse>, (StatusCode, String)> {
+    let enabled = sauron_core::runtime_mode::require_or_default(
+        "SAURON_ENABLE_LEGACY_OPRF",
+        /* dev_default */ true,
+        /* prod_default */ false,
+    );
+    if !enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "legacy unauthenticated OPRF is quarantined in production; deploy an independently reviewed OPAQUE service or explicitly set SAURON_ENABLE_LEGACY_OPRF=1".into(),
+        ));
+    }
+    let bytes: [u8; 32] = payload.blinded_point.try_into().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "blinded_point must be 32 bytes".into(),
+        )
+    })?;
+    let compressed = CompressedRistretto::from_slice(&bytes)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid Ristretto encoding".into()))?;
+    let point = compressed
+        .decompress()
+        .ok_or((StatusCode::BAD_REQUEST, "invalid Ristretto point".into()))?;
+    if point == RistrettoPoint::identity() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identity point is not a valid OPRF input".into(),
+        ));
+    }
     let st = state.read().unwrap();
     let evaluated = oprf::server_evaluate(point, st.k);
     Ok(Json(OprfResponse {
@@ -581,6 +618,10 @@ struct RegisterRequest {
     /// Champ optionnel — si absent, la réponse n'inclut pas de preuve Merkle.
     #[serde(default)]
     commitment: Option<String>,
+    /// Passwordless authentication key held by the user. It is covered by the
+    /// partner ring signature and never enters server custody.
+    #[serde(default)]
+    auth_public_key_b64u: String,
 }
 
 #[derive(Serialize)]
@@ -616,6 +657,8 @@ struct BankRegisterRequest {
     email: String,
     date_of_birth: String,
     nationality: String,
+    /// User-held Ed25519 key, bound by the bank attestation.
+    auth_public_key_b64u: String,
     /// HMAC-SHA256 signature over canonical payload.
     attestation_signature: String,
     /// Unix timestamp issued by bank.
@@ -641,8 +684,9 @@ fn bank_provider_secret(bank_client_name: &str) -> Option<String> {
         .map(|v| v.to_string())
 }
 
-fn bank_attestation_payload(req: &BankRegisterRequest) -> String {
+fn bank_attestation_payload(tenant_id: &str, req: &BankRegisterRequest) -> String {
     [
+        tenant_id.to_string(),
         req.bank_client_name.clone(),
         req.bank_customer_id.clone().unwrap_or_default(),
         req.key_image_hex.clone(),
@@ -652,13 +696,17 @@ fn bank_attestation_payload(req: &BankRegisterRequest) -> String {
         req.email.clone(),
         req.date_of_birth.clone(),
         req.nationality.to_uppercase(),
+        req.auth_public_key_b64u.clone(),
         req.attestation_issued_at.to_string(),
         req.attestation_nonce.clone(),
     ]
     .join("|")
 }
 
-fn verify_bank_attestation(req: &BankRegisterRequest) -> Result<(), (StatusCode, String)> {
+fn verify_bank_attestation(
+    tenant_id: &str,
+    req: &BankRegisterRequest,
+) -> Result<(), (StatusCode, String)> {
     if req.attestation_signature.is_empty() {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -700,7 +748,7 @@ fn verify_bank_attestation(req: &BankRegisterRequest) -> Result<(), (StatusCode,
             "failed to initialize HMAC".into(),
         )
     })?;
-    mac.update(bank_attestation_payload(req).as_bytes());
+    mac.update(bank_attestation_payload(tenant_id, req).as_bytes());
     mac.verify_slice(&sig).map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
@@ -709,10 +757,81 @@ fn verify_bank_attestation(req: &BankRegisterRequest) -> Result<(), (StatusCode,
     })
 }
 
+fn validate_user_auth_public_key(value: &str) -> Result<(), (StatusCode, String)> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.trim())
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "auth_public_key_b64u must be unpadded base64url".into(),
+            )
+        })?;
+    let key: [u8; 32] = bytes.try_into().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "auth_public_key_b64u must decode to 32 bytes".into(),
+        )
+    })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "auth_public_key_b64u is not a valid Ed25519 public key".into(),
+        )
+    })?;
+    Ok(())
+}
+
+fn store_user_auth_credential(
+    state: &Arc<RwLock<ServerState>>,
+    tenant_id: &str,
+    key_image_hex: &str,
+    public_key_b64u: &str,
+    now: i64,
+) -> Result<(), (StatusCode, String)> {
+    validate_user_auth_public_key(public_key_b64u)?;
+    let st = state.read().unwrap();
+    let db = st.db.lock().unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO user_auth_credentials
+         (key_image_hex, ed25519_public_key_b64u, created_at) VALUES (?1, ?2, ?3)",
+        params![key_image_hex, public_key_b64u, now],
+    )
+    .map_err(|e| {
+        (
+            StatusCode::CONFLICT,
+            format!("authentication credential conflict: {e}"),
+        )
+    })?;
+    let stored: String = db
+        .query_row(
+            "SELECT ed25519_public_key_b64u FROM user_auth_credentials WHERE key_image_hex = ?1",
+            params![key_image_hex],
+            |r| r.get(0),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if stored != public_key_b64u {
+        return Err((
+            StatusCode::CONFLICT,
+            "user already has a different authentication key; authenticated rotation is required"
+                .into(),
+        ));
+    }
+    db.execute(
+        "INSERT OR IGNORE INTO user_auth_tenant_bindings
+         (tenant_id, key_image_hex, created_at) VALUES (?1, ?2, ?3)",
+        params![tenant_id, key_image_hex, now],
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(())
+}
+
 async fn bank_register_user(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     Json(payload): Json<BankRegisterRequest>,
 ) -> Result<Json<BankRegisterResponse>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if !sauron_core::feature_flags::bank_kyc_enabled() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -722,10 +841,12 @@ async fn bank_register_user(
     if payload.bank_client_name.is_empty()
         || payload.public_key_hex.is_empty()
         || payload.key_image_hex.is_empty()
+        || payload.auth_public_key_b64u.is_empty()
     {
         return Err((
             StatusCode::BAD_REQUEST,
-            "bank_client_name, public_key_hex and key_image_hex are required".into(),
+            "bank_client_name, public_key_hex, key_image_hex and auth_public_key_b64u are required"
+                .into(),
         ));
     }
 
@@ -765,8 +886,10 @@ async fn bank_register_user(
         let db = st.db.lock().unwrap();
         let bank_exists: bool = db
             .query_row(
-                "SELECT COUNT(*) FROM clients WHERE name = ?1 AND client_type = 'BANK'",
-                params![payload.bank_client_name],
+                "SELECT COUNT(*) FROM clients c
+                 JOIN client_tenant_bindings b ON b.client_name = c.name
+                 WHERE c.name = ?1 AND c.client_type = 'BANK' AND b.tenant_id = ?2",
+                params![payload.bank_client_name, tenant_id],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0)
@@ -779,7 +902,8 @@ async fn bank_register_user(
         }
     }
 
-    verify_bank_attestation(&payload)?;
+    verify_bank_attestation(&tenant_id, &payload)?;
+    validate_user_auth_public_key(&payload.auth_public_key_b64u)?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -829,6 +953,14 @@ async fn bank_register_user(
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        store_user_auth_credential(
+            &state,
+            &tenant_id,
+            &payload.key_image_hex,
+            &payload.auth_public_key_b64u,
+            now,
+        )?;
 
         // bank_kyc_links is a SQLite-only table (never routed through the repo),
         // so it stays on the raw handle — consistent on both backends.
@@ -893,8 +1025,10 @@ async fn bank_register_user(
 
 async fn handle_register(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, StatusCode> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     let pk_bytes: [u8; 32] = payload
         .public_key
         .try_into()
@@ -902,37 +1036,81 @@ async fn handle_register(
     let pk_compressed =
         CompressedRistretto::from_slice(&pk_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     let pk_point = pk_compressed.decompress().ok_or(StatusCode::BAD_REQUEST)?;
+    if pk_point == RistrettoPoint::identity() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let ki_bytes: [u8; 32] = payload
         .key_image
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let ki_point = CompressedRistretto::from_slice(&ki_bytes)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .decompress()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    if ki_point == RistrettoPoint::identity() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let hex_pk = hex::encode(pk_bytes);
     let hex_ki = hex::encode(ki_bytes);
-    let msg = hex_pk.clone();
-
-    // Vérifier que la ring sig provient d'un site partenaire légitime.
+    let p = &payload.profile;
+    let commitment = payload.commitment.as_deref().unwrap_or("");
+    if !sauron_core::runtime_mode::is_development_runtime()
+        && payload.auth_public_key_b64u.is_empty()
     {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !payload.auth_public_key_b64u.is_empty()
+        && validate_user_auth_public_key(&payload.auth_public_key_b64u).is_err()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let msg = partner_registration_payload(&PartnerRegistrationInput {
+        tenant_id: &tenant_id,
+        public_key_hex: &hex_pk,
+        key_image_hex: &hex_ki,
+        first_name: &p.first_name,
+        last_name: &p.last_name,
+        email: &p.email,
+        date_of_birth: &p.date_of_birth,
+        nationality: &p.nationality,
+        commitment,
+        auth_public_key_b64u: &payload.auth_public_key_b64u,
+    });
+
+    // Verify against this tenant's FULL_KYC ring only. A valid partner in a
+    // different tenant, or a BANK/ZKP_ONLY key, is not registration authority.
+    let tenant_partner_ring: Vec<RistrettoPoint> = {
         let st = state.read().unwrap();
-        // Fail closed on an empty partner ring: with no registered partners there
-        // is no legitimate signer, so /register must reject rather than accept an
-        // (empty-ring) signature. `ring::verify` also rejects this, but guard here
-        // for a clear error + defence in depth.
-        if st.client_group.members.is_empty() {
-            tracing::warn!(target: "sauron::security", endpoint = "/register", "no registered partners — refusing registration");
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-        if !st
-            .client_group
-            .verify_proof(msg.as_bytes(), &payload.client_signature)
-        {
-            tracing::warn!(target: "sauron::security", endpoint = "/register", "invalid client signature");
-            return Err(StatusCode::UNAUTHORIZED);
-        }
+        let db = st.db.lock().unwrap();
+        let mut stmt = db
+            .prepare(
+                "SELECT c.public_key_hex FROM clients c
+                 JOIN client_tenant_bindings b ON b.client_name = c.name
+                 WHERE b.tenant_id = ?1 AND c.client_type = 'FULL_KYC'
+                 ORDER BY c.name",
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let points = stmt
+            .query_map(params![tenant_id], |r| r.get::<_, String>(0))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .flatten()
+            .filter_map(|encoded| {
+                let bytes = hex::decode(encoded).ok()?;
+                let array: [u8; 32] = bytes.try_into().ok()?;
+                CompressedRistretto(array).decompress()
+            })
+            .collect();
+        points
+    };
+    if tenant_partner_ring.is_empty()
+        || !ring::verify(&msg, &tenant_partner_ring, &payload.client_signature)
+    {
+        tracing::warn!(target: "sauron::security", endpoint = "/register", tenant_id = %tenant_id, "invalid or unauthorized tenant partner signature");
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     // Persister l'utilisateur dans la DB (dual-backend repo).
-    let p = &payload.profile;
     {
         let repo = state.read().unwrap().repo.clone();
         repo.insert_user_if_absent(
@@ -946,6 +1124,19 @@ async fn handle_register(
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !payload.auth_public_key_b64u.is_empty() {
+            store_user_auth_credential(
+                &state,
+                &tenant_id,
+                &hex_ki,
+                &payload.auth_public_key_b64u,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+            )
+            .map_err(|(status, _)| status)?;
+        }
     }
 
     // Mettre à jour le groupe en mémoire + insérer le commitment Merkle.
@@ -1246,6 +1437,7 @@ fn dev_mint_agent_token(
         agent_id,
         agent_checksum,
         intent_json,
+        "default",
         300,
         Some(&extra),
     );
@@ -1419,6 +1611,7 @@ async fn dev_leash_demo(
             &state,
             proof,
             agent_action::ValidateAgentActionOptions {
+                tenant_id: "default",
                 agent_id,
                 human_key_image: &human_key_image,
                 ajwt_jti: &token.jti,
@@ -1911,6 +2104,11 @@ async fn delegated_agent_binding_middleware(
     next: middleware::Next,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let (parts, body) = request.into_parts();
+    let tenant_id = parts
+        .extensions
+        .get::<sauron_tenancy::TenantId>()
+        .map(|t| t.0.clone())
+        .unwrap_or_default();
     let body_bytes = to_bytes(body, 64 * 1024).await.map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -1954,7 +2152,7 @@ async fn delegated_agent_binding_middleware(
             ))?;
 
         let jwt_secret = state.read().unwrap().jwt_secret.clone();
-        let claims = agent::verify_ajwt(&jwt_secret, ajwt).ok_or((
+        let claims = agent::verify_ajwt_for_tenant(&jwt_secret, ajwt, &tenant_id).ok_or((
             StatusCode::UNAUTHORIZED,
             "Invalid or expired A-JWT".to_string(),
         ))?;
@@ -2423,6 +2621,17 @@ async fn kyc_retrieve(
             "end-user KYC retrieval disabled (SAURON_DISABLE_USER_KYC=1)".into(),
         ));
     }
+    let groth16_enabled =
+        sauron_core::runtime_mode::require_or_default("SAURON_ENABLE_GROTH16", true, false);
+    let kyc_groth16_enabled =
+        sauron_core::runtime_mode::require_or_default("SAURON_ENABLE_KYC_GROTH16", true, false);
+    if !groth16_enabled || !kyc_groth16_enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "legacy KYC Groth16 verification is quarantined; deploy the reviewed transparent proof path or explicitly enable both reviewed Groth16 gates"
+                .into(),
+        ));
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -2523,6 +2732,8 @@ async fn kyc_retrieve(
         .zkp_circuit
         .clone()
         .unwrap_or_else(|| "CredentialVerification".to_string());
+
+    enforce_authoritative_kyc_public_inputs(&circuit, &public_signals)?;
 
     let (issuer_urls, issuer_rt) = {
         let st = state.read().unwrap();
@@ -2816,6 +3027,7 @@ async fn kyc_retrieve(
             &state,
             proof,
             agent_action::ValidateAgentActionOptions {
+                tenant_id: &tenant_id,
                 agent_id: &binding.agent_id,
                 human_key_image: &binding.human_key_image,
                 ajwt_jti: &binding.ajwt_jti,
@@ -2883,6 +3095,117 @@ async fn kyc_retrieve(
     });
 
     Ok(Json(resp))
+}
+
+/// Bind every security-relevant public signal in the legacy KYC circuits to
+/// server-authoritative policy. A valid proof over prover-chosen dates, issuer
+/// keys, roots, or thresholds proves the wrong statement and must be rejected.
+fn enforce_authoritative_kyc_public_inputs(
+    circuit: &str,
+    public_signals: &[String],
+) -> Result<(), (StatusCode, String)> {
+    if sauron_core::runtime_mode::is_development_runtime() {
+        return Ok(());
+    }
+
+    fn decimal(label: &str, value: &str) -> Result<String, (StatusCode, String)> {
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{label} must be an unsigned decimal public signal"),
+            ));
+        }
+        let canonical = value.trim_start_matches('0');
+        Ok(if canonical.is_empty() {
+            "0".to_string()
+        } else {
+            canonical.to_string()
+        })
+    }
+
+    fn required_env(name: &str) -> Result<String, (StatusCode, String)> {
+        let raw = std::env::var(name).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("production KYC proof policy is missing {name}"),
+            )
+        })?;
+        decimal(name, &raw).map_err(|(_, detail)| (StatusCode::INTERNAL_SERVER_ERROR, detail))
+    }
+
+    fn require_equal(label: &str, got: &str, expected: &str) -> Result<(), (StatusCode, String)> {
+        if decimal(label, got)? != decimal(label, expected)? {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("KYC proof {label} is not the server-authoritative value"),
+            ));
+        }
+        Ok(())
+    }
+
+    let today = chrono::Utc::now().format("%Y%m%d").to_string();
+    let threshold = required_env("SAURON_ZKP_AGE_THRESHOLD")?;
+    let issuer_ax = required_env("SAURON_ZKP_ISSUER_PUBKEY_AX")?;
+    let issuer_ay = required_env("SAURON_ZKP_ISSUER_PUBKEY_AY")?;
+
+    match circuit {
+        "AgeVerification" => {
+            if public_signals.len() != 5 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "AgeVerification requires exactly 5 public signals".into(),
+                ));
+            }
+            if public_signals[0].trim() != "1" {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "AgeVerification valid output must equal 1".into(),
+                ));
+            }
+            let (threshold_i, date_i, ax_i, ay_i) = (1, 2, 3, 4);
+            require_equal("ageThreshold", &public_signals[threshold_i], &threshold)?;
+            require_equal("currentDate", &public_signals[date_i], &today)?;
+            require_equal("issuerPubKeyAx", &public_signals[ax_i], &issuer_ax)?;
+            require_equal("issuerPubKeyAy", &public_signals[ay_i], &issuer_ay)?;
+        }
+        "CredentialVerification" => {
+            if public_signals.len() != 9 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "CredentialVerification requires exactly 9 public signals".into(),
+                ));
+            }
+            if !public_signals[..3].iter().all(|v| v.trim() == "1") {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "CredentialVerification outputs must all equal 1".into(),
+                ));
+            }
+            let (date_i, threshold_i, nationality_i, root_i, ax_i, ay_i) =
+                (3, 4, 5, 6, 7, 8);
+            let required_nationality = required_env("SAURON_ZKP_REQUIRED_NATIONALITY")?;
+            let merkle_root = required_env("SAURON_ZKP_CREDENTIAL_MERKLE_ROOT")?;
+            require_equal("currentDate", &public_signals[date_i], &today)?;
+            require_equal("ageThreshold", &public_signals[threshold_i], &threshold)?;
+            require_equal(
+                "requiredNationality",
+                &public_signals[nationality_i],
+                &required_nationality,
+            )?;
+            require_equal("merkleRoot", &public_signals[root_i], &merkle_root)?;
+            require_equal("issuerPubKeyAx", &public_signals[ax_i], &issuer_ax)?;
+            require_equal("issuerPubKeyAy", &public_signals[ay_i], &issuer_ay)?;
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "production KYC accepts only the reviewed AgeVerification or CredentialVerification circuits"
+                    .into(),
+            ))
+        }
+    }
+    Ok(())
 }
 
 fn build_zkp_assertions(
@@ -3126,8 +3449,10 @@ struct PolicyAuthorizeBody {
 
 async fn policy_authorize(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     Json(payload): Json<PolicyAuthorizeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if payload.agent_id.is_empty() || payload.action.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -3140,7 +3465,7 @@ async fn policy_authorize(
         "ajwt is required for policy authorization".into(),
     ))?;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let claims = agent::verify_ajwt(&jwt_secret, ajwt)
+    let claims = agent::verify_ajwt_for_tenant(&jwt_secret, ajwt, &tenant_id)
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired A-JWT".into()))?;
     let claim_agent_id = claims
         .get("agent_id")
@@ -3215,6 +3540,7 @@ async fn policy_authorize(
         &state,
         proof,
         agent_action::ValidateAgentActionOptions {
+            tenant_id: &tenant_id,
             agent_id: &payload.agent_id,
             human_key_image: &human_key_image,
             ajwt_jti: &jti,
@@ -3428,7 +3754,7 @@ async fn agent_payment_authorize(
     }
 
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let claims = agent::verify_ajwt(&jwt_secret, &payload.ajwt)
+    let claims = agent::verify_ajwt_for_tenant(&jwt_secret, &payload.ajwt, &tenant_id)
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired A-JWT".into()))?;
 
     let human_key_image = claims
@@ -3721,6 +4047,7 @@ async fn agent_payment_authorize(
         &state,
         &payload.agent_action,
         agent_action::ValidateAgentActionOptions {
+            tenant_id: &tenant_id,
             agent_id: &agent_id,
             human_key_image: &human_key_image,
             ajwt_jti: &jti,
@@ -3798,39 +4125,52 @@ async fn agent_payment_authorize(
 //  Helpers: user session (stateless HMAC, 1h TTL)
 // ─────────────────────────────────────────────────────
 
-fn issue_user_session(jwt_secret: &[u8], key_image: &str) -> (String, i64) {
+fn issue_user_session(jwt_secret: &[u8], tenant_id: &str, key_image: &str) -> (String, i64) {
     let expires_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
         + 3600;
-    let payload = format!("{}|{}", key_image, expires_at);
+    let payload = format!("v2|{}|{}|{}", tenant_id, key_image, expires_at);
     // HMAC-SHA256, NOT naked SHA256.
     // Naked SHA256(secret || msg) is vulnerable to length-extension: an attacker
     // who has any valid (payload, sig) can extend the message with controlled
     // bytes and produce a valid signature without knowing the secret. HMAC's
     // inner+outer pad construction makes this impossible.
-    let mut mac = HmacSha256::new_from_slice(jwt_secret).expect("HMAC key");
+    let session_key = sauron_core::crypto_protocol::derive_subkey(jwt_secret, "session-hmac-v1");
+    let mut mac = HmacSha256::new_from_slice(&session_key).expect("HMAC key");
     mac.update(b"|SESSION|");
     mac.update(payload.as_bytes());
     let sig = hex::encode(mac.finalize().into_bytes());
     (format!("{}|{}", payload, sig), expires_at)
 }
 
-fn verify_user_session(jwt_secret: &[u8], session: &str) -> Option<String> {
+fn verify_user_session(
+    jwt_secret: &[u8],
+    session: &str,
+    expected_tenant_id: &str,
+) -> Option<String> {
     use subtle::ConstantTimeEq;
     let pos = session.rfind('|')?;
     let payload = &session[..pos];
     let sig = &session[pos + 1..];
-    let mut mac = HmacSha256::new_from_slice(jwt_secret).expect("HMAC key");
+    let session_key = sauron_core::crypto_protocol::derive_subkey(jwt_secret, "session-hmac-v1");
+    let mut mac = HmacSha256::new_from_slice(&session_key).expect("HMAC key");
     mac.update(b"|SESSION|");
     mac.update(payload.as_bytes());
     let computed = hex::encode(mac.finalize().into_bytes());
     if computed.as_bytes().ct_eq(sig.as_bytes()).unwrap_u8() == 0 {
         return None;
     }
-    let pos2 = payload.rfind('|')?;
-    let expires_at: i64 = payload[pos2 + 1..].parse().ok()?;
+    let fields: Vec<&str> = payload.split('|').collect();
+    if fields.len() != 4 || fields[0] != "v2" || fields[1] != expected_tenant_id {
+        return None;
+    }
+    let key_image = fields[2];
+    if key_image.len() != 64 || !key_image.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let expires_at: i64 = fields[3].parse().ok()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -3838,17 +4178,231 @@ fn verify_user_session(jwt_secret: &[u8], session: &str) -> Option<String> {
     if expires_at < now {
         return None;
     }
-    Some(payload[..pos2].to_string())
+    Some(key_image.to_string())
 }
 
-fn session_key_image(headers: &HeaderMap, jwt_secret: &[u8]) -> Option<String> {
+fn session_key_image(
+    headers: &HeaderMap,
+    jwt_secret: &[u8],
+    expected_tenant_id: &str,
+) -> Option<String> {
     let val = headers.get("x-sauron-session")?.to_str().ok()?;
-    verify_user_session(jwt_secret, val)
+    verify_user_session(jwt_secret, val, expected_tenant_id)
 }
 
 // ─────────────────────────────────────────────────────
 //  POST /user/auth — email+password → session token
 // ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserAuthChallengeBody {
+    key_image_hex: String,
+}
+
+#[derive(Serialize)]
+struct UserAuthChallengeResponse {
+    challenge_id: String,
+    nonce: String,
+    expires_at: i64,
+    signing_payload_b64u: String,
+}
+
+async fn user_auth_challenge(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
+    Json(payload): Json<UserAuthChallengeBody>,
+) -> Result<Json<UserAuthChallengeResponse>, (StatusCode, String)> {
+    use base64::Engine as _;
+
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
+    let key_image = payload.key_image_hex.trim().to_ascii_lowercase();
+    if key_image.len() != 64 || !key_image.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "key_image_hex must be 32-byte hex".into(),
+        ));
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let expires_at = now + 120;
+    let challenge_id = format!("uac_{}", sauron_core::ajwt_support::random_hex_32());
+    let nonce = sauron_core::ajwt_support::random_hex_32();
+    {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        let _ = db.execute(
+            "DELETE FROM user_auth_challenges WHERE expires_at < ?1 OR used_at > 0",
+            params![now - 300],
+        );
+        let total: i64 = db
+            .query_row("SELECT COUNT(*) FROM user_auth_challenges", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
+        let active_for_subject: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM user_auth_challenges
+                 WHERE tenant_id = ?1 AND key_image_hex = ?2 AND used_at = 0 AND expires_at >= ?3",
+                params![&tenant_id, &key_image, now],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if total >= 100_000 || active_for_subject >= 5 {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "authentication challenge capacity exceeded".into(),
+            ));
+        }
+        // Insert even for an unknown key image so the response shape and timing
+        // do not become a reliable account-enumeration oracle.
+        db.execute(
+            "INSERT INTO user_auth_challenges
+             (challenge_id, tenant_id, key_image_hex, nonce, expires_at, used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![&challenge_id, &tenant_id, &key_image, &nonce, expires_at],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    let signing_payload = sauron_core::crypto_protocol::user_auth_challenge_payload(
+        &challenge_id,
+        &tenant_id,
+        &key_image,
+        &nonce,
+        expires_at,
+    );
+    Ok(Json(UserAuthChallengeResponse {
+        challenge_id,
+        nonce,
+        expires_at,
+        signing_payload_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing_payload),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserAuthFinishBody {
+    challenge_id: String,
+    key_image_hex: String,
+    signature_b64u: String,
+}
+
+async fn user_auth_finish(
+    State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
+    Json(payload): Json<UserAuthFinishBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use base64::Engine as _;
+
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
+    let key_image = payload.key_image_hex.trim().to_ascii_lowercase();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let (nonce, expires_at, public_key_b64u, jwt_secret) = {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        let challenge: (String, i64) = db
+            .query_row(
+                "SELECT nonce, expires_at FROM user_auth_challenges
+                 WHERE challenge_id = ?1 AND tenant_id = ?2 AND key_image_hex = ?3
+                   AND used_at = 0 AND expires_at >= ?4",
+                params![&payload.challenge_id, &tenant_id, &key_image, now],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "invalid authentication proof".into(),
+                )
+            })?;
+        let public_key: String = db
+            .query_row(
+                "SELECT c.ed25519_public_key_b64u
+                 FROM user_auth_credentials c
+                 JOIN user_auth_tenant_bindings b ON b.key_image_hex = c.key_image_hex
+                 WHERE c.key_image_hex = ?1 AND b.tenant_id = ?2",
+                params![&key_image, &tenant_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "invalid authentication proof".into(),
+                )
+            })?;
+        (challenge.0, challenge.1, public_key, st.jwt_secret.clone())
+    };
+    let public_key: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&public_key_b64u)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "invalid authentication proof".into(),
+        ))?;
+    let signature: [u8; 64] = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.signature_b64u.trim())
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "invalid authentication proof".into(),
+        ))?;
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "invalid authentication proof".into(),
+        )
+    })?;
+    let signed = sauron_core::crypto_protocol::user_auth_challenge_payload(
+        &payload.challenge_id,
+        &tenant_id,
+        &key_image,
+        &nonce,
+        expires_at,
+    );
+    verifying_key
+        .verify_strict(&signed, &ed25519_dalek::Signature::from_bytes(&signature))
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "invalid authentication proof".into(),
+            )
+        })?;
+
+    // Consume only after a valid signature. The conditional write is the
+    // replay arbiter if two valid finishes race; exactly one receives a session.
+    {
+        let st = state.read().unwrap();
+        let db = st.db.lock().unwrap();
+        let consumed = db
+            .execute(
+                "UPDATE user_auth_challenges SET used_at = ?1
+                 WHERE challenge_id = ?2 AND tenant_id = ?3 AND key_image_hex = ?4
+                   AND used_at = 0 AND expires_at >= ?1",
+                params![now, &payload.challenge_id, &tenant_id, &key_image],
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if consumed != 1 {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "invalid authentication proof".into(),
+            ));
+        }
+    }
+    let (session, session_expires_at) = issue_user_session(&jwt_secret, &tenant_id, &key_image);
+    Ok(Json(serde_json::json!({
+        "session": session,
+        "key_image": key_image,
+        "expires_at": session_expires_at,
+        "authentication": "ed25519_challenge_v1"
+    })))
+}
 
 #[derive(Deserialize)]
 struct UserAuthBody {
@@ -3858,8 +4412,21 @@ struct UserAuthBody {
 
 async fn user_auth(
     State(state): State<Arc<RwLock<ServerState>>>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     Json(payload): Json<UserAuthBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
+    let enabled = sauron_core::runtime_mode::require_or_default(
+        "SAURON_ENABLE_LEGACY_OPRF_AUTH",
+        /* dev_default */ true,
+        /* prod_default */ false,
+    );
+    if !enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "password-derived legacy identity authentication is disabled in production; use /user/auth/challenge and /user/auth/finish".into(),
+        ));
+    }
     let (server_k, jwt_secret) = {
         let st = state.read().unwrap();
         (st.k, st.jwt_secret.clone())
@@ -3881,7 +4448,7 @@ async fn user_auth(
             .flatten()
             .map(|u| (u.first_name, u.last_name))
     };
-    let (session, expires_at) = issue_user_session(&jwt_secret, &key_image);
+    let (session, expires_at) = issue_user_session(&jwt_secret, &tenant_id, &key_image);
     Ok(Json(serde_json::json!({
         "session": session,
         "key_image": key_image,
@@ -3897,16 +4464,18 @@ async fn user_auth(
 
 async fn user_consents(
     headers: HeaderMap,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let key_image = session_key_image(&headers, &jwt_secret).ok_or((
+    let key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
     ))?;
     let repo = state.read().unwrap().repo.clone();
     let rows: Vec<serde_json::Value> = repo
-        .list_user_consents(&key_image)
+        .list_user_consents(&tenant_id, &key_image)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
@@ -3930,16 +4499,18 @@ async fn user_consents(
 async fn user_revoke_consent(
     headers: HeaderMap,
     Path(request_id): Path<String>,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let key_image = session_key_image(&headers, &jwt_secret).ok_or((
+    let key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
     ))?;
     let repo = state.read().unwrap().repo.clone();
     let n = repo
-        .revoke_consent(&request_id, &key_image)
+        .revoke_consent(&tenant_id, &request_id, &key_image)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if n == 0 {
@@ -3960,8 +4531,10 @@ async fn user_revoke_consent(
 
 async fn user_get_credential(
     headers: HeaderMap,
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if !sauron_core::feature_flags::zkp_issuer_enabled() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3969,7 +4542,7 @@ async fn user_get_credential(
         ));
     }
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let key_image = session_key_image(&headers, &jwt_secret).ok_or((
+    let key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
     ))?;
@@ -4138,8 +4711,9 @@ struct AgentKycConsentBody {
 //  matching the registered checksum — at which point they had to call
 //  /agent/<id>/checksum/update first, and that's audited.
 //
-//  Forward-proxy enforcement (where SauronID intercepts every outbound
-//  packet) is documented in operations.md as the next-session deliverable.
+//  This legacy telemetry endpoint is disabled by default in production. It
+//  cannot prove interception; production agents must use the one-use
+//  capability flow at /agent/egress/capability + /agent/egress/proxy.
 // ─────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -4158,13 +4732,45 @@ struct AgentEgressLogBody {
 async fn agent_egress_log(
     State(state): State<Arc<RwLock<ServerState>>>,
     tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
+    headers: HeaderMap,
     Json(payload): Json<AgentEgressLogBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let enabled = sauron_core::runtime_mode::require_or_default(
+        "SAURON_ENABLE_VOLUNTARY_EGRESS_LOG",
+        true,
+        false,
+    );
+    if !enabled {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "voluntary egress telemetry is disabled in production; use the one-use capability gateway"
+                .into(),
+        ));
+    }
     let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if payload.agent_id.is_empty() || payload.target_host.is_empty() || payload.method.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             "agent_id, target_host, method are required".into(),
+        ));
+    }
+    let signed_agent = headers
+        .get("x-sauron-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if signed_agent != payload.agent_id {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "egress log agent_id does not match signed caller".into(),
+        ));
+    }
+    if !payload.body_hash_hex.is_empty()
+        && (payload.body_hash_hex.len() != 64
+            || !payload.body_hash_hex.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "body_hash_hex must be empty or 32-byte hex".into(),
         ));
     }
     let now = SystemTime::now()
@@ -4201,7 +4807,7 @@ async fn agent_kyc_consent(
     let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     // 1. Verify A-JWT
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let claims = agent::verify_ajwt(&jwt_secret, &payload.ajwt)
+    let claims = agent::verify_ajwt_for_tenant(&jwt_secret, &payload.ajwt, &tenant_id)
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired A-JWT".into()))?;
 
     let human_key_image = claims
@@ -4396,6 +5002,7 @@ async fn agent_kyc_consent(
         &state,
         &payload.agent_action,
         agent_action::ValidateAgentActionOptions {
+            tenant_id: &tenant_id,
             agent_id: &agent_id,
             human_key_image: &human_key_image,
             ajwt_jti: &jti,
@@ -4420,13 +5027,21 @@ async fn agent_kyc_consent(
 
     // 4. Issue consent_token for the human
     let consent_token = {
-        let mut h = Sha256::new();
-        h.update(jwt_secret.as_slice());
-        h.update(b"|AGENT_CONSENT|");
-        h.update(payload.request_id.as_bytes());
-        h.update(human_key_image.as_bytes());
-        h.update(agent_id.as_bytes());
-        hex::encode(h.finalize())
+        let key = sauron_core::crypto_protocol::derive_subkey(
+            jwt_secret.as_slice(),
+            "agent-consent-hmac-v1",
+        );
+        let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC key");
+        mac.update(&sauron_core::crypto_protocol::canonical_fields(
+            "sauron.agent-consent.v1",
+            &[
+                ("tenant_id", &tenant_id),
+                ("request_id", &payload.request_id),
+                ("human_key_image", &human_key_image),
+                ("agent_id", &agent_id),
+            ],
+        ));
+        hex::encode(mac.finalize().into_bytes())
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4603,7 +5218,7 @@ async fn agent_vc_issue(
     };
 
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
-    let human_key_image = session_key_image(&headers, &jwt_secret).ok_or((
+    let human_key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
     ))?;
@@ -4888,14 +5503,13 @@ async fn agent_vc_issue(
         },
     });
 
-    // 5. Sign VC (HMAC-SHA256 over canonical JSON — same trust anchor as A-JWT)
+    // 5. Sign VC with its own HKDF-separated HMAC key.
     let jwt_secret = state.read().unwrap().jwt_secret.clone();
     let vc_canonical = vc.to_string();
-    let mut h = Sha256::new();
-    h.update(&jwt_secret);
-    h.update(b"|VC|");
-    h.update(vc_canonical.as_bytes());
-    let vc_hash = hex::encode(h.finalize());
+    let vc_key = sauron_core::crypto_protocol::derive_subkey(&jwt_secret, "agent-vc-hmac-v1");
+    let mut vc_mac = HmacSha256::new_from_slice(&vc_key).expect("HMAC key");
+    vc_mac.update(vc_canonical.as_bytes());
+    let vc_hash = hex::encode(vc_mac.finalize().into_bytes());
 
     // 6. Persist in agents + agent_vcs tables
     {
@@ -4955,6 +5569,7 @@ async fn agent_vc_issue(
         &agent_id,
         &payload.agent_checksum,
         &intent_json,
+        &tenant_id,
         ttl_secs,
         Some(&extra),
     );
@@ -4990,4 +5605,23 @@ async fn agent_vc_issue(
             "SauronID self-sovereign (non-bank CredentialVerification proof root)"
         },
     })))
+}
+
+#[cfg(test)]
+mod user_session_security_tests {
+    use super::*;
+
+    #[test]
+    fn session_is_tenant_bound_and_tamper_evident() {
+        let key = [9u8; 32];
+        let key_image = "ab".repeat(32);
+        let (session, _) = issue_user_session(&key, "tenant-a", &key_image);
+        assert_eq!(
+            verify_user_session(&key, &session, "tenant-a"),
+            Some(key_image)
+        );
+        assert!(verify_user_session(&key, &session, "tenant-b").is_none());
+        let tampered = session.replacen("tenant-a", "tenant-b", 1);
+        assert!(verify_user_session(&key, &tampered, "tenant-b").is_none());
+    }
 }

@@ -22,6 +22,7 @@ import {
     type MetricId,
 } from "./metric-catalog";
 import type { MetricValue, ReceiptLike } from "./local-aggregate";
+import { createHash } from "crypto";
 
 // ════════════════════════════════════════════════════════════════════════
 // Types
@@ -49,6 +50,7 @@ export interface StatsHonestProof {
     proof: ProofObject;
     root: string;
     metric: MetricValue;
+    checkpointId: string;
 }
 
 /** Raised when the caller asks for a proof of a metric whose ZK shape is
@@ -155,6 +157,7 @@ export class StatsProver {
         receipts: ReceiptLike[],
         merkleProofs: MerkleProof[],
         merkleRoot: string,
+        scope: { tenantId: string; agentId?: string; checkpointId?: string } = { tenantId: "default" },
     ): Promise<StatsHonestProof> {
         const def = METRICS[metric.id];
         if (!def) throw new Error(`unknown metric id: ${metric.id}`);
@@ -173,6 +176,11 @@ export class StatsProver {
                 `proveStat: receipts.length=${receipts.length} != merkleProofs.length=${merkleProofs.length}`,
             );
         }
+        if (receipts.length !== MAX_RECEIPTS_PER_PROOF) {
+            throw new Error(
+                `proveStat: this fixed-arity circuit requires exactly ${MAX_RECEIPTS_PER_PROOF} receipts; got ${receipts.length}`,
+            );
+        }
 
         const metricIdx = METRIC_ID_INDEX[metric.id];
         const witness = buildWitness({
@@ -181,6 +189,7 @@ export class StatsProver {
             receipts,
             merkleProofs,
             merkleRoot,
+            scope,
         });
 
         const { proof, publicSignals } = await this.proofRunner({
@@ -195,12 +204,13 @@ export class StatsProver {
             proof,
             root: merkleRoot,
             metric,
+            checkpointId: scope.checkpointId ?? "",
         };
     }
 }
 
 /** Hard cap matching the StatsHonestComputation.circom template parameter. */
-export const MAX_RECEIPTS_PER_PROOF = 64;
+export const MAX_RECEIPTS_PER_PROOF = 4;
 
 // ════════════════════════════════════════════════════════════════════════
 // Witness construction
@@ -212,14 +222,15 @@ function buildWitness(opts: {
     receipts: ReceiptLike[];
     merkleProofs: MerkleProof[];
     merkleRoot: string;
+    scope: { tenantId: string; agentId?: string; checkpointId?: string };
 }): Record<string, string | string[] | string[][]> {
-    const { metric, metricIdx, receipts, merkleProofs, merkleRoot } = opts;
+    const { metric, metricIdx, receipts, merkleProofs, merkleRoot, scope } = opts;
 
     // Fixed-arity tuple per receipt — the circuit consumes a 6-field row.
     // Layout: [status_bit, latency_ms, amount_usd_millis, tool_id, agent_id_hash, created_at].
     // We project receipts into integers here; the prover ships only integers
     // into snarkjs so the witness is fully deterministic.
-    const entries: string[][] = receipts.map(receiptToFields);
+    const entries: string[][] = receipts.map((r) => receiptToFields(r, scope.tenantId));
 
     return {
         root: merkleRoot,
@@ -228,6 +239,9 @@ function buildWitness(opts: {
         n_records: metric.n_records_used.toString(),
         period_start: metric.period.start.toString(),
         period_end: metric.period.end.toString(),
+        tree_size: receipts.length.toString(),
+        tenant_hash: hashStringFieldElement(scope.tenantId),
+        agent_hash: scope.agentId ? hashStringFieldElement(scope.agentId) : "0",
         entries: entries as unknown as string[][],
         pathElements: merkleProofs.map((p) => p.pathElements) as unknown as string[][],
         pathIndices: merkleProofs.map((p) =>
@@ -239,12 +253,13 @@ function buildWitness(opts: {
 /** Project a receipt into the 6-field tuple the circuit expects. Pure
  *  function — exposed for the witness-equivalence test in
  *  `test/integrity-proof.test.ts`. */
-export function receiptToFields(r: ReceiptLike): string[] {
+export function receiptToFields(r: ReceiptLike, tenantId: string = "default"): string[] {
     return [
         r.status === "ok" ? "1" : "0",
         (r.latency_ms ?? 0).toString(),
         Math.round((r.amount_usd ?? 0) * 1000).toString(), // milli-USD
         hashStringFieldElement(r.tool),
+        hashStringFieldElement(tenantId),
         hashStringFieldElement(r.agent_id),
         r.created_at.toString(),
     ];
@@ -253,15 +268,10 @@ export function receiptToFields(r: ReceiptLike): string[] {
 /** Coerce a short string into a 64-bit field-element by SHA-256 + low-bits.
  *  Deterministic — same string → same integer across runs. The full Poseidon
  *  hash happens inside the circuit; this is just a witness-side projection. */
-function hashStringFieldElement(s: string): string {
+export function hashStringFieldElement(s: string): string {
     if (!s) return "0";
-    // Tiny xor-fold hash; deterministic and good enough for the witness — the
-    // circuit re-hashes the field with Poseidon for the leaf commitment.
-    let acc = 1469598103934665603n; // FNV-64 offset basis
-    const prime = 1099511628211n;
-    for (let i = 0; i < s.length; i++) {
-        acc = (acc ^ BigInt(s.charCodeAt(i))) & 0xffffffffffffffffn;
-        acc = (acc * prime) & 0xffffffffffffffffn;
-    }
-    return acc.toString();
+    const digest = createHash("sha256").update(s, "utf8").digest("hex");
+    const bn254ScalarModulus =
+        21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+    return (BigInt(`0x${digest}`) % bn254ScalarModulus).toString();
 }
