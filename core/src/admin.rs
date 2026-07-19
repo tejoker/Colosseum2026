@@ -756,6 +756,41 @@ pub async fn health_public(
     Json(serde_json::json!({ "ok": ok }))
 }
 
+/// GET /readyz (public) — readiness probe: liveness plus a DB roundtrip.
+///
+/// 200 `{"ready":true}` when the database answers `SELECT 1`, otherwise
+/// 503 `{"ready":false,"reason":...}`. Like `/health`, the reason is kept
+/// generic — DB backend details are recon information; the full detail is
+/// logged server-side and available at `/admin/health/detailed`.
+pub async fn readyz(
+    State(state): State<Arc<RwLock<ServerState>>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let db_ok = {
+        let st = state.read().unwrap();
+        match st.db.lock() {
+            Ok(conn) => match conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)) {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::error!(target: "sauron::health", error = %e, "readyz DB probe failed");
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::error!(target: "sauron::health", error = %e, "readyz DB pool unavailable");
+                false
+            }
+        }
+    };
+    if db_ok {
+        (StatusCode::OK, Json(serde_json::json!({ "ready": true })))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ready": false, "reason": "database unreachable" })),
+        )
+    }
+}
+
 /// GET /admin/health/detailed — structured health for operators.
 ///
 /// Same shape as the previous public `/health`, but admin-gated so the

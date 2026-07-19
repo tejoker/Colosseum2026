@@ -5,12 +5,14 @@
   },
   "nav": {
     "home": "Home",
+    "welcome": "Getting started",
     "protected": "Protected",
     "activity": "Activity",
     "policies": "Policies",
     "cohorts": "Cohorts",
     "compliance": "Compliance",
     "proofs": "Proofs",
+    "explorer": "API",
     "try": "Console",
     "settings": "Settings"
   },
@@ -271,6 +273,62 @@
     "retry": "Retry",
     "noData": "No data yet.",
     "ms": "{value}ms",
-    "never": "Never"
+    "never": "Never",
+    "emptyCta": "Set up your first agent",
+    "skipToContent": "Skip to content",
+    "copy": "Copy",
+    "copied": "Copied"
+  },
+  "login": {
+    "title": "SauronID operator sign-in",
+    "operator": "Operator",
+    "password": "Password",
+    "signIn": "Sign in",
+    "signingIn": "Signing in…",
+    "failed": "Login failed ({status})",
+    "networkError": "Network error"
+  },
+  "welcome": {
+    "title": "Getting started",
+    "subtitle": "Four steps from zero to your first governed agent call.",
+    "step1Title": "You're logged in",
+    "step1Body": "Your operator session is active. Every dashboard and API call is scoped to the tenant below.",
+    "step1Operator": "Operator",
+    "step1Tenant": "Tenant",
+    "step1Loading": "Loading session…",
+    "step1Error": "Could not load the session.",
+    "step2Title": "Install an SDK",
+    "step2Body": "Pick a language and install the SauronID client.",
+    "step3Title": "Register your first agent and make a leashed call",
+    "step3Body": "This registers an agent identity and makes one signed, policy-checked call through the governance layer.",
+    "step4Title": "Watch it arrive",
+    "step4Waiting": "Waiting for your first event — checking every 3 seconds.",
+    "step4Received": "First event received",
+    "step4GoActivity": "View all activity"
+  },
+  "explorer": {
+    "title": "API explorer",
+    "subtitle": "Admin and read endpoints exposed through the dashboard proxy.",
+    "hint": "Proxy curls are same-origin and authenticate with your sauron_session cookie — copy its value from your browser into $SAURON_SESSION. Core curls hit the core directly with the static admin key.",
+    "copyProxy": "Copy as curl",
+    "copyCore": "Copy as curl (core)",
+    "run": "Run",
+    "running": "Running…",
+    "runError": "Request failed",
+    "close": "Close result",
+    "endpoints": {
+      "overview": "Aggregate counters: agents, calls today, protected today.",
+      "agents": "All registered agents with status and call metrics.",
+      "activity": "Recent agent calls (allowed and stopped), newest first.",
+      "policies": "All uploaded policy documents (summaries).",
+      "evaluate": "Evaluate an action against a policy — returns verdict and trace.",
+      "proofs": "Anchor status: Bitcoin and Solana batch counters.",
+      "batches": "Recent anchor batches with Merkle roots.",
+      "auditReports": "Generated ZK audit reports.",
+      "tenants": "Tenants the dashboard knows about.",
+      "users": "Registered people.",
+      "clients": "Registered companies.",
+      "cohorts": "Published differential-privacy cohorts."
+    }
   }
 }

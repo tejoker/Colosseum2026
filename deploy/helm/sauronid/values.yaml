@@ -1,0 +1,94 @@
+# SauronID chart values.
+#
+# Secrets are NOT templated by this chart. Create a Secret before installing
+# and point existingSecret at it. Required keys (mirrors
+# deploy/docker-compose.prod.yml):
+#   SAURON_ADMIN_KEY, SAURON_ADMIN_JWT_HS256_SECRET, SAURON_TOKEN_SECRET,
+#   SAURON_JWT_SECRET, SAURON_OPRF_SEED, SAURON_AUDIT_HMAC_KEY,
+#   SAURON_ISSUER_SHARED_SECRET, SAURON_DASHBOARD_SESSION_SECRET,
+#   SAURON_DASHBOARD_OPERATORS
+# Plus DATABASE_URL when postgres.enabled=true.
+existingSecret: sauronid-secrets
+
+core:
+  image:
+    repository: sauronid-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    port: 3001
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Non-secret environment. Enforcement flags default to the fail-closed
+  # production posture pinned in deploy/docker-compose.prod.yml; override
+  # deliberately, never by accident.
+  env:
+    ENV: production
+    SAURON_ACCEPT_SINGLE_NODE_SQLITE: "1"
+    # Required in production: comma-separated browser origins.
+    SAURON_ALLOWED_ORIGINS: ""
+    # Required in production: global damage ceiling in USD.
+    SAURON_MAX_ACTION_USD: ""
+    # Required in production: pinned reviewed guest image IDs (JSON).
+    SAURON_TRANSPARENT_IMAGE_IDS_JSON: ""
+    SAURON_BITCOIN_ANCHOR_PROVIDER: opentimestamps
+    SAURON_OTS_CALENDARS: "https://alice.btc.calendar.opentimestamps.org,https://bob.btc.calendar.opentimestamps.org"
+    SAURON_ISSUER_URLS: "http://zkp-issuer:4000"
+    SAURON_REQUIRE_CALL_SIG: "1"
+    SAURON_REQUIRE_AGENT_TYPE: "1"
+    SAURON_POLICY_ENFORCEMENT_MODE: enforce
+    SAURON_POLICY_REQUIRE_BINDING: "1"
+    SAURON_EGRESS_GATEWAY: "1"
+    SAURON_ENFORCE_STATS_FRESHNESS: "1"
+    SAURON_REQUIRE_HARDWARE_ATTESTATION: "0"
+    SAURON_REQUIRE_PREREGISTERED_MEASUREMENT: "0"
+    SAURON_ATTESTATION_GOLDEN_MEASUREMENTS: ""
+
+dashboard:
+  image:
+    repository: sauronid-dashboard
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    port: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# SQLite persistence for core (mounted at /var/lib/sauronid). Disable when
+# using postgres instead.
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+
+# External Postgres. When enabled, core runs with SAURON_DB_BACKEND=postgres
+# and reads DATABASE_URL from existingSecret. Disable persistence then.
+postgres:
+  enabled: false
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  dashboardHost: sauronid.example.com
+  coreHost: core.sauronid.example.com
+  tls: []
+
+# Hostile-agent network boundary (adapted from
+# deploy/kubernetes/agent-network-isolation.yaml). Denies all traffic for pods
+# labeled sauronid.io/role=agent except DNS and TCP/3001 to core. Requires a
+# CNI that enforces NetworkPolicy.
+networkPolicy:
+  enabled: true

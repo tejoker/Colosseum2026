@@ -413,6 +413,10 @@ async fn main() {
         // Public health — returns {ok} ONLY (no admin key). Detailed report is
         // /admin/health/detailed (admin-gated, prevents recon).
         .route("/health", get(sauron_core::admin::health_public))
+        // Kubernetes-style aliases: /healthz mirrors /health (liveness);
+        // /readyz additionally requires a live DB roundtrip (503 otherwise).
+        .route("/healthz", get(sauron_core::admin::health_public))
+        .route("/readyz", get(sauron_core::admin::readyz))
         // Public landing page — anyone hitting the core in a browser gets a
         // small HTML index with links to the actual dashboard, API endpoints,
         // and CLI examples instead of a bare 404.

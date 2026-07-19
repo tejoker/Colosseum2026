@@ -1,0 +1,3883 @@
+# SauronID Core API — OpenAPI 3.1 spec.
+# Generated from core/src/main.rs router (~lines 285-529), core/src/routes.rs,
+# and handler structs in core/src/{agent,admin,agent_action,egress_gateway}.rs,
+# core/src/aggregation/*, core/src/audit/*, core/src/attestation/*.
+# Loosely-typed admin/anchor/ring schemas are marked with "TODO-refine" comments.
+openapi: 3.1.0
+info:
+  title: SauronID Core API
+  version: 0.1.0
+  description: |
+    HTTP API of the SauronID Rust core (axum).
+
+    Error envelope: 4xx responses from the central error type use
+    `{"error":{"code":"snake_case","message":"...","fix":"..."}}` (being
+    introduced in a parallel change). Some legacy handlers still return a
+    plain-text error string body; both content types are documented on the
+    shared error responses.
+
+    Per-call signature (call-sig v2): operations marked with the
+    `x-sauron-call-*` header parameters are behind the `require_call_signature`
+    middleware. The client signs a canonical, length-prefixed payload under
+    domain `sauron.call.v2` with the agent's registered Ed25519 PoP key. Signed
+    fields, in order: version, agent_id, tenant_id, audience, method,
+    target_uri, content_type, body_sha256, config_digest, timestamp_ms, nonce.
+    Enforcement is gated by SAURON_REQUIRE_CALL_SIG (default on in production,
+    advisory in development).
+
+    Tenancy: the global tenancy layer extracts `x-sauron-tenant-id` (or the
+    admin JWT `tnt` claim) and falls back to the `default` tenant. The header
+    is documented on paths whose handlers consume the tenant id.
+
+    Dev endpoints (`/dev/*`) are mounted only when
+    SAURON_ENABLE_DEV_ENDPOINTS=1 and are marked `x-dev-only: true`.
+servers:
+  - url: http://localhost:3001
+tags:
+  - name: public
+    description: Unauthenticated surface (landing, health, metrics, registration, OPRF, ZKP material)
+  - name: agent
+    description: Agent lifecycle (register, token, verify, challenges, revocation)
+  - name: agent-actions
+    description: Ring-signature action leash, receipts, anonymous actions, usage
+  - name: egress
+    description: Agent egress telemetry and in-path egress gateway
+  - name: kyc
+    description: End-user KYC consent flow
+  - name: user
+    description: User self-service (auth, consents, credential)
+  - name: admin
+    description: Operator admin surface (x-admin-key or admin JWT)
+  - name: v1-policy
+    description: Policy DSL CRUD and evaluation (admin-gated)
+  - name: v1-agents
+    description: Server-authoritative spend ledger and policy binding (admin-gated)
+  - name: v1-proofs
+    description: ZK action-log and transparent proof verification (admin-gated)
+  - name: v1-stats
+    description: Customer stat aggregation with ZK integrity (admin-gated)
+  - name: v1-cohort
+    description: DP-published cohort surface (admin-gated)
+  - name: v1-audit
+    description: Security audit log query and periodic ZK audit reports (admin-gated)
+  - name: v1-attestation
+    description: Nitro attestation verification (admin-gated)
+  - name: dev
+    description: Dev-only endpoints (SAURON_ENABLE_DEV_ENDPOINTS=1)
+
+security: []
+
+components:
+  securitySchemes:
+    adminKey:
+      type: apiKey
+      in: header
+      name: x-admin-key
+      description: >-
+        Static admin key. Full-write keys allow any method; read-only keys
+        allow GET/HEAD only.
+    adminJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        HS256 admin JWT. Scopes: admin:read (GET/HEAD), admin:write (mutating),
+        admin:super / admin:full / * (super). Optional `tnt` claim restricts
+        tenants.
+    session:
+      type: apiKey
+      in: header
+      name: x-sauron-session
+      description: >-
+        Tenant-bound HMAC user session issued by /user/auth or
+        /user/auth/finish (format v2|tenant|key_image|exp|sig, 1h TTL).
+
+  parameters:
+    TenantId:
+      name: x-sauron-tenant-id
+      in: header
+      required: false
+      schema: { type: string, default: default }
+      description: >-
+        Tenant id consumed by the tenancy layer. Falls back to the `default`
+        tenant for legacy callers. Admin JWTs may instead carry a `tnt` claim.
+    CallSigAgentId:
+      name: x-sauron-agent-id
+      in: header
+      required: true
+      schema: { type: string }
+      description: >-
+        Call-sig v2: id of the registered agent whose Ed25519 PoP key signs
+        this call. Must match any `agent_id` present in the JSON body.
+    CallSigTs:
+      name: x-sauron-call-ts
+      in: header
+      required: true
+      schema: { type: string }
+      description: >-
+        Call-sig v2: unix-millisecond timestamp; must fall within the server
+        skew window (SAURON_CALL_SIG_SKEW_MS, default 60000 ms).
+    CallSigNonce:
+      name: x-sauron-call-nonce
+      in: header
+      required: true
+      schema: { type: string }
+      description: >-
+        Call-sig v2: unique per-call nonce, replay-consumed server-side
+        (replay returns 409).
+    CallSigSig:
+      name: x-sauron-call-sig
+      in: header
+      required: true
+      schema: { type: string }
+      description: >-
+        Call-sig v2: base64url (unpadded) Ed25519 signature over the canonical
+        length-prefixed payload under domain `sauron.call.v2` (fields: version,
+        agent_id, tenant_id, audience, method, target_uri, content_type,
+        body_sha256, config_digest, timestamp_ms, nonce).
+    CallSigAudience:
+      name: x-sauron-call-audience
+      in: header
+      required: true
+      schema: { type: string, default: sauron-core }
+      description: >-
+        Call-sig v2: intended audience; must equal the server audience
+        (SAURON_CALL_AUDIENCE, default "sauron-core").
+    CallSigProtocolVersion:
+      name: x-sauron-protocol-version
+      in: header
+      required: true
+      schema: { type: string, const: "2" }
+      description: >-
+        Call-sig protocol version; must be "2". Missing or mismatched value
+        returns 426 Upgrade Required.
+    CallSigConfigDigest:
+      name: x-sauron-agent-config-digest
+      in: header
+      required: true
+      schema: { type: string }
+      description: >-
+        Call-sig v2: agent runtime config digest; compared in constant time to
+        the registered agent_checksum. Drift returns 401 (rotate via
+        POST /agent/{agent_id}/checksum/update).
+
+  responses:
+    BadRequest:
+      description: Bad request. Legacy handlers may return a plain-text string instead of the envelope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    Unauthorized:
+      description: Unauthorized. Legacy handlers may return a plain-text string instead of the envelope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    PaymentRequired:
+      description: Payment required (budget exceeded). Legacy handlers may return plain text.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    Forbidden:
+      description: Forbidden. Legacy handlers may return a plain-text string instead of the envelope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    NotFound:
+      description: Not found. Legacy handlers may return a plain-text string instead of the envelope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    Conflict:
+      description: Conflict (duplicate registration, nonce replay, already-used consent). Legacy handlers may return plain text.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    PayloadTooLarge:
+      description: Request body exceeds the configured cap (global 64KB; call-sig routes 4MB; /agent/register 1MB).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    UpgradeRequired:
+      description: Call-signature protocol version missing or unsupported (x-sauron-protocol-version must be "2").
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    TooManyRequests:
+      description: Rate limit exceeded (global ingress limiter or per-feature limit).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    BadGateway:
+      description: Upstream (ZKP issuer or egress target) unreachable or returned an error.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+    ServiceUnavailable:
+      description: Feature disabled by flag (e.g. SAURON_ANON_RINGS, SAURON_EGRESS_GATEWAY, SAURON_DISABLE_ZKP) or dependency failing closed.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        text/plain:
+          schema: { type: string }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      description: >-
+        Central 4xx error envelope (being introduced in a parallel change).
+        Some legacy handlers still return plain-text bodies.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: snake_case machine-readable code }
+            message: { type: string }
+            fix: { type: string, description: Actionable remediation hint. }
+
+    Bytes:
+      type: array
+      items: { type: integer, minimum: 0, maximum: 255 }
+      description: Raw byte array (serde Vec<u8> JSON encoding).
+
+    Bytes32:
+      type: array
+      items: { type: integer, minimum: 0, maximum: 255 }
+      minItems: 32
+      maxItems: 32
+      description: 32-byte value (curve25519 Scalar / compressed Ristretto point) as a JSON byte array.
+
+    RingSignature:
+      type: object
+      description: bLSAG-style ring signature (core/src/ring.rs).
+      required: [c0, responses, key_image]
+      properties:
+        c0: { $ref: '#/components/schemas/Bytes32' }
+        responses:
+          type: array
+          items: { $ref: '#/components/schemas/Bytes32' }
+        key_image: { $ref: '#/components/schemas/Bytes32' }
+
+    UserData:
+      type: object
+      description: KYC profile (core/src/identity.rs).
+      required: [first_name, last_name, email]
+      properties:
+        first_name: { type: string }
+        last_name: { type: string }
+        email: { type: string }
+        date_of_birth: { type: string, default: "" }
+        nationality: { type: string, default: "" }
+
+    AgentActionEnvelope:
+      type: object
+      description: Signed action envelope for the delegated agent leash (core/src/agent_action.rs).
+      required: [agent_id, human_key_image, action, nonce, expires_at, policy_hash, ajwt_jti]
+      properties:
+        agent_id: { type: string }
+        human_key_image: { type: string }
+        action: { type: string }
+        resource: { type: string, default: "" }
+        merchant_id: { type: string, default: "" }
+        amount_minor: { type: integer, format: int64, default: 0 }
+        currency: { type: string, default: "" }
+        nonce: { type: string }
+        expires_at: { type: integer, format: int64 }
+        policy_hash: { type: string }
+        ajwt_jti: { type: string }
+
+    AgentActionProof:
+      type: object
+      description: Envelope plus ring signature. `agent_ring_signature` is accepted as an alias for `ring_signature`.
+      required: [envelope, ring_signature]
+      properties:
+        envelope: { $ref: '#/components/schemas/AgentActionEnvelope' }
+        ring_signature: { $ref: '#/components/schemas/RingSignature' }
+
+    ActionReceipt:
+      type: object
+      description: Server-signed receipt for a validated agent action.
+      required: [tenant_id, receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, timestamp, status, signature]
+      properties:
+        tenant_id: { type: string }
+        receipt_id: { type: string }
+        action_hash: { type: string }
+        agent_id: { type: string }
+        ring_key_image_hex: { type: string }
+        policy_version: { type: string }
+        ajwt_jti: { type: string }
+        pop_jkt: { type: string }
+        timestamp: { type: integer, format: int64 }
+        status: { type: string }
+        signature: { type: string }
+
+    AnonActionEnvelope:
+      type: object
+      description: Envelope for the anonymous ring-policy action path (SAURON_ANON_RINGS).
+      required: [ring_id, action, nonce, expires_at]
+      properties:
+        tenant_id: { type: string, default: default }
+        ring_id: { type: string }
+        action: { type: string }
+        resource: { type: string, default: "" }
+        merchant_id: { type: string, default: "" }
+        amount_minor: { type: integer, format: int64, default: 0 }
+        currency: { type: string, default: "" }
+        config_digest: { type: string, default: "" }
+        nonce: { type: string, minLength: 16, maxLength: 128 }
+        expires_at: { type: integer, format: int64 }
+
+    AnonActionProof:
+      type: object
+      required: [envelope, ring_signature]
+      properties:
+        envelope: { $ref: '#/components/schemas/AnonActionEnvelope' }
+        ring_signature: { $ref: '#/components/schemas/RingSignature' }
+
+    AgentRecord:
+      type: object
+      description: Public agent record (core/src/agent.rs).
+      required: [agent_id, human_key_image, agent_checksum, intent_json, assurance_level, ring_key_image_hex, issued_at, expires_at, revoked]
+      properties:
+        agent_id: { type: string }
+        human_key_image: { type: string }
+        agent_checksum: { type: string }
+        intent_json: { type: string }
+        assurance_level: { type: string }
+        ring_key_image_hex: { type: string }
+        issued_at: { type: integer, format: int64 }
+        expires_at: { type: integer, format: int64 }
+        revoked: { type: boolean }
+
+    RegisterAgentRequest:
+      type: object
+      required: [agent_checksum, public_key_hex, ring_key_image_hex]
+      properties:
+        human_key_image: { type: string, default: "" }
+        agent_checksum: { type: string }
+        agent_type: { type: string, default: "" }
+        checksum_inputs: { description: Structured checksum inputs (arbitrary JSON). }
+        attestation_blob: { type: string, default: "" }
+        attestation_kind: { type: string, default: "" }
+        attestation_challenge_id: { type: string, default: "" }
+        intent_json: { type: string, default: "{}" }
+        public_key_hex: { type: string }
+        ring_key_image_hex: { type: string }
+        ttl_secs: { type: integer, format: int64, default: 3600 }
+        parent_agent_id: { type: string, default: "" }
+        pop_jkt: { type: string, default: "" }
+        pop_public_key_b64u: { type: string, default: "" }
+        workflow_id: { type: string, default: "" }
+        delegation_chain_json: { type: string, default: "" }
+        tpm2_quote_b64: { type: [string, "null"] }
+        tpm2_attest_b64: { type: [string, "null"] }
+        tpm2_signature_b64: { type: [string, "null"] }
+        tpm2_aik_cert_pem: { type: [string, "null"] }
+        tpm2_ek_cert_chain_pem: { type: [string, "null"] }
+        tpm2_pcr_set: { type: [string, "null"] }
+        tpm2_attestation_pubkey_b64u: { type: [string, "null"] }
+        expected_measurement_hex: { type: [string, "null"] }
+        attestation_pubkey_b64u: { type: [string, "null"] }
+
+    RegisterAgentResponse:
+      type: object
+      required: [agent_id, ajwt, expires_at, assurance_level]
+      properties:
+        agent_id: { type: string }
+        ajwt: { type: string }
+        expires_at: { type: integer, format: int64 }
+        assurance_level: { type: string, description: Always "delegated_bank" on this path. }
+
+    VerifyAjwtResponse:
+      type: object
+      description: Always returned with HTTP 200; validity is carried in `valid`.
+      required: [valid, agent_id, human_key_image, intent_json, assurance_level]
+      properties:
+        valid: { type: boolean }
+        agent_id: { type: [string, "null"] }
+        human_key_image: { type: [string, "null"] }
+        intent_json: { type: [string, "null"] }
+        assurance_level: { type: [string, "null"] }
+        error: { type: string, description: Present only when validation failed. }
+
+    PolicyAction:
+      type: object
+      description: Action under evaluation (core/src/policy/invariants/mod.rs). Unknown fields rejected.
+      additionalProperties: false
+      required: [action_id, tool, timestamp]
+      properties:
+        action_id: { type: string }
+        tool: { type: string }
+        amount_usd: { type: number }
+        data_classification: { type: string }
+        signatures: { type: array, items: { type: string }, default: [] }
+        delegation_depth: { type: integer, minimum: 0, default: 0 }
+        timestamp: { type: integer, format: int64 }
+        metadata: { type: object, additionalProperties: true }
+
+    Verdict:
+      description: Internally tagged enum ("kind").
+      oneOf:
+        - type: object
+          required: [kind]
+          properties:
+            kind: { type: string, const: allow }
+        - type: object
+          required: [kind, check, reason]
+          properties:
+            kind: { type: string, const: deny }
+            check: { type: string }
+            reason: { type: string }
+
+    TransparentProofPayload:
+      type: object
+      additionalProperties: false
+      required: [program_id, receipt_b64]
+      properties:
+        program_id: { type: string }
+        receipt_b64: { type: string, description: base64 RISC-Zero receipt }
+
+    TransparentJournal:
+      type: object
+      additionalProperties: false
+      required: [protocol, program_id, statement]
+      properties:
+        protocol: { type: string }
+        program_id: { type: string }
+        statement:
+          description: Externally tagged enum ("stats" or "action_policy").
+          oneOf:
+            - type: object
+              required: [stats]
+              properties:
+                stats:
+                  type: object
+                  required: [tenant_id, checkpoint_id, action_anchor_id, merkle_root, tree_size, metric_id, claimed_value, period_start, period_end]
+                  properties:
+                    tenant_id: { type: string }
+                    checkpoint_id: { type: string }
+                    action_anchor_id: { type: string }
+                    merkle_root: { type: string }
+                    tree_size: { type: integer, format: int64, minimum: 0 }
+                    agent_id_or_none: { type: [string, "null"] }
+                    metric_id: { type: string }
+                    claimed_value: { type: integer, format: int64 }
+                    period_start: { type: integer, format: int64 }
+                    period_end: { type: integer, format: int64 }
+            - type: object
+              required: [action_policy]
+              properties:
+                action_policy:
+                  type: object
+                  required: [tenant_id, checkpoint_id, action_anchor_id, merkle_root, tree_size, predicate_id, predicate_parameters_sha256]
+                  properties:
+                    tenant_id: { type: string }
+                    checkpoint_id: { type: string }
+                    action_anchor_id: { type: string }
+                    merkle_root: { type: string }
+                    tree_size: { type: integer, format: int64, minimum: 0 }
+                    predicate_id: { type: string }
+                    predicate_parameters_sha256: { type: string }
+
+    StatsSubmission:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, metric_id, claimed_value, n_records, period_start, period_end, merkle_root, proof_b64, vk_id, checkpoint_id]
+      properties:
+        tenant_id: { type: string }
+        agent_id_or_none: { type: [string, "null"] }
+        metric_id: { type: string, enum: [success_rate, error_rate, tool_call_count, cost_total] }
+        claimed_value: { type: integer, format: int64, description: Fixed-point value x1000. }
+        n_records: { type: integer, format: int64 }
+        period_start: { type: integer, format: int64 }
+        period_end: { type: integer, format: int64 }
+        merkle_root: { type: string }
+        proof_b64: { type: string }
+        vk_id: { type: string }
+        checkpoint_id: { type: string }
+        public_inputs: { type: array, items: { type: string }, default: [] }
+
+    StatsSubmitResponse:
+      type: object
+      additionalProperties: false
+      required: [stored, latency_ms_verify, statement_hash]
+      properties:
+        stored: { type: boolean }
+        latency_ms_verify: { type: integer, minimum: 0 }
+        statement_hash: { type: string }
+
+    CohortDefinition:
+      type: object
+      additionalProperties: false
+      required: [cohort_id, label, tenant_ids, k_anonymity_threshold, epsilon_per_metric, delta]
+      properties:
+        cohort_id: { type: string }
+        label: { type: string }
+        vendor: { type: [string, "null"] }
+        sector: { type: [string, "null"] }
+        tenant_ids: { type: array, items: { type: string } }
+        k_anonymity_threshold: { type: integer, minimum: 0 }
+        epsilon_per_metric: { type: number }
+        delta: { type: number }
+        cycle_seconds: { type: [integer, "null"], minimum: 0 }
+        epsilon_cap_per_cycle: { type: [number, "null"] }
+        delta_cap_per_cycle: { type: [number, "null"] }
+
+    PublishedCohort:
+      type: object
+      additionalProperties: false
+      required: [cohort_id, label, vendor, sector, n_tenants, period_start, period_end, metrics, privacy_notice]
+      properties:
+        cohort_id: { type: string }
+        label: { type: string }
+        vendor: { type: [string, "null"] }
+        sector: { type: [string, "null"] }
+        n_tenants: { type: integer, minimum: 0 }
+        period_start: { type: integer, format: int64 }
+        period_end: { type: integer, format: int64 }
+        metrics:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [metric_id, value_p25, value_p50, value_p75, value_p95, noise_eps, suppressed]
+            properties:
+              metric_id: { type: string }
+              value_p25: { type: number }
+              value_p50: { type: number }
+              value_p75: { type: number }
+              value_p95: { type: number }
+              noise_eps: { type: number }
+              suppressed: { type: boolean }
+              suppression_reason: { type: string }
+        privacy_notice:
+          type: object
+          additionalProperties: false
+          required: [epsilon_total, delta, k_anonymity_threshold, note]
+          properties:
+            epsilon_total: { type: number }
+            delta: { type: number }
+            k_anonymity_threshold: { type: integer, minimum: 0 }
+            note: { type: string }
+            epsilon_remaining: { type: number }
+
+    AuditReport:
+      type: object
+      description: Signed periodic ZK audit report (core/src/audit/report.rs). Section internals are typed in Rust; kept loose here.
+      required: [report_id, tenant_id, agent_ids, period_start, period_end, generated_at, merkle_root, sections, anchors, zk_proofs, raw_receipts_count, policy_compliance_summary]
+      properties:
+        report_id: { type: string }
+        tenant_id: { type: string }
+        agent_ids: { type: array, items: { type: string } }
+        period_start: { type: integer, format: int64 }
+        period_end: { type: integer, format: int64 }
+        generated_at: { type: integer, format: int64 }
+        merkle_root: { type: string }
+        sections:
+          type: array
+          # TODO-refine: SectionEvidence/SectionVerdict tagged enums (audit/types.rs)
+          items:
+            type: object
+            required: [heading, statement, evidence, verdict]
+            properties:
+              heading: { type: string }
+              statement: { type: string }
+              evidence:
+                type: object
+                additionalProperties: true
+                description: >-
+                  Tagged enum ("kind") — SpendBound, ToolAllowlist, TimeWindow,
+                  AnchorChain, StatsCommitment, PolicyEvaluations.
+              verdict:
+                type: object
+                additionalProperties: true
+                description: >-
+                  Tagged enum ("state") — Confirmed, Partial (gaps),
+                  Insufficient (reason).
+        anchors:
+          type: object
+          additionalProperties: false
+          required: [merkle_root]
+          properties:
+            merkle_root: { type: string }
+            bitcoin_ots_receipt_b64: { type: [string, "null"] }
+            bitcoin_block_height: { type: [integer, "null"] }
+            solana_signature: { type: [string, "null"] }
+            solana_slot: { type: [integer, "null"] }
+        zk_proofs:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [circuit, public_inputs, proof_b64, vk_id]
+            properties:
+              circuit: { type: string }
+              public_inputs: { type: array, items: { type: string } }
+              proof_b64: { type: string }
+              vk_id: { type: string }
+        raw_receipts_count: { type: integer, minimum: 0 }
+        policy_compliance_summary:
+          type: object
+          additionalProperties: false
+          required: [policy_ids_evaluated, total_actions, allowed, denied, policy_violation_rate]
+          properties:
+            policy_ids_evaluated: { type: array, items: { type: string } }
+            total_actions: { type: integer, minimum: 0 }
+            allowed: { type: integer, minimum: 0 }
+            denied: { type: integer, minimum: 0 }
+            policy_violation_rate: { type: number }
+
+paths:
+  /:
+    get:
+      tags: [public]
+      summary: Landing page
+      description: Static HTML index with links to the dashboard, API endpoints, and CLI examples.
+      operationId: landingPage
+      responses:
+        '200':
+          description: HTML landing page.
+          content:
+            text/html:
+              schema: { type: string }
+
+  /health:
+    get:
+      tags: [public]
+      summary: Public health check
+      description: 'Returns only `{"ok": <bool>}`. The detailed report is admin-gated at /admin/health/detailed.'
+      operationId: healthPublic
+      responses:
+        '200':
+          description: Liveness flag.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+
+  /healthz:
+    get:
+      tags: [public]
+      summary: Liveness probe (alias of /health)
+      description: 'Kubernetes-style liveness alias for /health. Returns `{"ok": true}`.'
+      operationId: healthz
+      responses:
+        '200':
+          description: Liveness flag.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+
+  /readyz:
+    get:
+      tags: [public]
+      summary: Readiness probe
+      description: 'Returns 200 `{"ready":true}` when the server can serve traffic, 503 `{"ready":false,"reason":"..."}` otherwise.'
+      operationId: readyz
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready]
+                properties:
+                  ready: { type: boolean, const: true }
+        '503':
+          description: Not ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready, reason]
+                properties:
+                  ready: { type: boolean, const: false }
+                  reason: { type: string }
+
+  /metrics:
+    get:
+      tags: [public]
+      summary: Prometheus metrics
+      operationId: metrics
+      responses:
+        '200':
+          description: Prometheus text exposition format.
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /oprf:
+    post:
+      tags: [public]
+      summary: Legacy OPRF evaluation
+      description: >-
+        Evaluates a blinded Ristretto point. Quarantined in production unless
+        SAURON_ENABLE_LEGACY_OPRF=1 (dev default on).
+      operationId: oprfEvaluate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [blinded_point]
+              properties:
+                blinded_point: { $ref: '#/components/schemas/Bytes32' }
+      responses:
+        '200':
+          description: Evaluated point.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [evaluated_point]
+                properties:
+                  evaluated_point: { $ref: '#/components/schemas/Bytes' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /register:
+    post:
+      tags: [public]
+      summary: KYC deposit (partner-signed user registration)
+      description: >-
+        Registers a user identity. Authenticated by a partner ring signature
+        over the canonical registration payload (domain
+        sauron.partner-registration.v2), verified against the tenant's
+        FULL_KYC client ring. Error responses have empty bodies (status code only).
+      operationId: registerUser
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_key, key_image, profile, client_signature]
+              properties:
+                public_key: { $ref: '#/components/schemas/Bytes32' }
+                key_image: { $ref: '#/components/schemas/Bytes32' }
+                profile: { $ref: '#/components/schemas/UserData' }
+                client_signature: { $ref: '#/components/schemas/RingSignature' }
+                commitment: { type: [string, "null"] }
+                auth_public_key_b64u: { type: string, default: "", description: Ed25519 user auth public key (base64url unpadded); required outside development. }
+      responses:
+        '200':
+          description: Registered. Merkle fields present only when a commitment was supplied.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: success }
+                  merkle_root: { type: string }
+                  merkle_proof: { type: array, items: { type: string } }
+                  leaf_index: { type: integer, minimum: 0 }
+        '400': { description: "Invalid key material, commitment, or auth key (empty body)." }
+        '401': { description: Invalid or unauthorized partner ring signature (empty body). }
+
+  /bank/register:
+    post:
+      tags: [public]
+      summary: Bank-attested user registration
+      description: >-
+        Registers a user via a bank partner. Authenticated by an HMAC-SHA256
+        attestation keyed per bank (BANK_PROVIDER_SECRETS_JSON), 5-minute
+        skew, nonce replay-consumed. Disabled by SAURON_DISABLE_BANK_KYC=1.
+      operationId: bankRegisterUser
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bank_client_name, public_key_hex, key_image_hex, first_name, last_name, email, date_of_birth, nationality, auth_public_key_b64u, attestation_signature, attestation_issued_at, attestation_nonce]
+              properties:
+                bank_client_name: { type: string }
+                bank_customer_id: { type: [string, "null"] }
+                public_key_hex: { type: string, description: 32-byte compressed Ristretto point (hex). }
+                key_image_hex: { type: string }
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string }
+                date_of_birth: { type: string }
+                nationality: { type: string }
+                auth_public_key_b64u: { type: string }
+                attestation_signature: { type: string, description: hex HMAC-SHA256 over the canonical payload. }
+                attestation_issued_at: { type: integer, format: int64 }
+                attestation_nonce: { type: string }
+      responses:
+        '200':
+          description: Registered (or pre-existing user re-linked).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, bank_client_name, key_image_hex, user_preexisting]
+                properties:
+                  status: { type: string, const: success }
+                  bank_client_name: { type: string }
+                  key_image_hex: { type: string }
+                  user_preexisting: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /register/bank:
+    post:
+      tags: [public]
+      summary: Bank-attested user registration (alias of /bank/register)
+      operationId: bankRegisterUserAlias
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Same body as POST /bank/register.
+              additionalProperties: true
+      responses:
+        '200':
+          description: Same response as POST /bank/register.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /zkp/proof_material:
+    post:
+      tags: [public]
+      summary: Fetch ZKP proof material from the issuer
+      description: >-
+        Proxies the issuer's /proof-material endpoint verbatim. Disabled by
+        SAURON_DISABLE_ZKP=1.
+      operationId: zkpProofMaterial
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                credential_hash: { type: [string, "null"] }
+                leaf_index: { type: [integer, "null"], minimum: 0 }
+      responses:
+        '200':
+          description: Issuer proof-material JSON (passthrough).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  # ── Dev-only endpoints (mounted only when SAURON_ENABLE_DEV_ENDPOINTS=1) ──
+
+  /dev/register_user:
+    post:
+      tags: [dev]
+      x-dev-only: true
+      summary: Dev-only user registration (email + password)
+      description: Mounted only when SAURON_ENABLE_DEV_ENDPOINTS=1; also gated on the development runtime (403 otherwise).
+      operationId: devRegisterUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, site_name]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                site_name: { type: string }
+                first_name: { type: string, default: "" }
+                last_name: { type: string, default: "" }
+                date_of_birth: { type: string, default: "" }
+                nationality: { type: string, default: "" }
+      responses:
+        '200':
+          description: Derived identity key material.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [public_key_hex, key_image_hex, message]
+                properties:
+                  public_key_hex: { type: string }
+                  key_image_hex: { type: string }
+                  message: { type: string, const: ok }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /dev/buy_tokens:
+    post:
+      tags: [dev]
+      x-dev-only: true
+      summary: Dev-only token top-up for a client site
+      description: Mounted only when SAURON_ENABLE_DEV_ENDPOINTS=1; dev-runtime gated.
+      operationId: devBuyTokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [site_name, amount]
+              properties:
+                site_name: { type: string }
+                amount: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: New balance.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message, new_tokens_b]
+                properties:
+                  message: { type: string, const: ok }
+                  new_tokens_b: { type: integer, format: int64 }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /dev/leash/demo:
+    post:
+      tags: [dev]
+      x-dev-only: true
+      summary: Dev-only agent-leash self-test scenario
+      description: Mounted only when SAURON_ENABLE_DEV_ENDPOINTS=1; dev-runtime gated. Runs the full leash pass/fail matrix.
+      operationId: devLeashDemo
+      responses:
+        '200':
+          description: Leash scenario outcomes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid_leash_passes, missing_signature_fails, bad_signature_fails, tampered_amount_fails, wrong_merchant_fails, nonce_replay_fails, ajwt_replay_fails, revoked_agent_fails, out_of_ring_agent_fails, receipt_verification]
+                properties:
+                  valid_leash_passes: { type: boolean }
+                  missing_signature_fails: { type: boolean }
+                  bad_signature_fails: { type: boolean }
+                  tampered_amount_fails: { type: boolean }
+                  wrong_merchant_fails: { type: boolean }
+                  nonce_replay_fails: { type: boolean }
+                  ajwt_replay_fails: { type: boolean }
+                  revoked_agent_fails: { type: boolean }
+                  out_of_ring_agent_fails: { type: boolean }
+                  receipt_verification: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /dev/consent_profile:
+    post:
+      tags: [dev]
+      x-dev-only: true
+      summary: Dev-only consent-token profile disclosure
+      description: Mounted only when SAURON_ENABLE_DEV_ENDPOINTS=1; dev-runtime gated.
+      operationId: devConsentProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consent_token, site_name]
+              properties:
+                consent_token: { type: string }
+                site_name: { type: string }
+                min_age: { type: [integer, "null"], description: Defaults to 18 when omitted. }
+                required_fields: { type: array, items: { type: string }, default: [] }
+      responses:
+        '200':
+          description: Full profile disclosure (dev only).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [first_name, last_name, email, date_of_birth, nationality, min_age, is_over_threshold, profile_complete, missing_fields, dev_only]
+                properties:
+                  first_name: { type: string }
+                  last_name: { type: string }
+                  email: { type: string }
+                  date_of_birth: { type: string }
+                  nationality: { type: string }
+                  min_age: { type: integer, format: int64 }
+                  is_over_threshold: { type: boolean }
+                  profile_complete: { type: boolean }
+                  missing_fields: { type: array, items: { type: string } }
+                  dev_only: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── Agent lifecycle ──
+
+  /agent/register:
+    post:
+      tags: [agent]
+      summary: Register a delegated agent
+      description: >-
+        Registers an agent bound to the authenticated human (x-sauron-session).
+        Requires bank-verified KYC link, PoP key, attestation challenge, and
+        checksum inputs depending on runtime flags. Body limit raised to 1MB
+        for TPM2 PEM cert chains.
+      operationId: registerAgent
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterAgentRequest' }
+      responses:
+        '200':
+          description: Agent registered; A-JWT issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterAgentResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /agent/token:
+    post:
+      tags: [agent]
+      summary: Issue a fresh A-JWT for an existing agent
+      description: TTL clamped to 15..3600 seconds and capped to the remaining agent lifetime.
+      operationId: issueAgentToken
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id]
+              properties:
+                agent_id: { type: string }
+                ttl_secs: { type: integer, format: int64, default: 3600 }
+      responses:
+        '200':
+          description: Fresh A-JWT.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_id, ajwt, expires_at]
+                properties:
+                  agent_id: { type: string }
+                  ajwt: { type: string }
+                  expires_at: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agent/verify:
+    post:
+      tags: [agent]
+      summary: Verify an A-JWT (optionally consuming its jti and a PoP challenge)
+      description: Always returns HTTP 200; the `valid` field carries the outcome.
+      operationId: verifyAgentToken
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ajwt]
+              properties:
+                ajwt: { type: string }
+                consume_jti: { type: boolean, default: false }
+                pop_challenge_id: { type: string, default: "" }
+                pop_jws: { type: string, default: "" }
+      responses:
+        '200':
+          description: Verification result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerifyAjwtResponse' }
+
+  /agent/attestation/challenge:
+    post:
+      tags: [agent]
+      summary: Issue an attestation challenge bound to a PoP key
+      description: Challenge id prefix `atc_`; expires after 300 seconds.
+      operationId: agentAttestationChallenge
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pop_public_key_b64u]
+              properties:
+                pop_public_key_b64u: { type: string, description: "Ed25519 public key, base64url unpadded, 32 bytes." }
+      responses:
+        '200':
+          description: Attestation challenge.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attestation_challenge_id, nonce, pop_jkt, expires_at]
+                properties:
+                  attestation_challenge_id: { type: string }
+                  nonce: { type: string }
+                  pop_jkt: { type: string, description: RFC 7638 JWK thumbprint of the PoP key. }
+                  expires_at: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/pop/challenge:
+    post:
+      tags: [agent]
+      summary: Issue a proof-of-possession challenge for an agent
+      description: Challenge TTL 300 seconds. The agent signs the challenge as a JWS for /agent/verify or consent/payment flows.
+      operationId: agentPopChallenge
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id]
+              properties:
+                agent_id: { type: string }
+      responses:
+        '200':
+          description: PoP challenge.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pop_challenge_id, challenge, expires_at]
+                properties:
+                  pop_challenge_id: { type: string }
+                  challenge: { type: string }
+                  expires_at: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agent/action/challenge:
+    post:
+      tags: [agent-actions]
+      summary: Build a signable action envelope (call-signed)
+      description: >-
+        Returns the server-built envelope, its canonical encoding, the ring
+        public keys, and the signer index for the delegated agent leash.
+        Requires the per-call signature header set.
+      operationId: agentActionChallenge
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, human_key_image, action, ajwt_jti]
+              properties:
+                agent_id: { type: string }
+                human_key_image: { type: string }
+                action: { type: string }
+                resource: { type: string, default: "" }
+                merchant_id: { type: string, default: "" }
+                amount_minor: { type: integer, format: int64, default: 0 }
+                currency: { type: string, default: "" }
+                ajwt_jti: { type: string }
+                ttl_secs: { type: integer, format: int64, default: 120, description: Clamped to 15..300. }
+      responses:
+        '200':
+          description: Envelope and ring material to sign.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [envelope, canonical, action_hash, agent_ring_public_keys_hex, signer_index, signing_public_key_hex]
+                properties:
+                  envelope: { $ref: '#/components/schemas/AgentActionEnvelope' }
+                  canonical: { type: string }
+                  action_hash: { type: string }
+                  agent_ring_public_keys_hex: { type: array, items: { type: string } }
+                  signer_index: { type: integer, minimum: 0 }
+                  signing_public_key_hex: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+
+  /agent/action/receipt/verify:
+    post:
+      tags: [agent-actions]
+      summary: Verify an action receipt signature and storage
+      description: Always returns HTTP 200; `valid` = signature valid AND receipt seen in DB.
+      operationId: receiptVerify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [receipt]
+              properties:
+                receipt: { $ref: '#/components/schemas/ActionReceipt' }
+      responses:
+        '200':
+          description: Verification result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid, signature_valid, stored, action_hash, agent_id, policy_version, status]
+                properties:
+                  valid: { type: boolean }
+                  signature_valid: { type: boolean }
+                  stored: { type: boolean }
+                  action_hash: { type: string }
+                  agent_id: { type: string }
+                  policy_version: { type: string }
+                  status: { type: string }
+
+  /agent/action/anon:
+    post:
+      tags: [agent-actions]
+      summary: Submit an anonymous ring-policy action
+      description: >-
+        Anonymous ring-signature action path (phase 3). Gated by
+        SAURON_ANON_RINGS=1. The ring signature is the auth; no per-call
+        signature layer.
+      operationId: submitAnonAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnonActionProof' }
+      responses:
+        '200':
+          description: Action receipt.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActionReceipt' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /agent/usage:
+    post:
+      tags: [agent-actions]
+      summary: Report token usage against a prior anon-ring receipt
+      description: Gated by SAURON_ANON_RINGS=1 (phase 4).
+      operationId: recordUsage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [receipt_id]
+              properties:
+                receipt_id: { type: string }
+                model_id: { type: string, default: "" }
+                input_tokens: { type: integer, format: int64, default: 0, minimum: 0 }
+                output_tokens: { type: integer, format: int64, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: Updated pseudonym usage totals.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ring_id, key_image_hex, input_tokens, output_tokens, usd]
+                properties:
+                  ring_id: { type: string }
+                  key_image_hex: { type: string }
+                  input_tokens: { type: integer, format: int64 }
+                  output_tokens: { type: integer, format: int64 }
+                  usd: { type: number }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /agent/payment/authorize:
+    post:
+      tags: [agent-actions]
+      summary: Authorize an agent payment (call-signed)
+      description: >-
+        Verifies A-JWT + mandatory PoP + strict intent (maxAmount, currency,
+        merchant allowlist) + bound policy + ring-signature leash, consumes
+        the jti, and returns a payment authorization with an action receipt.
+      operationId: agentPaymentAuthorize
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ajwt, amount_minor, currency, payment_ref, agent_action]
+              properties:
+                ajwt: { type: string }
+                amount_minor: { type: integer, format: int64, minimum: 1 }
+                currency: { type: string, description: 3-letter ISO code (normalized uppercase). }
+                payment_ref: { type: string, minLength: 1, maxLength: 128 }
+                merchant_id: { type: string, default: "" }
+                pop_challenge_id: { type: string, default: "" }
+                pop_jws: { type: string, default: "" }
+                agent_action: { $ref: '#/components/schemas/AgentActionProof' }
+      responses:
+        '200':
+          description: Payment authorized.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorized, authorization_id, agent_id, amount_minor, currency, merchant_id, payment_ref, assurance_level, policy_version, action_receipt, expires_at, controls]
+                properties:
+                  authorized: { type: boolean, const: true }
+                  authorization_id: { type: string, description: Prefix payauth_. }
+                  agent_id: { type: string }
+                  amount_minor: { type: integer, format: int64 }
+                  currency: { type: string }
+                  merchant_id: { type: string }
+                  payment_ref: { type: string }
+                  assurance_level: { type: string }
+                  policy_version: { type: string }
+                  action_receipt: { $ref: '#/components/schemas/ActionReceipt' }
+                  expires_at: { type: integer, format: int64, description: "min(A-JWT exp, now+300)." }
+                  controls:
+                    type: object
+                    description: Compliance decision, issuer circuit snapshots, and risk window.
+                    properties:
+                      compliance: { type: object, additionalProperties: true }
+                      issuer: { type: object, additionalProperties: true }
+                      risk:
+                        type: object
+                        properties:
+                          window_secs: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /policy/authorize:
+    post:
+      tags: [agent-actions]
+      summary: Evaluate the KYA policy matrix for an agent action (call-signed)
+      description: >-
+        Returns 200 for both allow and deny; `allowed` carries the verdict. On
+        allow, the `agent_action` ring leash is validated and a receipt issued.
+      operationId: policyAuthorize
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, action]
+              properties:
+                agent_id: { type: string }
+                action: { type: string }
+                ajwt: { type: [string, "null"], description: Required in practice ("ajwt is required for policy authorization"). }
+                agent_action:
+                  oneOf:
+                    - $ref: '#/components/schemas/AgentActionProof'
+                    - type: "null"
+      responses:
+        '200':
+          description: Policy verdict. `action_receipt` present only when allowed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_id, action, assurance_level, allowed, reason, policy_version]
+                properties:
+                  agent_id: { type: string }
+                  action: { type: string }
+                  assurance_level: { type: string }
+                  allowed: { type: boolean }
+                  reason: { type: string }
+                  policy_version: { type: string }
+                  action_receipt: { $ref: '#/components/schemas/ActionReceipt' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+
+  /agent/list/{human_key_image}:
+    get:
+      tags: [agent]
+      summary: List agents registered by a human
+      description: The session's key image must equal the path parameter.
+      operationId: listAgents
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: human_key_image
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Agents for this human.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgentRecord' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/{agent_id}/checksum/update:
+    post:
+      tags: [agent]
+      summary: Rotate an agent's checksum from new inputs
+      operationId: updateAgentChecksum
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: agent_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_type, checksum_inputs]
+              properties:
+                agent_type: { type: string }
+                checksum_inputs: { description: Structured checksum inputs (arbitrary JSON). }
+                reason: { type: string, default: "" }
+      responses:
+        '200':
+          description: Rotation result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_id, from_checksum, to_checksum, version]
+                properties:
+                  agent_id: { type: string }
+                  from_checksum: { type: string }
+                  to_checksum: { type: string }
+                  version: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agent/{agent_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - name: agent_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [agent]
+      summary: Fetch a public agent record
+      operationId: getAgent
+      responses:
+        '200':
+          description: Agent record.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentRecord' }
+        '404': { description: Agent not found (empty body). }
+    delete:
+      tags: [agent]
+      summary: Revoke an agent (owner only)
+      operationId: revokeAgent
+      security:
+        - session: []
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked, agent_id]
+                properties:
+                  revoked: { type: boolean, const: true }
+                  agent_id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agent/egress/log:
+    post:
+      tags: [egress]
+      summary: Voluntary egress telemetry (call-signed)
+      description: >-
+        Records an outbound call made by an agent. Disabled in production
+        unless SAURON_ENABLE_VOLUNTARY_EGRESS_LOG is set (use the one-use
+        capability gateway instead). The x-sauron-agent-id header must equal
+        the body agent_id.
+      operationId: agentEgressLog
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, target_host, method]
+              properties:
+                agent_id: { type: string }
+                target_host: { type: string }
+                target_path: { type: string, default: "" }
+                method: { type: string }
+                body_hash_hex: { type: string, default: "", description: Empty or 32-byte hex. }
+                status_code: { type: integer, format: int64, default: 0 }
+      responses:
+        '200':
+          description: Log entry recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, ts]
+                properties:
+                  id: { type: integer, format: int64 }
+                  ts: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /agent/egress/capability:
+    post:
+      tags: [egress]
+      summary: Issue a one-use egress capability (call-signed)
+      description: >-
+        Validates the A-JWT, the intent egress allowlist, and the
+        ring-signature action leash (action "egress", resource = url), then
+        issues an opaque one-use capability. Gated by SAURON_EGRESS_GATEWAY=1.
+        Capability expiry = min(A-JWT exp, envelope expiry, now+120).
+      operationId: issueEgressCapability
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, ajwt, method, url, body_hash_hex, agent_action]
+              properties:
+                agent_id: { type: string }
+                ajwt: { type: string }
+                method: { type: string }
+                url: { type: string, description: "http(s) URL without userinfo, query, or fragment." }
+                body_hash_hex: { type: string, description: 32-byte hex SHA-256 of the request body. }
+                agent_action: { $ref: '#/components/schemas/AgentActionProof' }
+      responses:
+        '200':
+          description: One-use capability.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capability, expires_at, action_receipt]
+                properties:
+                  capability: { type: string, description: "Opaque bearer, prefix egc_." }
+                  expires_at: { type: integer, format: int64 }
+                  action_receipt: { $ref: '#/components/schemas/ActionReceipt' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /agent/egress/proxy:
+    post:
+      tags: [egress]
+      summary: Forward a request through the egress gateway (call-signed)
+      description: >-
+        Consumes a one-use capability and forwards the request if the intent
+        allowlist (host, method, path prefix, headers, body policy, SSRF
+        checks) permits it. Redirects are returned verbatim, not followed.
+        Gated by SAURON_EGRESS_GATEWAY=1.
+      operationId: agentEgressProxy
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability, method, url]
+              properties:
+                capability: { type: string }
+                method: { type: string }
+                url: { type: string }
+                headers:
+                  type: object
+                  additionalProperties: { type: string }
+                  default: {}
+                  description: Forward headers; must be in the allowlist entry's allowed_headers.
+                body: { type: [string, "null"] }
+      responses:
+        '200':
+          description: Upstream response (body may be empty under digest_only policy).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, body, body_sha256_hex, body_bytes]
+                properties:
+                  status: { type: integer, description: Upstream HTTP status. }
+                  body: { type: string }
+                  body_sha256_hex: { type: string }
+                  body_bytes: { type: integer, minimum: 0 }
+                  redacted:
+                    type: array
+                    items: { type: string }
+                    description: PII classes redacted from the forwarded request (omitted when empty).
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /agent/kyc/consent:
+    post:
+      tags: [agent-actions]
+      summary: Agent claims a pending KYC consent on behalf of its human (call-signed)
+      description: >-
+        Requires A-JWT (in body), PoP challenge/JWS, and a ring-signature
+        action leash. delegated_nonbank agents are refused.
+      operationId: agentKycConsent
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ajwt, site_name, request_id, agent_action]
+              properties:
+                ajwt: { type: string }
+                site_name: { type: string }
+                request_id: { type: string }
+                pop_challenge_id: { type: string, default: "" }
+                pop_jws: { type: string, default: "" }
+                agent_action: { $ref: '#/components/schemas/AgentActionProof' }
+      responses:
+        '200':
+          description: Consent token issued to the agent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [consent_token, expires_at, on_behalf_of, agent_id, assurance_level, action_receipt]
+                properties:
+                  consent_token: { type: string }
+                  expires_at: { type: integer, format: int64, description: now + 300. }
+                  on_behalf_of: { type: string, description: Human key image. }
+                  agent_id: { type: string }
+                  assurance_level: { type: string }
+                  action_receipt: { $ref: '#/components/schemas/ActionReceipt' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /agent/vc/issue:
+    post:
+      tags: [agent]
+      summary: Issue a self-sovereign agent VC (call-signed)
+      description: >-
+        Issues a W3C Verifiable Credential for an autonomous agent, rooted in
+        either the bank-linked human trust root or a non-bank
+        CredentialVerification ZK proof. Requires x-sauron-session. Disabled
+        by SAURON_DISABLE_ZKP=1. Max 10 active agent VCs per human.
+      operationId: agentVcIssue
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - $ref: '#/components/parameters/CallSigAgentId'
+        - $ref: '#/components/parameters/CallSigTs'
+        - $ref: '#/components/parameters/CallSigNonce'
+        - $ref: '#/components/parameters/CallSigSig'
+        - $ref: '#/components/parameters/CallSigAudience'
+        - $ref: '#/components/parameters/CallSigProtocolVersion'
+        - $ref: '#/components/parameters/CallSigConfigDigest'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_checksum, description, scope, public_key_hex, ring_key_image_hex, pop_jkt, pop_public_key_b64u]
+              properties:
+                human_key_image: { type: string, default: "", description: Optional hint; must match the authenticated session when present. }
+                agent_checksum: { type: string }
+                description: { type: string }
+                scope: { type: array, items: { type: string } }
+                public_key_hex: { type: string }
+                ring_key_image_hex: { type: string }
+                pop_jkt: { type: string }
+                pop_public_key_b64u: { type: string }
+                ttl_hours: { type: integer, format: int64, default: 24, minimum: 1, maximum: 720 }
+                zkp_proof: { description: Groth16 proof JSON (non-bank path). }
+                zkp_circuit: { type: [string, "null"], description: Defaults to CredentialVerification. }
+                zkp_public_signals:
+                  oneOf:
+                    - type: array
+                      items: { type: string }
+                    - type: "null"
+      responses:
+        '200':
+          description: Agent VC issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_id, assurance_level, vc, vc_hash, ajwt, agent_public_key_hex, ring_key_image_hex, expires_at, trust_chain]
+                properties:
+                  agent_id: { type: string, description: Prefix agt_. }
+                  assurance_level: { type: string, const: autonomous_web3 }
+                  vc:
+                    type: object
+                    additionalProperties: true
+                    description: Full W3C VC (contexts, type, issuer did:sauron:idp, credentialSubject with agentId, agentChecksum, humanOwner, scope, popThumbprint, rootOfTrust, kyaEvidence).
+                  vc_hash: { type: string, description: hex HMAC. }
+                  ajwt: { type: string }
+                  agent_public_key_hex: { type: string }
+                  ring_key_image_hex: { type: string }
+                  expires_at: { type: integer, format: int64 }
+                  trust_chain: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '426': { $ref: '#/components/responses/UpgradeRequired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  # ── End-user KYC consent flow ──
+
+  /kyc/request:
+    post:
+      tags: [kyc]
+      summary: Create a consent request for a ZKP_ONLY site
+      description: >-
+        Site must be registered as ZKP_ONLY. Default requested_claims:
+        ["age_over_threshold","age_threshold"]. Supported claims:
+        age_over_threshold, age_threshold, credential_valid,
+        nationality_match, merkle_inclusion. Disabled by
+        SAURON_DISABLE_USER_KYC=1.
+      operationId: kycRequest
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [site_name]
+              properties:
+                site_name: { type: string }
+                requested_claims: { type: array, items: { type: string }, default: [] }
+                redirect_origin: { type: string, default: "" }
+      responses:
+        '200':
+          description: Consent request created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id, consent_url, expires_at]
+                properties:
+                  request_id: { type: string }
+                  consent_url: { type: string }
+                  expires_at: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /kyc/consent:
+    post:
+      tags: [kyc]
+      summary: Grant consent (email + password)
+      description: Disabled by SAURON_DISABLE_USER_KYC=1.
+      operationId: kycConsent
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id, email, password]
+              properties:
+                request_id: { type: string }
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Consent token issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [consent_token, expires_at]
+                properties:
+                  consent_token: { type: string }
+                  expires_at: { type: integer, format: int64, description: now + 300. }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /kyc/consent_info/{request_id}:
+    get:
+      tags: [kyc]
+      summary: Poll a consent request's status
+      operationId: kycConsentInfo
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Consent request status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id, site_name, requested_claims, status]
+                properties:
+                  request_id: { type: string }
+                  site_name: { type: string }
+                  requested_claims: { type: array, items: { type: string } }
+                  status: { type: string, enum: [granted, pending] }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /kyc/retrieve:
+    post:
+      tags: [kyc]
+      summary: Retrieve ZKP-only KYC claims with a consent token
+      description: >-
+        Consumes the consent token and verifies the supplied ZK proof
+        (AgeVerification or CredentialVerification). Agent-issued consents are
+        additionally bound to the delegated agent via the x-agent-ajwt header
+        (delegated_agent_binding_middleware) plus an agent_action ring leash.
+        Disabled by SAURON_DISABLE_USER_KYC=1.
+      operationId: kycRetrieve
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: x-agent-ajwt
+          in: header
+          required: false
+          schema: { type: string }
+          description: A-JWT of the delegated agent (required when the consent was issued to an agent).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consent_token, site_name]
+              properties:
+                consent_token: { type: string }
+                site_name: { type: string }
+                zkp_proof: { description: Groth16 proof JSON. }
+                zkp_circuit: { type: [string, "null"], description: Defaults to CredentialVerification. }
+                zkp_public_signals:
+                  oneOf:
+                    - type: array
+                      items: { type: string }
+                    - type: "null"
+                required_action: { type: [string, "null"], description: Mandatory for agent-mediated retrieval. }
+                agent_action:
+                  oneOf:
+                    - $ref: '#/components/schemas/AgentActionProof'
+                    - type: "null"
+      responses:
+        '200':
+          description: ZKP-only disclosure.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [disclosure_mode, proof, billing, claims, identity, controls]
+                properties:
+                  disclosure_mode: { type: string, const: zkp_only }
+                  proof:
+                    type: object
+                    required: [verified, circuit, public_signals]
+                    properties:
+                      verified: { type: boolean, const: true }
+                      circuit: { type: string }
+                      public_signals: { type: array, items: { type: string } }
+                  billing:
+                    type: object
+                    required: [charged, unit, amount, tokens_b_remaining]
+                    properties:
+                      charged: { type: boolean }
+                      unit: { type: string, const: connection }
+                      amount: { type: integer }
+                      tokens_b_remaining: { type: integer, format: int64 }
+                  claims:
+                    type: object
+                    additionalProperties: true
+                    description: Disclosed claim subset; values are booleans or numbers.
+                  identity:
+                    type: object
+                    required: [is_agent, human_in_user_ring, trust_verified]
+                    properties:
+                      is_agent: { type: boolean }
+                      agent_id: { type: [string, "null"] }
+                      agent_pub_key_hex: { type: [string, "null"] }
+                      agent_assurance_level: { type: [string, "null"] }
+                      human_in_user_ring: { type: boolean }
+                      agent_in_agent_ring: { type: [boolean, "null"] }
+                      trust_verified: { type: boolean }
+                      policy:
+                        type: [object, "null"]
+                        properties:
+                          action: { type: string }
+                          allowed: { type: boolean }
+                          reason: { type: string }
+                          assurance_level: { type: string }
+                          policy_version: { type: string }
+                      action_receipt:
+                        oneOf:
+                          - $ref: '#/components/schemas/ActionReceipt'
+                          - type: "null"
+                  controls: { type: object, additionalProperties: true, description: "Compliance decision, issuer snapshots, risk window." }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  # ── User self-service ──
+
+  /user/auth:
+    post:
+      tags: [user]
+      summary: Legacy email+password session (dev)
+      description: >-
+        Password-derived legacy identity authentication; disabled in
+        production unless SAURON_ENABLE_LEGACY_OPRF_AUTH=1 — use
+        /user/auth/challenge + /user/auth/finish instead.
+      operationId: userAuth
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Session issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, key_image, expires_at, first_name, last_name]
+                properties:
+                  session: { type: string }
+                  key_image: { type: string }
+                  expires_at: { type: integer, format: int64 }
+                  first_name: { type: string }
+                  last_name: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /user/auth/challenge:
+    post:
+      tags: [user]
+      summary: Start Ed25519 challenge authentication
+      description: Unknown body fields are rejected (deny_unknown_fields).
+      operationId: userAuthChallenge
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [key_image_hex]
+              properties:
+                key_image_hex: { type: string, description: 32-byte hex. }
+      responses:
+        '200':
+          description: Challenge to sign.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challenge_id, nonce, expires_at, signing_payload_b64u]
+                properties:
+                  challenge_id: { type: string, description: Prefix uac_. }
+                  nonce: { type: string }
+                  expires_at: { type: integer, format: int64, description: now + 120. }
+                  signing_payload_b64u: { type: string, description: "Canonical payload (domain sauron.user-auth-challenge.v1), base64url unpadded." }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /user/auth/finish:
+    post:
+      tags: [user]
+      summary: Finish Ed25519 challenge authentication
+      description: All authentication failures return 401 "invalid authentication proof". Unknown body fields rejected.
+      operationId: userAuthFinish
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [challenge_id, key_image_hex, signature_b64u]
+              properties:
+                challenge_id: { type: string }
+                key_image_hex: { type: string }
+                signature_b64u: { type: string }
+      responses:
+        '200':
+          description: Session issued (1h TTL).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, key_image, expires_at, authentication]
+                properties:
+                  session: { type: string }
+                  key_image: { type: string }
+                  expires_at: { type: integer, format: int64 }
+                  authentication: { type: string, const: ed25519_challenge_v1 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /user/consents:
+    get:
+      tags: [user]
+      summary: List the authenticated user's consents
+      operationId: userConsents
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Consents.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [consents]
+                properties:
+                  consents:
+                    type: array
+                    items:
+                      type: object
+                      required: [request_id, site_name, granted_at, used, revoked]
+                      properties:
+                        request_id: { type: string }
+                        site_name: { type: string }
+                        granted_at: { type: integer, format: int64 }
+                        used: { type: boolean }
+                        revoked: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /user/credential:
+    get:
+      tags: [user]
+      summary: Fetch (or claim) the user's verifiable credential
+      description: >-
+        Returns the cached VC or claims it from the issuer
+        (pre-authorized-code grant). Disabled by SAURON_DISABLE_ZKP=1.
+      operationId: userGetCredential
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: Credential (issuer VC JSON).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [credential, cached]
+                properties:
+                  credential: { type: object, additionalProperties: true }
+                  cached: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /user/consent/{request_id}:
+    delete:
+      tags: [user]
+      summary: Revoke one of the user's consents
+      operationId: userRevokeConsent
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── Admin (x-admin-key or admin JWT on every route) ──
+
+  /admin/clients:
+    post:
+      tags: [admin]
+      summary: Create a partner site/client
+      operationId: adminAddClient
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, client_type]
+              properties:
+                name: { type: string }
+                client_type: { type: string, description: "ClientType enum (e.g. BANK, ZKP_ONLY, FULL_KYC)." }
+                public_key_hex: { type: [string, "null"] }
+                key_image_hex: { type: [string, "null"] }
+      responses:
+        '200':
+          description: Client created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, public_key_hex, key_image_hex, client_type]
+                properties:
+                  name: { type: string }
+                  public_key_hex: { type: string }
+                  key_image_hex: { type: string }
+                  client_type: { type: string }
+                  private_key_hex_once: { type: string, description: Returned once at creation only. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [admin]
+      summary: List clients (cross-tenant super-admin)
+      operationId: adminGetClients
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Clients.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [name, public_key_hex, key_image_hex, tokens_b, client_type]
+                  properties:
+                    name: { type: string }
+                    public_key_hex: { type: string }
+                    key_image_hex: { type: string }
+                    tokens_b: { type: integer, format: int64 }
+                    client_type: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: List human identities and PII (cross-tenant super-admin)
+      operationId: adminGetUsers
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [key_image_hex, first_name, last_name, nationality]
+                  properties:
+                    key_image_hex: { type: string }
+                    first_name: { type: string }
+                    last_name: { type: string }
+                    nationality: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/site/{name}/users:
+    get:
+      tags: [admin]
+      summary: List users seen by a site (cross-tenant super-admin)
+      operationId: adminGetSiteUsers
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Site users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [first_name, last_name, email, nationality, source, timestamp]
+                  properties:
+                    first_name: { type: string }
+                    last_name: { type: string }
+                    email: { type: string }
+                    nationality: { type: string }
+                    source: { type: string }
+                    timestamp: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/site/{name}/zkp_proofs:
+    get:
+      tags: [admin]
+      summary: ZKP verification log for a site (cross-tenant super-admin)
+      operationId: adminGetSiteZkpProofs
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Proof log.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, timestamp, ring_size, proved_claims, raw_detail]
+                  properties:
+                    id: { type: integer, format: int64 }
+                    timestamp: { type: integer, format: int64 }
+                    ring_size: { type: integer, minimum: 0 }
+                    proved_claims: { type: array, items: { type: string } }
+                    raw_detail: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/requests:
+    get:
+      tags: [admin]
+      summary: Recent request log (cross-tenant super-admin)
+      operationId: adminGetRequests
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Request log entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, timestamp, action_type, status, detail]
+                  properties:
+                    id: { type: integer, format: int64 }
+                    timestamp: { type: integer, format: int64 }
+                    action_type: { type: string }
+                    status: { type: string }
+                    detail: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/stats:
+    get:
+      tags: [admin]
+      summary: Deployment statistics (cross-tenant super-admin)
+      operationId: adminGetStats
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Stats.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total_users, total_clients, total_api_calls, total_kyc_retrievals, total_agent_calls, total_tokens_b_issued, total_tokens_b_spent, exchange_rate, controls]
+                properties:
+                  total_users: { type: integer, format: int64 }
+                  total_clients: { type: integer, format: int64 }
+                  total_api_calls: { type: integer, format: int64 }
+                  total_kyc_retrievals: { type: integer, format: int64 }
+                  total_agent_calls: { type: integer, format: int64 }
+                  total_tokens_b_issued: { type: integer, format: int64 }
+                  total_tokens_b_spent: { type: integer, format: int64 }
+                  exchange_rate: { type: integer, format: int64 }
+                  controls: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/anchor/agent-actions/proof:
+    get:
+      tags: [admin]
+      summary: Merkle inclusion proof for an anchored action receipt
+      operationId: adminActionAnchorProof
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: receipt_id, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Inclusion proof.
+          content:
+            application/json:
+              # TODO-refine: proof object shape (agent_action_anchor.rs)
+              schema: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/anchor/agent-actions/run:
+    post:
+      tags: [admin]
+      summary: Force an agent-action anchor batch now
+      operationId: adminForceActionAnchorRun
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Batch result; anchor_id is null when there are no new receipts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  anchor_id: { type: [string, "null"] }
+                  reason: { type: string, description: Present when no batch was created. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/anchor/batches:
+    get:
+      tags: [admin]
+      summary: Recent anchor batches
+      operationId: adminAnchorBatches
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: limit, in: query, required: false, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: Batches.
+          content:
+            application/json:
+              # TODO-refine: per-row shape (anchor_id, n_actions, created_at, solana{confirmed,slot,sig}, bitcoin{provider,ots_upgraded,block_height}, anchored)
+              schema:
+                type: array
+                items: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/anchor/ots/{anchor_id}:
+    get:
+      tags: [admin]
+      summary: Download the OpenTimestamps proof for an anchor batch
+      operationId: adminAnchorOts
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: anchor_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Raw .ots proof bytes (attachment).
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/anchor/status:
+    get:
+      tags: [admin]
+      summary: Anchor pipeline counters
+      operationId: adminAnchorStatus
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Pipeline status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bitcoin_total, bitcoin_pending_upgrade, bitcoin_upgraded, solana_total, solana_unconfirmed, solana_confirmed, agent_action_batches, last_batch_at, last_batch_n_actions]
+                properties:
+                  bitcoin_total: { type: integer, format: int64 }
+                  bitcoin_pending_upgrade: { type: integer, format: int64 }
+                  bitcoin_upgraded: { type: integer, format: int64 }
+                  solana_total: { type: integer, format: int64 }
+                  solana_unconfirmed: { type: integer, format: int64 }
+                  solana_confirmed: { type: integer, format: int64 }
+                  agent_action_batches: { type: integer, format: int64 }
+                  last_batch_at: { type: integer, format: int64 }
+                  last_batch_n_actions: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/agents:
+    get:
+      tags: [admin]
+      summary: List agents (tenant-scoped)
+      operationId: adminGetAgents
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Agents.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [agent_id, human_key_image, agent_checksum, assurance_level, issued_at, expires_at, revoked, has_pop, agent_type]
+                  properties:
+                    agent_id: { type: string }
+                    human_key_image: { type: string }
+                    agent_checksum: { type: string }
+                    assurance_level: { type: string }
+                    issued_at: { type: integer, format: int64 }
+                    expires_at: { type: integer, format: int64 }
+                    revoked: { type: boolean }
+                    has_pop: { type: boolean }
+                    agent_type: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/agents/{agent_id}/revoke:
+    post:
+      tags: [admin]
+      summary: Admin-side agent revocation
+      operationId: adminRevokeAgent
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: agent_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked, agent_id]
+                properties:
+                  revoked: { type: boolean, const: true }
+                  agent_id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/agent_actions/recent:
+    get:
+      tags: [admin]
+      summary: Recent action receipts
+      operationId: adminRecentActions
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: limit, in: query, required: false, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: Receipts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [receipt_id, action_hash, agent_id, status, policy_version, created_at]
+                  properties:
+                    receipt_id: { type: string }
+                    action_hash: { type: string }
+                    agent_id: { type: string }
+                    status: { type: string }
+                    policy_version: { type: string }
+                    created_at: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/demo/scenario/{scenario}:
+    post:
+      tags: [admin]
+      summary: Run a governance demo scenario
+      operationId: adminRunDemoScenario
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: scenario, in: path, required: true, schema: { type: string, enum: [normal, scope, replay] } }
+      responses:
+        '200':
+          description: Scenario result.
+          content:
+            application/json:
+              # TODO-refine: detail payload varies per scenario
+              schema:
+                type: object
+                required: [result, status_code, detail]
+                properties:
+                  result: { type: string }
+                  status_code: { type: integer }
+                  detail: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/per_agent_metrics:
+    get:
+      tags: [admin]
+      summary: Per-agent activity counters
+      operationId: adminPerAgentMetrics
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: limit, in: query, required: false, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: Metrics.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [agent_id, action_count, egress_count, last_action_at]
+                  properties:
+                    agent_id: { type: string }
+                    action_count: { type: integer, format: int64 }
+                    egress_count: { type: integer, format: int64 }
+                    last_action_at: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/egress/recent:
+    get:
+      tags: [admin]
+      summary: Recent egress events
+      operationId: adminRecentEgress
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: limit, in: query, required: false, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: Egress log entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, agent_id, target_host, target_path, method, status_code, ts, allowed]
+                  properties:
+                    id: { type: integer, format: int64 }
+                    agent_id: { type: string }
+                    target_host: { type: string }
+                    target_path: { type: string }
+                    method: { type: string }
+                    status_code: { type: integer, format: int64 }
+                    ts: { type: integer, format: int64 }
+                    allowed: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/checksum/audit/{agent_id}:
+    get:
+      tags: [admin]
+      summary: Checksum rotation audit for an agent
+      operationId: adminChecksumAudit
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: agent_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Rotation history.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [from_checksum, to_checksum, reason, actor, ts]
+                  properties:
+                    from_checksum: { type: string }
+                    to_checksum: { type: string }
+                    reason: { type: string }
+                    actor: { type: string }
+                    ts: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/health/detailed:
+    get:
+      tags: [admin]
+      summary: Detailed operator health report
+      operationId: adminHealthDetailed
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Structured health.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, runtime, call_sig_enforce, require_agent_type, require_hardware_attestation, require_preregistered_measurement, policy_require_binding, egress_gateway_enabled, policy_enforcement_mode, bitcoin_anchor, solana_anchor, database, audit, feature_flags, warnings]
+                properties:
+                  ok: { type: boolean }
+                  runtime: { type: string }
+                  call_sig_enforce: { type: boolean }
+                  require_agent_type: { type: boolean }
+                  require_hardware_attestation: { type: boolean }
+                  require_preregistered_measurement: { type: boolean }
+                  policy_require_binding: { type: boolean }
+                  egress_gateway_enabled: { type: boolean }
+                  global_max_action_usd: { type: [number, "null"] }
+                  policy_enforcement_mode: { type: string }
+                  bitcoin_anchor: &healthComponent
+                    type: object
+                    required: [ok, detail]
+                    properties:
+                      ok: { type: boolean }
+                      detail: { type: string }
+                  solana_anchor: *healthComponent
+                  database: *healthComponent
+                  audit: *healthComponent
+                  feature_flags:
+                    type: object
+                    required: [bank_kyc_enabled, user_kyc_enabled, zkp_issuer_enabled, compliance_enabled]
+                    properties:
+                      bank_kyc_enabled: { type: boolean }
+                      user_kyc_enabled: { type: boolean }
+                      zkp_issuer_enabled: { type: boolean }
+                      compliance_enabled: { type: boolean }
+                  warnings: { type: array, items: { type: string } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/rings:
+    post:
+      tags: [admin]
+      summary: Create or update an anonymous ring rule
+      description: Also gated by SAURON_ANON_RINGS.
+      operationId: adminCreateRing
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            # TODO-refine: RingRule shape (core/src/rings.rs)
+            schema:
+              type: object
+              required: [ring_id]
+              properties:
+                ring_id: { type: string }
+                tenant_id: { type: string, default: default }
+                rule: { type: object, additionalProperties: true, description: RingRule (private policy for the ring). }
+      responses:
+        '200':
+          description: Ring stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, ring_id, tenant_id]
+                properties:
+                  ok: { type: boolean, const: true }
+                  ring_id: { type: string }
+                  tenant_id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    get:
+      tags: [admin]
+      summary: List rings with member counts
+      operationId: adminListRings
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: tenant_id, in: query, required: false, schema: { type: string, default: default } }
+      responses:
+        '200':
+          description: Rings.
+          content:
+            application/json:
+              # TODO-refine: rule shape
+              schema:
+                type: object
+                required: [rings]
+                properties:
+                  rings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        ring_id: { type: string }
+                        rule: { type: object, additionalProperties: true }
+                        version: { type: integer }
+                        member_count: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/rings/{ring_id}/subscribe:
+    post:
+      tags: [admin]
+      summary: Add an agent pseudonym to a ring
+      operationId: adminRingSubscribe
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: ring_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_id: { type: [string, "null"] }
+                agent_public_hex: { type: [string, "null"] }
+                tenant_id: { type: string, default: default }
+      responses:
+        '200':
+          description: Member added.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ring_id, member_point_hex]
+                properties:
+                  ring_id: { type: string }
+                  member_point_hex: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/rings/{ring_id}/revoke:
+    post:
+      tags: [admin]
+      summary: Remove an agent pseudonym from a ring
+      operationId: adminRingRevoke
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: ring_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_id: { type: [string, "null"] }
+                agent_public_hex: { type: [string, "null"] }
+                tenant_id: { type: string, default: default }
+      responses:
+        '200':
+          description: Membership revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ring_id, revoked]
+                properties:
+                  ring_id: { type: string }
+                  revoked: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/rings/{ring_id}/members:
+    get:
+      tags: [admin]
+      summary: List ring member points
+      operationId: adminRingMembers
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: ring_id, in: path, required: true, schema: { type: string } }
+        - { name: tenant_id, in: query, required: false, schema: { type: string, default: default } }
+      responses:
+        '200':
+          description: Members.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ring_id, count, members]
+                properties:
+                  ring_id: { type: string }
+                  count: { type: integer }
+                  members: { type: array, items: { type: string, description: Member point hex. } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/rings/{ring_id}/usage:
+    get:
+      tags: [admin]
+      summary: Per-pseudonym token usage for a ring
+      operationId: adminRingUsage
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: ring_id, in: path, required: true, schema: { type: string } }
+        - { name: tenant_id, in: query, required: false, schema: { type: string, default: default } }
+      responses:
+        '200':
+          description: Usage per pseudonym.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ring_id, pseudonyms]
+                properties:
+                  ring_id: { type: string }
+                  pseudonyms:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key_image_hex: { type: string }
+                        input_tokens: { type: integer, format: int64 }
+                        output_tokens: { type: integer, format: int64 }
+                        usd: { type: number }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── /v1/policy (admin-gated) ──
+
+  /v1/policy/upload:
+    post:
+      tags: [v1-policy]
+      summary: Upload a policy (YAML)
+      description: Accepts JSON `{raw_yaml}` or a raw YAML body with Content-Type application/yaml.
+      operationId: policyUpload
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [raw_yaml]
+              properties:
+                raw_yaml: { type: string }
+          application/yaml:
+            schema: { type: string }
+      responses:
+        '200':
+          description: Policy compiled and stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [policy_id, agent, checks]
+                properties:
+                  policy_id: { type: string, description: pol_<32-hex>. }
+                  agent: { type: string }
+                  checks: { type: array, items: { type: string } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/policy/list:
+    get:
+      tags: [v1-policy]
+      summary: List stored policies
+      operationId: policyList
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Policy summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [policy_id, agent, version, updated_at]
+                  properties:
+                    policy_id: { type: string }
+                    agent: { type: string }
+                    version: { type: string }
+                    updated_at: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/policy/evaluate:
+    post:
+      tags: [v1-policy]
+      summary: Evaluate an action against a policy
+      description: >-
+        If `agent_id` is present the server-authoritative spend ledger is
+        consulted; otherwise simulator context overrides apply and the
+        response is flagged `simulator: true`.
+      operationId: policyEvaluate
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy_id, action]
+              properties:
+                policy_id: { type: string }
+                agent_id: { type: [string, "null"] }
+                action: { $ref: '#/components/schemas/PolicyAction' }
+                context_overrides:
+                  type: [object, "null"]
+                  additionalProperties: false
+                  properties:
+                    spend_total_usd: { type: [number, "null"] }
+                    recent_call_timestamps:
+                      oneOf:
+                        - type: array
+                          items: { type: integer, format: int64 }
+                        - type: "null"
+                    now_tz_hhmm: { type: [string, "null"] }
+                    now_epoch: { type: [integer, "null"] }
+      responses:
+        '200':
+          description: Verdict with per-check trace.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [verdict, trace, spend_total_usd]
+                properties:
+                  verdict: { $ref: '#/components/schemas/Verdict' }
+                  trace:
+                    type: array
+                    items:
+                      type: object
+                      required: [check, verdict]
+                      properties:
+                        check: { type: string }
+                        verdict: { $ref: '#/components/schemas/Verdict' }
+                  spend_total_usd: { type: number }
+                  simulator: { type: boolean, description: Present only when true. }
+                  simulator_warning: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/policy/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [v1-policy]
+      summary: Fetch a compiled policy AST
+      operationId: policyGetOne
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      responses:
+        '200':
+          description: Full compiled Policy AST (core/src/policy/ast.rs).
+          content:
+            application/json:
+              # TODO-refine: Policy AST schema
+              schema: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [v1-policy]
+      summary: Delete a policy
+      operationId: policyDeleteOne
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── /v1/agents (admin-gated spend ledger + policy binding) ──
+
+  /v1/agents/{agent_id}/spend:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - { name: agent_id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [v1-agents]
+      summary: Record spend against an agent's policy period
+      operationId: recordSpend
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy_id, amount_usd]
+              properties:
+                policy_id: { type: string }
+                action_id: { type: [string, "null"] }
+                amount_usd: { type: number, minimum: 0, maximum: 1000000, description: "Capped at MAX_SPEND_RECORD_USD (1,000,000)." }
+      responses:
+        '200':
+          description: Spend recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [log_id, new_total_usd]
+                properties:
+                  log_id: { type: string }
+                  new_total_usd: { type: number }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [v1-agents]
+      summary: Get the spend summary for an agent and policy
+      operationId: getSpend
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - { name: policy_id, in: query, required: true, schema: { type: string } }
+        - { name: period_start, in: query, required: false, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: Spend summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [policy_id, agent_id, period_start, total_usd, last_updated, log_count]
+                properties:
+                  policy_id: { type: string }
+                  agent_id: { type: string }
+                  period_start: { type: integer, format: int64 }
+                  total_usd: { type: number }
+                  last_updated: { type: integer, format: int64 }
+                  log_count: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/agents/{agent_id}/spend/log:
+    get:
+      tags: [v1-agents]
+      summary: List spend log entries
+      operationId: listSpendLog
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: agent_id, in: path, required: true, schema: { type: string } }
+        - { name: policy_id, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, format: int64, default: 100, maximum: 1000 } }
+      responses:
+        '200':
+          description: Log entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [log_id, policy_id, agent_id, action_id, amount_usd, recorded_at, source]
+                  properties:
+                    log_id: { type: string }
+                    policy_id: { type: string }
+                    agent_id: { type: string }
+                    action_id: { type: [string, "null"] }
+                    amount_usd: { type: number }
+                    recorded_at: { type: integer, format: int64 }
+                    source: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/agents/{agent_id}/policy_binding:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - { name: agent_id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [v1-agents]
+      summary: Bind a policy to an agent
+      operationId: bindPolicy
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy_id]
+              properties:
+                policy_id: { type: string }
+      responses:
+        '200':
+          description: Binding record.
+          content:
+            application/json:
+              schema: &policyBindingRecord
+                type: object
+                additionalProperties: false
+                required: [agent_id, policy_id, bound_at]
+                properties:
+                  agent_id: { type: string }
+                  policy_id: { type: string }
+                  bound_at: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    get:
+      tags: [v1-agents]
+      summary: Get the agent's policy binding
+      operationId: getPolicyBinding
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      responses:
+        '200':
+          description: Binding record.
+          content:
+            application/json:
+              schema: *policyBindingRecord
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [v1-agents]
+      summary: Unbind the agent's policy (idempotent)
+      operationId: unbindPolicy
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      responses:
+        '200':
+          description: Unbound.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [unbound]
+                properties:
+                  unbound: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ── /v1/proofs (admin-gated) ──
+
+  /v1/proofs/action-log/verify:
+    post:
+      tags: [v1-proofs]
+      summary: Verify a Groth16 action-log proof against a checkpoint
+      description: >-
+        The server resolves the merkle root/size/anchor from checkpoint_id;
+        caller-supplied roots are ignored. Returns a bare status code (200 on
+        accept) with no body.
+      operationId: actionLogVerify
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: ActionLogProofPayload flattened plus checkpoint_id.
+              required: [circuit, public_inputs, proof_b64, vk_id, checkpoint_id]
+              properties:
+                circuit: { type: string }
+                public_inputs: { type: array, items: { type: string }, description: "snarkjs public signals, base-10 strings." }
+                proof_b64: { type: string, description: base64 Groth16 proof JSON. }
+                vk_id: { type: string }
+                checkpoint_id: { type: string }
+      responses:
+        '200': { description: Proof accepted (empty body). }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/proofs/transparent/verify:
+    post:
+      tags: [v1-proofs]
+      summary: Verify a transparent (RISC-Zero) proof against a checkpoint
+      operationId: transparentVerify
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: TransparentProofPayload flattened plus checkpoint_id.
+              required: [checkpoint_id, program_id, receipt_b64]
+              properties:
+                checkpoint_id: { type: string }
+                program_id: { type: string }
+                receipt_b64: { type: string }
+      responses:
+        '200':
+          description: Verification result with the decoded journal.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid, journal]
+                properties:
+                  valid: { type: boolean }
+                  journal: { $ref: '#/components/schemas/TransparentJournal' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/proofs/checkpoint/finalize:
+    post:
+      tags: [v1-proofs]
+      summary: Finalize a proof checkpoint for a circuit and anchor
+      description: >-
+        Allowed circuits: StatsHonestComputation, TransparentActionPolicy,
+        ActionRangeProof, ActionTimeWindow, ActionSetMembership,
+        ActionSetNonMembership, ActionSumBound, ActionCountInRange.
+      operationId: finalizeProofCheckpoint
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [circuit, action_anchor_id]
+              properties:
+                circuit: { type: string }
+                action_anchor_id: { type: string }
+      responses:
+        '200':
+          description: Checkpoint finalized.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [checkpoint_id, anchor_id, finalized, statement_commitment_hex]
+                properties:
+                  checkpoint_id: { type: string }
+                  anchor_id: { type: string }
+                  finalized: { type: boolean }
+                  statement_commitment_hex: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── /v1/stats (admin-gated) ──
+
+  /v1/stats/submit:
+    post:
+      tags: [v1-stats]
+      summary: Submit a claimed metric value with a Groth16 integrity proof
+      operationId: statsSubmit
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatsSubmission' }
+      responses:
+        '200':
+          description: Stored after proof verification.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatsSubmitResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/stats/submit-transparent:
+    post:
+      tags: [v1-stats]
+      summary: Submit a claimed metric value with a transparent (RISC-Zero) proof
+      operationId: statsSubmitTransparent
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: TransparentStatsSubmission (TransparentProofPayload flattened).
+              required: [metric_id, claimed_value, period_start, period_end, checkpoint_id, program_id, receipt_b64]
+              properties:
+                tenant_id: { type: string, default: "" }
+                agent_id_or_none: { type: [string, "null"] }
+                metric_id: { type: string, enum: [success_rate, error_rate, tool_call_count, cost_total] }
+                claimed_value: { type: integer, format: int64 }
+                period_start: { type: integer, format: int64 }
+                period_end: { type: integer, format: int64 }
+                checkpoint_id: { type: string }
+                program_id: { type: string }
+                receipt_b64: { type: string }
+      responses:
+        '200':
+          description: Stored after proof verification.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatsSubmitResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/stats/submit-encrypted:
+    post:
+      tags: [v1-stats]
+      summary: Submit a Paillier-encrypted contribution (quarantined in prod)
+      operationId: statsSubmitEncrypted
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [cohort_id, metric_id, period_start, pk_id, encrypted_value_b64]
+              properties:
+                cohort_id: { type: string }
+                metric_id: { type: string }
+                period_start: { type: integer, format: int64 }
+                pk_id: { type: string }
+                encrypted_value_b64: { type: string }
+      responses:
+        '200':
+          description: Aggregated homomorphically.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [aggregated_into, n_contributions]
+                properties:
+                  aggregated_into: { type: string }
+                  n_contributions: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /v1/stats/cohort:
+    get:
+      tags: [v1-stats]
+      summary: Query raw verified stats rows for a metric and period
+      operationId: statsCohortQuery
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: metric_id, in: query, required: true, schema: { type: string } }
+        - { name: period_start, in: query, required: true, schema: { type: integer, format: int64 } }
+        - { name: period_end, in: query, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: Matching rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [rows, n]
+                properties:
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [tenant_id, metric_id, claimed_value, n_records, period_start, period_end, merkle_root, submitted_at]
+                      properties:
+                        tenant_id: { type: string }
+                        agent_id_or_none: { type: [string, "null"] }
+                        metric_id: { type: string }
+                        claimed_value: { type: integer, format: int64 }
+                        n_records: { type: integer, format: int64 }
+                        period_start: { type: integer, format: int64 }
+                        period_end: { type: integer, format: int64 }
+                        merkle_root: { type: string }
+                        submitted_at: { type: integer, format: int64 }
+                  n: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ── /v1/cohort (admin-gated, DP-published surface) ──
+
+  /v1/cohort:
+    post:
+      tags: [v1-cohort]
+      summary: Create or update a cohort definition
+      operationId: cohortUpsert
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CohortDefinition' }
+      responses:
+        '200':
+          description: Stored definition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CohortDefinition' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [v1-cohort]
+      summary: List cohort definitions
+      operationId: cohortList
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      responses:
+        '200':
+          description: Definitions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CohortDefinition' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/cohort/published:
+    get:
+      tags: [v1-cohort]
+      summary: Fetch the DP-published cohort for a period
+      description: Laplace noise per quartile under the cohort's epsilon budget; metrics below the k-anonymity threshold are suppressed.
+      operationId: cohortPublished
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: cohort_id, in: query, required: true, schema: { type: string } }
+        - { name: period_start, in: query, required: true, schema: { type: integer, format: int64 } }
+        - { name: period_end, in: query, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: Published cohort.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublishedCohort' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/cohort/{id}/budget:
+    get:
+      tags: [v1-cohort]
+      summary: DP budget ledger for a cohort
+      operationId: cohortBudgetGet
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Ledger entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [cohort_id, metric_id, cycle_start, epsilon_spent, delta_spent, epsilon_cap, delta_cap, last_published]
+                  properties:
+                    cohort_id: { type: string }
+                    metric_id: { type: string }
+                    cycle_start: { type: integer, format: int64 }
+                    epsilon_spent: { type: number }
+                    delta_spent: { type: number }
+                    epsilon_cap: { type: number }
+                    delta_cap: { type: number }
+                    last_published: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/cohort/{id}/budget/rotate:
+    post:
+      tags: [v1-cohort]
+      summary: Rotate the DP budget cycle for a cohort
+      operationId: cohortBudgetRotate
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [new_cycle_start, new_epsilon_cap, new_delta_cap]
+              properties:
+                new_cycle_start: { type: integer, format: int64 }
+                new_epsilon_cap: { type: number }
+                new_delta_cap: { type: number }
+                metric_ids:
+                  oneOf:
+                    - type: array
+                      items: { type: string }
+                    - type: "null"
+      responses:
+        '200':
+          description: Rotation result.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [cohort_id, new_cycle_start, rotated]
+                properties:
+                  cohort_id: { type: string }
+                  new_cycle_start: { type: integer, format: int64 }
+                  rotated: { type: integer, minimum: 0 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/cohort/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [v1-cohort]
+      summary: Fetch a cohort definition
+      operationId: cohortGet
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      responses:
+        '200':
+          description: Definition.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CohortDefinition' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [v1-cohort]
+      summary: Delete a cohort definition
+      operationId: cohortDelete
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── /v1/admin/audit (admin-gated, tenant-scoped security events) ──
+
+  /v1/admin/audit:
+    get:
+      tags: [v1-audit]
+      summary: Query the security audit log
+      operationId: adminAuditQuery
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: since, in: query, required: false, schema: { type: integer, format: int64 } }
+        - { name: until, in: query, required: false, schema: { type: integer, format: int64 } }
+        - { name: event_type, in: query, required: false, schema: { type: string, enum: [auth_failed, signature_mismatch, cross_tenant_attempt, policy_violation, admin_key_rotated, rate_limit_tripped, egress_denied] } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 200, maximum: 1000 } }
+      responses:
+        '200':
+          description: Audit records.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [audit_id, tenant_id, event_type, event, timestamp]
+                  properties:
+                    audit_id: { type: string }
+                    tenant_id: { type: string }
+                    event_type: { type: string }
+                    event:
+                      type: object
+                      additionalProperties: true
+                      description: >-
+                        Internally tagged enum ("type"): auth_failed{ip,path,reason},
+                        signature_mismatch{agent_id,path},
+                        cross_tenant_attempt{tenant_id,target_tenant,path},
+                        policy_violation{tenant_id,agent_id,policy_id,check,reason},
+                        admin_key_rotated{key_fingerprint},
+                        rate_limit_tripped{ip,path},
+                        egress_denied{tenant_id,agent_id,host,method,path,reason}.
+                    timestamp: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ── /v1/audit (periodic ZK audit reports) ──
+
+  /v1/audit/reports:
+    post:
+      tags: [v1-audit]
+      summary: Generate a signed audit report for a period
+      operationId: createAuditReport
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [period_start, period_end]
+              properties:
+                agent_ids:
+                  oneOf:
+                    - type: array
+                      items: { type: string }
+                    - type: "null"
+                period_start: { type: integer, format: int64 }
+                period_end: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Report plus detached signature.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [report, signature]
+                properties:
+                  report: { $ref: '#/components/schemas/AuditReport' }
+                  signature: { type: string, description: hex HMAC-SHA256 over the report. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [v1-audit]
+      summary: List stored audit reports
+      operationId: listAuditReports
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100, maximum: 1000 } }
+      responses:
+        '200':
+          description: Reports.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditReport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/audit/reports/{id}:
+    get:
+      tags: [v1-audit]
+      summary: Fetch one audit report
+      operationId: getAuditReport
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Report.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditReport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── /v1/attestation (admin-gated) ──
+
+  /v1/attestation/nitro/verify:
+    post:
+      tags: [v1-attestation]
+      summary: Verify an AWS Nitro attestation document
+      description: >-
+        Validates a raw COSE_Sign1 blob, surfaces the parsed module_id and
+        PCRs, and checks the measurement against the operator-registered
+        expected hash. Verification failures return 200 with valid=false and
+        an error string; only malformed base64 returns 400.
+      operationId: nitroVerify
+      security: [{ adminKey: [] }, { adminJwt: [] }]
+      parameters: [{ $ref: '#/components/parameters/TenantId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [attestation_blob_b64, expected_measurement_hash]
+              properties:
+                attestation_blob_b64: { type: string, description: base64 AWS Nitro COSE_Sign1 blob. }
+                expected_measurement_hash: { type: string, description: Operator-registered measurement (hex). }
+                agent_id: { type: [string, "null"], description: Optional; echoed back. }
+      responses:
+        '200':
+          description: Verification result (also used for verification failures, with valid=false).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [valid, module_id, pcrs, timestamp, error, agent_id]
+                properties:
+                  valid: { type: boolean }
+                  module_id: { type: string }
+                  pcrs:
+                    type: object
+                    additionalProperties: { type: string }
+                    description: PCR index (stringified integer key) to hex SHA-384.
+                  timestamp: { type: integer, minimum: 0 }
+                  error: { type: [string, "null"], description: Set when valid is false. }
+                  agent_id: { type: [string, "null"] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }

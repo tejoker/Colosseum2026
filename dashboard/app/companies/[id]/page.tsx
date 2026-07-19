@@ -14,6 +14,7 @@ export default async function CompanyPage({ params }: Props) {
   const { id } = await params;
   const t = await getTranslations("company");
   const ts = await getTranslations("settings");
+  const tc = await getTranslations("common");
 
   const [companyResult, peopleResult] = await Promise.all([
     fetchCompany(id),
@@ -24,7 +25,7 @@ export default async function CompanyPage({ params }: Props) {
   const people = peopleResult.ok ? peopleResult.data : [];
 
   return (
-    <main className="pt-20 pb-16 px-6 max-w-3xl mx-auto">
+    <main id="main" className="pt-20 pb-16 px-6 max-w-3xl mx-auto">
       {/* Breadcrumb */}
       <Link
         href="/settings"
@@ -55,7 +56,15 @@ export default async function CompanyPage({ params }: Props) {
           {t("people")}
         </h2>
         {people.length === 0 ? (
-          <p className="text-sm text-[var(--text-muted)] py-8">{t("empty")}</p>
+          <div className="py-8">
+            <p className="text-sm text-[var(--text-muted)] mb-2">{t("empty")}</p>
+            <Link
+              href="/welcome"
+              className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+            >
+              {tc("emptyCta")} →
+            </Link>
+          </div>
         ) : (
           <Table>
             <Thead>

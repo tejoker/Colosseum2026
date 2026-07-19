@@ -139,3 +139,6 @@ deploy/native/dist/
 # Re-include the committed templates (negations must follow the broad .env.* rule).
 !deploy/.env.deploy.example
 !deploy/demo.local.env.example
+
+# compiled example binaries
+examples/go-quickstart/go-quickstart

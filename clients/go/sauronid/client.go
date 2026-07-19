@@ -104,6 +104,37 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}) 
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// User auth
+// ─────────────────────────────────────────────────────────────────────
+
+// UserAuthResponse is the JSON returned by POST /user/auth.
+type UserAuthResponse struct {
+	Session   string `json:"session"`
+	KeyImage  string `json:"key_image"`
+	ExpiresAt int64  `json:"expires_at"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
+
+// UserAuth performs development-only legacy password authentication
+// (POST /user/auth). Production deployments disable this route; use the
+// Ed25519 challenge flow (/user/auth/challenge + /user/auth/finish) there.
+func (c *Client) UserAuth(ctx context.Context, email, password string) (*UserAuthResponse, error) {
+	body, err := c.do(ctx, http.MethodPost, "/user/auth", map[string]string{
+		"email":    email,
+		"password": password,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out UserAuthResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode user auth response: %w", err)
+	}
+	return &out, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Agent lifecycle
 // ─────────────────────────────────────────────────────────────────────
 
@@ -227,6 +258,9 @@ func (c *Client) RevokeAgent(ctx context.Context, agentID, userSession string) e
 	}
 	if userSession != "" {
 		req.Header.Set("X-Sauron-Session", userSession)
+	}
+	if c.tenantID != "" {
+		req.Header.Set("X-Sauron-Tenant-Id", c.tenantID)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

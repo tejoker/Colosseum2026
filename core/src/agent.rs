@@ -16,6 +16,7 @@
 
 use crate::ajwt_support;
 use crate::crypto_protocol::{self, CallSignatureInput};
+use crate::error::AppError;
 use crate::policy;
 use crate::risk;
 use crate::state::ServerState;
@@ -1916,34 +1917,66 @@ pub struct VerifiedCallSig {
 
 const CALL_SIG_BODY_LIMIT: usize = 4 * 1024 * 1024;
 
+/// One-line remediation hint listing every header a signed call must carry.
+pub(crate) const CALL_SIG_HEADERS_FIX: &str = "include x-sauron-agent-id, x-sauron-call-ts, \
+    x-sauron-call-nonce, x-sauron-call-sig, x-sauron-call-audience, \
+    x-sauron-protocol-version, and x-sauron-agent-config-digest on every signed call; \
+    see docs/sdk-integration.md";
+
+/// Resolve the accepted clock-skew window (SAURON_CALL_SIG_SKEW_MS, default
+/// 60s, clamped to 1s..10min). Shared by call-sig v2 and the DPoP surface.
+pub(crate) fn call_sig_skew_ms() -> i64 {
+    std::env::var("SAURON_CALL_SIG_SKEW_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000)
+        .clamp(1_000, 600_000)
+}
+
 /// Try to verify the call signature given the parts and buffered body.
-/// Returns the verified context on success, or a (status, message) error on failure.
+/// Returns the verified context on success, or a typed error on failure.
 async fn try_verify_call_sig(
     state: &Arc<RwLock<ServerState>>,
     parts: &axum::http::request::Parts,
     body_bytes: &[u8],
-) -> Result<VerifiedCallSig, (StatusCode, String)> {
+) -> Result<VerifiedCallSig, AppError> {
+    // Opt-in RFC 9449 surface: a DPoP proof header may replace the
+    // x-sauron-call-sig header set (see core/src/dpop.rs for the flag gating
+    // and the documented body/config-binding weakness).
+    if parts.headers.contains_key("dpop")
+        && !parts.headers.contains_key("x-sauron-call-sig")
+        && crate::dpop::accept_dpop()
+    {
+        return crate::dpop::verify_dpop_request(state, parts).await;
+    }
+
     let agent_id = parts
         .headers
         .get("x-sauron-agent-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or((
+        .ok_or(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-agent-id header required".into(),
+            "call_sig_missing_header",
+            "x-sauron-agent-id header required",
+            CALL_SIG_HEADERS_FIX,
         ))?;
     let call_ts_str = parts
         .headers
         .get("x-sauron-call-ts")
         .and_then(|v| v.to_str().ok())
-        .ok_or((
+        .ok_or(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-ts header required".into(),
+            "call_sig_missing_header",
+            "x-sauron-call-ts header required",
+            CALL_SIG_HEADERS_FIX,
         ))?;
     let call_ts: i64 = call_ts_str.parse().map_err(|_| {
-        (
+        AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-ts must be unix milliseconds".into(),
+            "call_sig_bad_timestamp",
+            "x-sauron-call-ts must be unix milliseconds",
+            "send x-sauron-call-ts as ascii-decimal unix milliseconds",
         )
     })?;
     let nonce = parts
@@ -1951,65 +1984,75 @@ async fn try_verify_call_sig(
         .get("x-sauron-call-nonce")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or((
+        .ok_or(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-nonce header required".into(),
+            "call_sig_missing_header",
+            "x-sauron-call-nonce header required",
+            CALL_SIG_HEADERS_FIX,
         ))?;
     let sig_b64 = parts
         .headers
         .get("x-sauron-call-sig")
         .and_then(|v| v.to_str().ok())
-        .ok_or((
+        .ok_or(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-sig header required".into(),
+            "call_sig_missing_header",
+            "x-sauron-call-sig header required",
+            CALL_SIG_HEADERS_FIX,
         ))?;
     let protocol_version = parts
         .headers
         .get("x-sauron-protocol-version")
         .and_then(|v| v.to_str().ok())
-        .ok_or((
+        .ok_or(AppError::with_hint(
             StatusCode::UPGRADE_REQUIRED,
-            "x-sauron-protocol-version: 2 required".into(),
+            "call_sig_protocol_version",
+            "x-sauron-protocol-version: 2 required",
+            "set x-sauron-protocol-version: 2 and use the call-sig v2 canonical payload",
         ))?;
     if protocol_version != crypto_protocol::CALL_SIGNATURE_VERSION {
-        return Err((
+        return Err(AppError::with_hint(
             StatusCode::UPGRADE_REQUIRED,
+            "call_sig_protocol_version",
             format!(
                 "unsupported call-signature protocol version {protocol_version}; expected {}",
                 crypto_protocol::CALL_SIGNATURE_VERSION
             ),
+            "set x-sauron-protocol-version: 2 and use the call-sig v2 canonical payload",
         ));
     }
     let claimed_audience = parts
         .headers
         .get("x-sauron-call-audience")
         .and_then(|v| v.to_str().ok())
-        .ok_or((
+        .ok_or(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-audience header required".into(),
+            "call_sig_missing_header",
+            "x-sauron-call-audience header required",
+            CALL_SIG_HEADERS_FIX,
         ))?;
     let expected_audience =
         std::env::var("SAURON_CALL_AUDIENCE").unwrap_or_else(|_| "sauron-core".to_string());
     if claimed_audience != expected_audience {
-        return Err((
+        return Err(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "call signature audience mismatch".into(),
+            "call_sig_audience_mismatch",
+            "call signature audience mismatch",
+            "set x-sauron-call-audience to the server's configured audience (SAURON_CALL_AUDIENCE, default sauron-core)",
         ));
     }
 
-    let skew_ms: i64 = std::env::var("SAURON_CALL_SIG_SKEW_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60_000)
-        .clamp(1_000, 600_000);
+    let skew_ms = call_sig_skew_ms();
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
     if (now_ms - call_ts).abs() > skew_ms {
-        return Err((
+        return Err(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-ts outside acceptable skew window".into(),
+            "call_sig_timestamp_skew",
+            "x-sauron-call-ts outside acceptable skew window",
+            "sync the client clock (NTP) and retry; the server accepts +/- SAURON_CALL_SIG_SKEW_MS (default 60000 ms) around its own time",
         ));
     }
 
@@ -2040,12 +2083,19 @@ async fn try_verify_call_sig(
             params![agent_id, tenant_id, now],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "unknown, revoked, or expired agent".into()))?
+        .map_err(|_| AppError::with_hint(
+            StatusCode::UNAUTHORIZED,
+            "call_sig_unknown_agent",
+            "unknown, revoked, or expired agent",
+            "register the agent (or re-register after expiry/revocation) and send its exact agent_id and tenant in x-sauron-agent-id / x-sauron-tenant-id",
+        ))?
     };
     if pop_pk_b64u.is_empty() {
-        return Err((
+        return Err(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "agent has no pop_public_key_b64u registered (per-call signature requires PoP-bound agent)".into(),
+            "call_sig_no_pop_key",
+            "agent has no pop_public_key_b64u registered (per-call signature requires PoP-bound agent)",
+            "register the agent with an Ed25519 PoP public key before using per-call signatures",
         ));
     }
 
@@ -2064,9 +2114,11 @@ async fn try_verify_call_sig(
         .headers
         .get("x-sauron-agent-config-digest")
         .and_then(|v| v.to_str().ok())
-        .ok_or((
+        .ok_or(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-agent-config-digest header required (Gap 4 enforcement)".into(),
+            "call_sig_missing_header",
+            "x-sauron-agent-config-digest header required (Gap 4 enforcement)",
+            CALL_SIG_HEADERS_FIX,
         ))?;
     use subtle::ConstantTimeEq;
     if claimed_digest
@@ -2075,9 +2127,11 @@ async fn try_verify_call_sig(
         .unwrap_u8()
         == 0
     {
-        return Err((
+        return Err(AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "agent runtime config digest does not match registered checksum (config drift; call /agent/<id>/checksum/update to rotate)".into(),
+            "call_sig_config_digest_mismatch",
+            "agent runtime config digest does not match registered checksum (config drift; call /agent/<id>/checksum/update to rotate)",
+            "runtime config drifted from registered checksum; call POST /agent/{agent_id}/checksum/update with the new digest",
         ));
     }
 
@@ -2108,39 +2162,51 @@ async fn try_verify_call_sig(
     });
 
     let pk_bytes = URL_SAFE_NO_PAD.decode(pop_pk_b64u.trim()).map_err(|_| {
-        (
+        AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "agent pop key invalid base64url".into(),
+            "call_sig_bad_pop_key",
+            "agent pop key invalid base64url",
+            "re-register the agent PoP key as base64url(no-pad) of the 32-byte Ed25519 public key",
         )
     })?;
     let pk_arr: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
-        (
+        AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "agent pop key wrong length".into(),
+            "call_sig_bad_pop_key",
+            "agent pop key wrong length",
+            "re-register the agent PoP key as base64url(no-pad) of the 32-byte Ed25519 public key",
         )
     })?;
     let vk = VerifyingKey::from_bytes(&pk_arr).map_err(|_| {
-        (
+        AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "agent pop key not a valid Ed25519 point".into(),
+            "call_sig_bad_pop_key",
+            "agent pop key not a valid Ed25519 point",
+            "re-register the agent PoP key as base64url(no-pad) of the 32-byte Ed25519 public key",
         )
     })?;
     let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64).map_err(|_| {
-        (
+        AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-sig invalid base64url".into(),
+            "call_sig_bad_signature_encoding",
+            "x-sauron-call-sig invalid base64url",
+            "send x-sauron-call-sig as base64url(no-pad) of the 64-byte Ed25519 signature",
         )
     })?;
     let sig = Signature::from_slice(&sig_bytes).map_err(|_| {
-        (
+        AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "x-sauron-call-sig wrong size".into(),
+            "call_sig_bad_signature_encoding",
+            "x-sauron-call-sig wrong size",
+            "send x-sauron-call-sig as base64url(no-pad) of the 64-byte Ed25519 signature",
         )
     })?;
     vk.verify(&signing_payload, &sig).map_err(|_| {
-        (
+        AppError::with_hint(
             StatusCode::UNAUTHORIZED,
-            "call signature verification failed".into(),
+            "call_sig_invalid",
+            "call signature verification failed",
+            "sign the sauron.call.v2 canonical payload with the registered Ed25519 PoP key; verify body_sha256 matches the exact bytes sent",
         )
     })?;
 
@@ -2153,8 +2219,13 @@ async fn try_verify_call_sig(
     repo.consume_call_nonce(&agent_id, &nonce, nonce_exp)
         .await
         .map_err(|e| match e {
-            crate::repository::RepoError::Replay(s) => (StatusCode::CONFLICT, s),
-            crate::repository::RepoError::Backend(s) => (StatusCode::INTERNAL_SERVER_ERROR, s),
+            crate::repository::RepoError::Replay(s) => AppError::with_hint(
+                StatusCode::CONFLICT,
+                "call_sig_nonce_reused",
+                s,
+                "generate a fresh random nonce per call",
+            ),
+            crate::repository::RepoError::Backend(s) => AppError::Internal(s),
         })?;
 
     Ok(VerifiedCallSig { agent_id })
@@ -2163,7 +2234,7 @@ async fn try_verify_call_sig(
 fn enforce_signed_agent_body_binding(
     verified: &VerifiedCallSig,
     body_bytes: &[u8],
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), AppError> {
     if body_bytes.is_empty() {
         return Ok(());
     }
@@ -2172,9 +2243,11 @@ fn enforce_signed_agent_body_binding(
     };
     if let Some(body_agent_id) = value.get("agent_id").and_then(|v| v.as_str()) {
         if body_agent_id != verified.agent_id {
-            return Err((
+            return Err(AppError::with_hint(
                 StatusCode::UNAUTHORIZED,
-                "signed agent_id does not match request body agent_id".into(),
+                "call_sig_agent_id_mismatch",
+                "signed agent_id does not match request body agent_id",
+                "set the body agent_id to the same agent that signs the call (x-sauron-agent-id)",
             ));
         }
     }
@@ -2238,7 +2311,7 @@ pub async fn require_call_signature(
     State(state): State<Arc<RwLock<ServerState>>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
-) -> Result<axum::response::Response, (StatusCode, String)> {
+) -> Result<axum::response::Response, AppError> {
     // Sprint 1: defer to runtime_mode helper so dev/prod defaults are
     // shared. Dev: advisory (log + pass-through); Prod: enforce (401 on miss).
     let enforce = crate::runtime_mode::require_or_default(
@@ -2251,9 +2324,11 @@ pub async fn require_call_signature(
     let body_bytes = axum::body::to_bytes(body, CALL_SIG_BODY_LIMIT)
         .await
         .map_err(|_| {
-            (
+            AppError::with_hint(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "request body too large".into(),
+                "payload_too_large",
+                "request body too large",
+                "the call-signature middleware buffers at most 4 MiB of body; send a smaller request",
             )
         })?;
 
@@ -2265,18 +2340,18 @@ pub async fn require_call_signature(
             req.extensions_mut().insert(verified);
             Ok(next.run(req).await)
         }
-        Err((status, msg)) => {
+        Err(err) => {
             if enforce {
                 // Record the blocked attempt so the rejection is auditable
                 // (Activity → Stopped) instead of vanishing.
-                log_denied_egress(&state, &parts, &body_bytes, status);
-                Err((status, msg))
+                log_denied_egress(&state, &parts, &body_bytes, err.status());
+                Err(err)
             } else {
                 tracing::warn!(
                     target: "sauron::call_sig",
                     enforce = false,
-                    status = status.as_u16(),
-                    %msg,
+                    status = err.status().as_u16(),
+                    msg = %err,
                     "call signature verification skipped (advisory mode)"
                 );
                 let req =

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { ThemeProvider } from "next-themes";
 import { NextIntlClientProvider } from "next-intl";
-import { getMessages } from "next-intl/server";
+import { getLocale, getMessages } from "next-intl/server";
 import { TopNav } from "@/components/layout/TopNav";
 import "./globals.css";
 
@@ -16,14 +16,22 @@ export default async function RootLayout({
   children: React.ReactNode;
 }) {
   let messages: Awaited<ReturnType<typeof getMessages>>;
+  let locale = "en";
   try {
     messages = await getMessages();
+    locale = await getLocale();
   } catch {
     messages = {};
   }
 
+  // Skip-link label — read straight from the loaded messages so a failed
+  // getMessages() still renders a usable (English) link.
+  const skipLabel =
+    (messages as { common?: { skipToContent?: string } }).common
+      ?.skipToContent ?? "Skip to content";
+
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang={locale} suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
@@ -43,7 +51,13 @@ export default async function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <NextIntlClientProvider messages={messages}>
+          <NextIntlClientProvider messages={messages} locale={locale}>
+            <a
+              href="#main"
+              className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:px-3 focus:py-1.5 focus:rounded focus:bg-[var(--accent)] focus:text-white text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-hover)]"
+            >
+              {skipLabel}
+            </a>
             <TopNav />
             {children}
           </NextIntlClientProvider>

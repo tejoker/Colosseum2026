@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sauronid.fullname" . }}-core
+  labels:
+    {{- include "sauronid.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core
+spec:
+  replicas: {{ .Values.core.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "sauronid.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: core
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "sauronid.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: core
+        # Targeted by the agent-isolation NetworkPolicy (allow-core-only).
+        sauronid.io/role: core
+    spec:
+      containers:
+        - name: core
+          image: "{{ .Values.core.image.repository }}:{{ .Values.core.image.tag }}"
+          imagePullPolicy: {{ .Values.core.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3001
+          envFrom:
+            - secretRef:
+                name: {{ include "sauronid.secretName" . }}
+          env:
+            - name: PORT
+              value: "3001"
+            {{- range $k, $v := .Values.core.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- if .Values.postgres.enabled }}
+            # DATABASE_URL comes from existingSecret.
+            - name: SAURON_DB_BACKEND
+              value: postgres
+            {{- else }}
+            - name: DATABASE_PATH
+              value: /var/lib/sauronid/sauron.db
+            {{- end }}
+            # Unreviewed/legacy protocol surfaces stay fail-closed; pinned here
+            # (not in values) to mirror deploy/docker-compose.prod.yml.
+            - name: SAURON_ENABLE_LEGACY_OPRF
+              value: "0"
+            - name: SAURON_ENABLE_LEGACY_OPRF_AUTH
+              value: "0"
+            - name: SAURON_ENABLE_UNAUDITED_PAILLIER
+              value: "0"
+            - name: SAURON_ENABLE_VOLUNTARY_EGRESS_LOG
+              value: "0"
+            - name: SAURON_ENABLE_LEGACY_TOKEN_MAC
+              value: "0"
+            - name: SAURON_ENABLE_GROTH16
+              value: "0"
+            - name: SAURON_ENABLE_KYC_GROTH16
+              value: "0"
+            - name: SAURON_ANON_RINGS
+              value: "0"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.core.resources | nindent 12 }}
+          {{- if and .Values.persistence.enabled (not .Values.postgres.enabled) }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/sauronid
+          {{- end }}
+      {{- if and .Values.persistence.enabled (not .Values.postgres.enabled) }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "sauronid.fullname" . }}-core-data
+      {{- end }}

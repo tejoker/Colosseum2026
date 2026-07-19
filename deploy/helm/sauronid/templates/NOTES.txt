@@ -1,0 +1,41 @@
+SauronID {{ .Chart.AppVersion }} installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Before anything works, the Secret "{{ .Values.existingSecret }}" must exist in
+this namespace with the keys listed in values.yaml, e.g.:
+
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.existingSecret }} \
+    --from-literal=SAURON_ADMIN_KEY=$(openssl rand -hex 32) \
+    --from-literal=SAURON_ADMIN_JWT_HS256_SECRET=$(openssl rand -hex 32) \
+    --from-literal=SAURON_TOKEN_SECRET=$(openssl rand -hex 32) \
+    --from-literal=SAURON_JWT_SECRET=$(openssl rand -hex 32) \
+    --from-literal=SAURON_OPRF_SEED=$(openssl rand -hex 32) \
+    --from-literal=SAURON_AUDIT_HMAC_KEY=$(openssl rand -hex 32) \
+    --from-literal=SAURON_ISSUER_SHARED_SECRET=$(openssl rand -hex 32) \
+    --from-literal=SAURON_DASHBOARD_SESSION_SECRET=$(openssl rand -hex 32) \
+    --from-literal=SAURON_DASHBOARD_OPERATORS='<operator config>'
+
+Reach the services locally:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sauronid.fullname" . }}-core {{ .Values.core.service.port }}:{{ .Values.core.service.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sauronid.fullname" . }}-dashboard {{ .Values.dashboard.service.port }}:{{ .Values.dashboard.service.port }}
+
+  Core health:  curl http://localhost:{{ .Values.core.service.port }}/healthz
+  Dashboard:    http://localhost:{{ .Values.dashboard.service.port }}
+
+Dev vs prod:
+
+  Defaults are the fail-closed production posture (ENV=production,
+  SAURON_REQUIRE_CALL_SIG=1, SAURON_POLICY_ENFORCEMENT_MODE=enforce, ...).
+  ENV=production requires the non-secret values marked "Required in
+  production" in values.yaml (SAURON_ALLOWED_ORIGINS, SAURON_MAX_ACTION_USD,
+  SAURON_TRANSPARENT_IMAGE_IDS_JSON) to be set.
+
+  For a throwaway dev install, override:
+    --set core.env.ENV=development
+  For local one-command dev, prefer `docker compose up` at the repo root.
+
+{{- if .Values.networkPolicy.enabled }}
+
+NetworkPolicy for agent isolation is enabled. Label untrusted agent pods
+sauronid.io/role=agent. Enforcement requires a NetworkPolicy-capable CNI.
+{{- end }}

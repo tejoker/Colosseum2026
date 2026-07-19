@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { fetchActivity, ActivityCall } from "@/lib/api";
 import { Table, Thead, Tbody, Th, Td, Tr } from "@/components/ui/Table";
@@ -12,6 +13,7 @@ type Filter = "all" | "allowed" | "stopped";
 
 export function LiveFeed() {
   const t = useTranslations("activity");
+  const tc = useTranslations("common");
   const [calls, setCalls] = useState<ActivityCall[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [agentFilter, setAgentFilter] = useState("");
@@ -97,9 +99,15 @@ export function LiveFeed() {
       {loading ? (
         <Spinner />
       ) : visibleCalls.length === 0 ? (
-        <p className="text-sm text-[var(--text-muted)] py-12 text-center">
-          {t("empty")}
-        </p>
+        <div className="py-12 text-center">
+          <p className="text-sm text-[var(--text-muted)] mb-3">{t("empty")}</p>
+          <Link
+            href="/welcome"
+            className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+          >
+            {tc("emptyCta")} →
+          </Link>
+        </div>
       ) : (
         <Table>
           <Thead>

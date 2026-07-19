@@ -6,15 +6,18 @@ import { useTranslations } from "next-intl";
 import { SystemStatus } from "./SystemStatus";
 import { TenantSwitcher } from "./TenantSwitcher";
 import { ThemeToggle } from "./ThemeToggle";
+import { LocaleSwitcher } from "./LocaleSwitcher";
 
 const NAV_LINKS = [
   { key: "home",      href: "/" },
+  { key: "welcome",   href: "/welcome" },
   { key: "protected", href: "/protected" },
   { key: "activity",  href: "/activity" },
   { key: "policies",  href: "/policies" },
   { key: "cohorts",   href: "/cohorts" },
   { key: "compliance", href: "/compliance" },
   { key: "proofs",    href: "/proofs" },
+  { key: "explorer",  href: "/explorer" },
   { key: "try",       href: "/try" },
   { key: "settings",  href: "/settings" },
 ] as const;
@@ -67,6 +70,7 @@ export function TopNav() {
       <div className="flex items-center gap-4 ml-auto flex-shrink-0">
         <SystemStatus />
         <TenantSwitcher />
+        <LocaleSwitcher />
         <ThemeToggle />
       </div>
     </header>
