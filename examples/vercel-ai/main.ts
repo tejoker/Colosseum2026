@@ -14,7 +14,7 @@ import { z } from "zod";
 import { SauronIDClient, createEnforcer, sauronTools } from "@sauronid/agentic";
 
 const CORE_URL = "http://localhost:3001";
-const DEV_ADMIN_KEY = "dev-only-admin-key-not-for-production";
+const DEV_ADMIN_KEY = process.env.SAURON_ADMIN_KEY ?? "dev-only-admin-key-not-for-production";
 
 const POLICY = `version: "1"
 agent: example_vercel_ai

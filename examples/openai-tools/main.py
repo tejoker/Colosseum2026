@@ -9,10 +9,12 @@ Prereqs: `docker compose up` at the repo root, `pip install sauronid-client`
 (add `[openai]` when wiring the real API). See README.md.
 """
 
+import os
+
 from sauronid_client import SauronIDClient, create_enforcer, dispatch_tool_calls
 
 CORE_URL = "http://localhost:3001"
-DEV_ADMIN_KEY = "dev-only-admin-key-not-for-production"
+DEV_ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY", "dev-only-admin-key-not-for-production")
 
 POLICY = """\
 version: "1"

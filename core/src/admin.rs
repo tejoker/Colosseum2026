@@ -347,8 +347,28 @@ pub async fn auth_middleware(
                 request.extensions_mut().insert(AdminAuthz { cross_tenant });
                 return Ok(next.run(request).await);
             }
-            return Err(StatusCode::UNAUTHORIZED);
         }
+        // A Bearer token that is not a valid admin JWT is accepted as a static
+        // admin key (constant-time compare, same rules as x-admin-key below).
+        // The SDK enforcement layers send the static key as
+        // `Authorization: Bearer <key>`; same secret, alternate transport.
+        let bearer_bytes = token.trim().as_bytes().to_vec();
+        if key_matches_any(&bearer_bytes, &cfg.full_write_keys) {
+            request.extensions_mut().insert(AdminAuthz {
+                cross_tenant: cross_tenant_admin(),
+            });
+            return Ok(next.run(request).await);
+        }
+        if key_matches_any(&bearer_bytes, &cfg.read_only_keys) {
+            if method == Method::GET || method == Method::HEAD {
+                request.extensions_mut().insert(AdminAuthz {
+                    cross_tenant: cross_tenant_admin(),
+                });
+                return Ok(next.run(request).await);
+            }
+            return Err(StatusCode::FORBIDDEN);
+        }
+        // Not a JWT, not a known static key: fall through to x-admin-key.
     }
 
     // 2. Static x-admin-key. Legacy scope: the global SAURON_ADMIN_CROSS_TENANT

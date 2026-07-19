@@ -5,10 +5,12 @@ and the agent-action-tool binary (`cd core && cargo build --release`, or set
 SAURONID_AGENT_ACTION_TOOL). See README.md.
 """
 
+import os
+
 from sauronid_client import SauronIDClient, register_llm_agent
 
 CORE_URL = "http://localhost:3001"
-DEV_ADMIN_KEY = "dev-only-admin-key-not-for-production"  # dev stack only
+DEV_ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY", "dev-only-admin-key-not-for-production")  # dev stack only
 
 
 def main() -> None:

@@ -23,6 +23,9 @@ services:
       - SAURON_ACCEPT_SINGLE_NODE_SQLITE=1
       - SAURON_ENABLE_DEV_ENDPOINTS=1
       - SAURON_ADMIN_KEY=dev-only-admin-key-not-for-production
+      # Dev only: dashboard counters and seed summary read deployment-global
+      # admin views (/admin/stats), which tenant-scoped keys cannot.
+      - SAURON_ADMIN_CROSS_TENANT=1
     volumes:
       - sauron_data:/var/lib/sauronid
     healthcheck:
@@ -45,6 +48,11 @@ services:
     environment:
       - SAURON_CORE_INTERNAL_URL=http://backend:3001
       - SAURON_ADMIN_KEY=dev-only-admin-key-not-for-production
+      # Dev-only login dev/dev. The standalone build runs NODE_ENV=production,
+      # where the automatic dev-operator fallback is (correctly) disabled, so
+      # the operator and session secret must be explicit. scrypt("dev").
+      - SAURON_DASHBOARD_SESSION_SECRET=dev-only-session-secret-not-for-production
+      - 'SAURON_DASHBOARD_OPERATORS={"dev":{"password_scrypt":"c2F1cm9uaWQtZGV2LXNhbHQtMTY=:nx/pN6DXQkVC3bEfD2XHjXYlzVhK3zVlKWqmf0prXOw=","tenants":["default"],"super":true}}'
     depends_on:
       backend:
         condition: service_healthy

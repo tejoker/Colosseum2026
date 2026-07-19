@@ -9,7 +9,7 @@
 import { SauronIDClient, registerLlmAgent } from "@sauronid/agentic";
 
 const CORE_URL = "http://localhost:3001";
-const DEV_ADMIN_KEY = "dev-only-admin-key-not-for-production"; // dev stack only
+const DEV_ADMIN_KEY = process.env.SAURON_ADMIN_KEY ?? "dev-only-admin-key-not-for-production"; // dev stack only
 
 async function main(): Promise<void> {
     const client = new SauronIDClient({ baseUrl: CORE_URL, adminKey: DEV_ADMIN_KEY });

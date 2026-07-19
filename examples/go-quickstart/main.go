@@ -10,18 +10,20 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 
 	sauronid "github.com/sauronid/go-sdk"
 )
 
-const (
-	coreURL     = "http://localhost:3001"
-	devAdminKey = "dev-only-admin-key-not-for-production" // dev stack only
-)
+const coreURL = "http://localhost:3001"
 
 func main() {
+	adminKey := os.Getenv("SAURON_ADMIN_KEY") // dev stack default below
+	if adminKey == "" {
+		adminKey = "dev-only-admin-key-not-for-production"
+	}
 	ctx := context.Background()
-	client := sauronid.NewClient(sauronid.ClientOptions{BaseURL: coreURL, AdminKey: devAdminKey})
+	client := sauronid.NewClient(sauronid.ClientOptions{BaseURL: coreURL, AdminKey: adminKey})
 
 	// 1. Authenticate the human owner (dev-only password login, seeded user).
 	auth, err := client.UserAuth(ctx, "alice@sauron.dev", "pass_alice")

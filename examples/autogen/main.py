@@ -6,10 +6,12 @@ Prereqs: `docker compose up` at the repo root and
 
 import autogen
 
+import os
+
 from sauronid_client import SauronIDClient, create_enforcer, guard_functions
 
 CORE_URL = "http://localhost:3001"
-DEV_ADMIN_KEY = "dev-only-admin-key-not-for-production"
+DEV_ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY", "dev-only-admin-key-not-for-production")
 
 POLICY = """\
 version: "1"
@@ -53,7 +55,10 @@ def main() -> None:
     executor = autogen.ConversableAgent("executor", llm_config=False,
                                         human_input_mode="NEVER")
     for name, fn in guarded.items():
-        executor.register_for_execution(name=name)(fn)
+        if hasattr(executor, "register_for_execution"):  # autogen >= 0.2
+            executor.register_for_execution(name=name)(fn)
+        else:  # older autogen: plain function-map registration
+            executor.register_function(function_map={name: fn})
 
     # Allowed: "search" is on the policy allowlist.
     print("search ->", guarded["search"](query="blue widgets"))

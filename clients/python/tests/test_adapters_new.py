@@ -342,3 +342,24 @@ def test_autogen_guard_functions_uses_mapping_key_as_tool_name() -> None:
     guarded = guard_functions({"web_search": search, "transfer": search}, enf)
     assert guarded["web_search"]("opus") == "hits for opus"
     assert guarded["transfer"]("opus").startswith("Policy denied:")
+
+
+def test_wrap_routes_crewai_subclass_defined_outside_crewai_module() -> None:
+    """User tools subclass the framework base in their own module; wrap()
+    must sniff the MRO, not the leaf class, to route to the CrewAI adapter
+    (whose guarded tools expose the public run() entry point)."""
+    base = type("BaseTool", (), {})
+    base.__module__ = "crewai.tools.base_tool"
+
+    def _run(self, query: str) -> str:
+        return f"hits for {query}"
+
+    user_tool_cls = type(
+        "SearchTool", (base,), {"_run": _run, "name": "search", "description": "d"}
+    )
+    # Leaf class lives in the test module, exactly like real user code.
+    assert user_tool_cls.__module__ != "crewai.tools.base_tool"
+
+    enf = _make_enforcer(["search"])
+    [guarded] = wrap([user_tool_cls()], enforcer=enf)
+    assert guarded.run(query="opus") == "hits for opus"
