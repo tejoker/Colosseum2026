@@ -607,18 +607,46 @@ def _resolve_ring_material(
     )
 
 
+def _apply_payment_cap(
+    intent: list,
+    max_amount: Optional[float],
+    currency: Optional[str],
+) -> list:
+    """Validate the payment cap pair and ensure the payment scope is present.
+
+    Core's strict payment intent requires both `maxAmount` and `currency`,
+    plus an explicit `payment_initiation` scope — enforce the pairing here so
+    a half-specified cap fails at registration, not at payment time.
+    """
+    if (max_amount is None) != (currency is None):
+        raise ValueError("max_amount and currency must be provided together")
+    if max_amount is not None and "payment_initiation" not in intent:
+        intent.append("payment_initiation")
+    return intent
+
+
 def _intent_json(
     intent_scope: Sequence[str],
     egress_allowlist: Optional[Sequence[Any]],
+    max_amount: Optional[float] = None,
+    currency: Optional[str] = None,
+    merchant_allowlist: Optional[Sequence[str]] = None,
 ) -> str:
     """Serialize the agent intent deterministically for the registration API.
 
-    The egress allowlist is part of the server-enforced intent, so callers must
-    be able to register it through the SDK rather than hand-building JSON.
+    The egress allowlist and payment cap are part of the server-enforced
+    intent, so callers must be able to register them through the SDK rather
+    than hand-building JSON. Keys match core's enforce_strict_payment_intent:
+    top-level "maxAmount"/"currency", "constraints.merchant_allowlist".
     """
     payload: dict[str, Any] = {"scope": list(intent_scope)}
     if egress_allowlist is not None:
         payload["egress_allowlist"] = list(egress_allowlist)
+    if max_amount is not None:
+        payload["maxAmount"] = max_amount
+        payload["currency"] = currency
+    if merchant_allowlist is not None:
+        payload["constraints"] = {"merchant_allowlist": list(merchant_allowlist)}
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -686,6 +714,9 @@ def register_llm_agent(
     ring_key_image_hex: Optional[str] = None,
     intent_scope: Optional[Sequence[str]] = None,
     egress_allowlist: Optional[Sequence[Any]] = None,
+    max_amount: Optional[float] = None,
+    currency: Optional[str] = None,
+    merchant_allowlist: Optional[Sequence[str]] = None,
     pop_jkt: Optional[str] = None,
     ttl_secs: int = 3600,
     extra_inputs: Optional[Mapping[str, Any]] = None,
@@ -694,12 +725,15 @@ def register_llm_agent(
     """Register an LLM agent. The model + system_prompt + tool list become
     the binding checksum; flipping any of them at runtime without rotating
     via /agent/<id>/checksum/update will reject every subsequent call.
+
+    Pass max_amount + currency (both or neither) to register a payment cap;
+    core enforces it on every authorize_payment call.
     """
     sk, pop_b64u = _make_pop_keypair()
     pk_hex, ring_secret_hex, ring_ki = _resolve_ring_material(
         public_key_hex, ring_secret_hex, ring_key_image_hex
     )
-    intent = list(intent_scope or [])
+    intent = _apply_payment_cap(list(intent_scope or []), max_amount, currency)
     inputs: dict = {
         "model_id": model_id,
         "system_prompt": system_prompt,
@@ -719,7 +753,9 @@ def register_llm_agent(
         "agent_type": "llm",
         "checksum_inputs": inputs,
         "agent_checksum": "",  # server computes
-        "intent_json": _intent_json(intent, egress_allowlist),
+        "intent_json": _intent_json(
+            intent, egress_allowlist, max_amount, currency, merchant_allowlist
+        ),
         "public_key_hex": pk_hex,
         "ring_key_image_hex": ring_ki,
         "pop_jkt": pop_jkt or _pop_thumbprint(pop_b64u),
@@ -765,6 +801,9 @@ def register_mcp_agent(
     ring_key_image_hex: Optional[str] = None,
     intent_scope: Optional[Sequence[str]] = None,
     egress_allowlist: Optional[Sequence[Any]] = None,
+    max_amount: Optional[float] = None,
+    currency: Optional[str] = None,
+    merchant_allowlist: Optional[Sequence[str]] = None,
     pop_jkt: Optional[str] = None,
     ttl_secs: int = 3600,
     extra_inputs: Optional[Mapping[str, Any]] = None,
@@ -775,7 +814,7 @@ def register_mcp_agent(
     pk_hex, ring_secret_hex, ring_ki = _resolve_ring_material(
         public_key_hex, ring_secret_hex, ring_key_image_hex
     )
-    intent = list(intent_scope or [])
+    intent = _apply_payment_cap(list(intent_scope or []), max_amount, currency)
     inputs: dict = {
         "manifest_json": dict(manifest_json),
         "tool_signatures": list(tool_signatures),
@@ -793,7 +832,9 @@ def register_mcp_agent(
         "agent_type": "mcp_server",
         "checksum_inputs": inputs,
         "agent_checksum": "",
-        "intent_json": _intent_json(intent, egress_allowlist),
+        "intent_json": _intent_json(
+            intent, egress_allowlist, max_amount, currency, merchant_allowlist
+        ),
         "public_key_hex": pk_hex,
         "ring_key_image_hex": ring_ki,
         "pop_jkt": pop_jkt or _pop_thumbprint(pop_b64u),
@@ -834,6 +875,9 @@ def register_custom_agent(
     ring_key_image_hex: Optional[str] = None,
     intent_scope: Optional[Sequence[str]] = None,
     egress_allowlist: Optional[Sequence[Any]] = None,
+    max_amount: Optional[float] = None,
+    currency: Optional[str] = None,
+    merchant_allowlist: Optional[Sequence[str]] = None,
     pop_jkt: Optional[str] = None,
     ttl_secs: int = 3600,
     attestation_provider: Optional[AttestationProvider] = None,
@@ -845,7 +889,7 @@ def register_custom_agent(
     pk_hex, ring_secret_hex, ring_ki = _resolve_ring_material(
         public_key_hex, ring_secret_hex, ring_key_image_hex
     )
-    intent = list(intent_scope or [])
+    intent = _apply_payment_cap(list(intent_scope or []), max_amount, currency)
     custom_inputs = dict(inputs)
     if egress_allowlist is not None:
         custom_inputs["egress_allowlist"] = list(egress_allowlist)
@@ -858,7 +902,9 @@ def register_custom_agent(
         "agent_type": "custom",
         "checksum_inputs": custom_inputs,
         "agent_checksum": "",
-        "intent_json": _intent_json(intent, egress_allowlist),
+        "intent_json": _intent_json(
+            intent, egress_allowlist, max_amount, currency, merchant_allowlist
+        ),
         "public_key_hex": pk_hex,
         "ring_key_image_hex": ring_ki,
         "pop_jkt": pop_jkt or _pop_thumbprint(pop_b64u),

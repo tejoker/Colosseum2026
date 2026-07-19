@@ -13,6 +13,7 @@ Quick example:
     agent = register_llm_agent(
         client,
         user_session=...,                        # opaque from /user/auth
+        user_key_image=...,                      # user's ring key image (hex)
         model_id="claude-opus-4-7",
         system_prompt=open("prompt.md").read(),
         tools=["search", "fetch"],
@@ -69,6 +70,25 @@ from .anthropic_adapter import (
     SauronAnthropicAgent,
     dispatch_tool_use_blocks,
 )
+# 3rd-wave framework adapters + one-import wrapper. None of these import
+# their framework at module import time (duck typing / lazy require_*
+# guards), so eager re-export keeps package import framework-free.
+from .llamaindex_adapter import (
+    bind_llamaindex_tools,
+    SauronLlamaIndexAgent,
+    require_llama_index,
+)
+from .crewai_adapter import (
+    bind_crewai_tools,
+    SauronCrewAIAgent,
+    require_crewai,
+)
+from .autogen_adapter import (
+    guard_function,
+    guard_functions,
+    require_autogen,
+)
+from .wrap import wrap
 
 __version__ = "0.2.0"
 __all__ = [
@@ -103,4 +123,15 @@ __all__ = [
     "dispatch_tool_calls",
     "SauronAnthropicAgent",
     "dispatch_tool_use_blocks",
+    # 3rd-wave framework adapters + one-import wrapper
+    "bind_llamaindex_tools",
+    "SauronLlamaIndexAgent",
+    "require_llama_index",
+    "bind_crewai_tools",
+    "SauronCrewAIAgent",
+    "require_crewai",
+    "guard_function",
+    "guard_functions",
+    "require_autogen",
+    "wrap",
 ]

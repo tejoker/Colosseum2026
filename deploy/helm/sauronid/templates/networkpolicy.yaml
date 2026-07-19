@@ -1,0 +1,63 @@
+{{- if .Values.networkPolicy.enabled }}
+# Hostile-agent network boundary, adapted from
+# deploy/kubernetes/agent-network-isolation.yaml. Label untrusted agent pods
+# sauronid.io/role=agent; the chart labels the core pod sauronid.io/role=core.
+# Requires a CNI that enforces NetworkPolicy — validate with a negative probe
+# from an agent pod (public IP + cloud metadata endpoint) and a positive probe
+# to the core service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sauronid.fullname" . }}-agent-default-deny
+  labels:
+    {{- include "sauronid.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      sauronid.io/role: agent
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sauronid.fullname" . }}-agent-allow-dns
+  labels:
+    {{- include "sauronid.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      sauronid.io/role: agent
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sauronid.fullname" . }}-agent-allow-core-only
+  labels:
+    {{- include "sauronid.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      sauronid.io/role: agent
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              sauronid.io/role: core
+      ports:
+        - {protocol: TCP, port: 3001}
+{{- end }}

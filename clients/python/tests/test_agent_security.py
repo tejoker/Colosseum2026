@@ -13,6 +13,7 @@ from sauronid_client.agent import (
     SignedAgent,
     _intent_json,
     _resolve_ring_material,
+    register_llm_agent,
 )
 from sauronid_client.client import SauronIDClient
 
@@ -52,6 +53,57 @@ def test_intent_json_exposes_egress_allowlist_deterministically() -> None:
         '{"scope":["payment_initiation"],"egress_allowlist":'
         '[{"host":"api.example.com","methods":["POST"],"path_prefix":"/v1"}]}'
     )
+
+
+def test_register_llm_agent_serialises_payment_cap_into_intent() -> None:
+    client = SauronIDClient(base_url="http://core", timeout=3)
+    register_resp = Mock(
+        ok=True, status_code=200, text="", json=lambda: {"agent_id": "agt_cap"}
+    )
+    with patch(
+        "sauronid_client.agent.requests.post", return_value=register_resp
+    ) as post:
+        with patch.object(
+            client, "get_json", return_value={"agent_checksum": "sha256:cap"}
+        ):
+            agent = register_llm_agent(
+                client,
+                user_session="session",
+                user_key_image="human-image",
+                model_id="claude-sonnet-4-5",
+                system_prompt="prompt",
+                tools=["search"],
+                public_key_hex="11" * 32,
+                ring_secret_hex="22" * 32,
+                ring_key_image_hex="33" * 32,
+                max_amount=5.0,
+                currency="USD",
+                merchant_allowlist=["mch_demo_payments"],
+            )
+    body = json.loads(post.call_args.kwargs["data"])
+    intent = json.loads(body["intent_json"])
+    assert intent["maxAmount"] == 5.0
+    assert intent["currency"] == "USD"
+    assert intent["constraints"] == {"merchant_allowlist": ["mch_demo_payments"]}
+    assert "payment_initiation" in intent["scope"]
+    assert "payment_initiation" in agent.intent_scope
+
+
+def test_register_llm_agent_rejects_half_specified_payment_cap() -> None:
+    client = SauronIDClient(base_url="http://core", timeout=3)
+    with pytest.raises(ValueError, match="max_amount and currency"):
+        register_llm_agent(
+            client,
+            user_session="session",
+            user_key_image="human-image",
+            model_id="claude-sonnet-4-5",
+            system_prompt="prompt",
+            tools=["search"],
+            public_key_hex="11" * 32,
+            ring_secret_hex="22" * 32,
+            ring_key_image_hex="33" * 32,
+            max_amount=5.0,  # currency missing
+        )
 
 
 def test_authorize_payment_signs_the_final_post() -> None:

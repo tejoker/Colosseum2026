@@ -63,6 +63,29 @@ export {
     type UserAuthResult,
 } from "./user-auth";
 
+// High-level client + register-and-call flow (parity with clients/python).
+export {
+    SauronIDClient,
+    SauronIDError,
+    type SauronIDClientOptions,
+} from "./client";
+export {
+    SignedAgent,
+    registerLlmAgent,
+    registerMcpAgent,
+    registerCustomAgent,
+    type RegisterAgentBaseOptions,
+    type RegisterLlmAgentOptions,
+    type RegisterMcpAgentOptions,
+    type RegisterCustomAgentOptions,
+    type SignedAgentCallOptions,
+    type AuthorizePaymentOptions,
+    type EgressRequestOptions,
+} from "./signed-agent";
+
+// Framework adapters (Vercel AI SDK, OpenAI tool calls, Anthropic tool_use).
+export * from "./adapters";
+
 // Sprint 3 — runtime policy enforcement (additive; opt-in via `bind()`).
 export * from "./enforcement";
 

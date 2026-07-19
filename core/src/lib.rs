@@ -28,6 +28,7 @@ pub mod compliance;
 pub mod crypto_protocol;
 pub mod db;
 pub mod dp;
+pub mod dpop;
 pub mod egress_gateway;
 pub mod error;
 pub mod feature_flags;

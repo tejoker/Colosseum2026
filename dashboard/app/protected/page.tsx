@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getTranslations } from "next-intl/server";
 import { fetchProtected } from "@/lib/api";
 import { PageShell } from "@/components/layout/PageShell";
@@ -7,6 +8,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ProtectedPage() {
   const t = await getTranslations("protected");
+  const tc = await getTranslations("common");
   const result = await fetchProtected({ limit: 1000 });
   const events = result.ok ? result.data : [];
 
@@ -32,9 +34,15 @@ export default async function ProtectedPage() {
       </p>
 
       {events.length === 0 ? (
-        <p className="text-sm text-[var(--text-muted)] py-12 text-center">
-          {t("empty")}
-        </p>
+        <div className="py-12 text-center">
+          <p className="text-sm text-[var(--text-muted)] mb-3">{t("empty")}</p>
+          <Link
+            href="/welcome"
+            className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+          >
+            {tc("emptyCta")} →
+          </Link>
+        </div>
       ) : (
         <ProtectedFeed
           events={events}

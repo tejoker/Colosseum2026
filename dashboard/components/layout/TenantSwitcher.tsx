@@ -7,6 +7,10 @@
 // entry persists the choice via `setCurrentTenant`, which also dispatches
 // the `sauron:tenant-changed` event; we then `router.refresh()` so RSCs
 // re-render with the new tenant header forwarded by the middleware.
+//
+// Keyboard: Enter/Space/ArrowDown/ArrowUp open the listbox, Arrow keys move
+// the focused option (roving focus), Home/End jump, Enter selects, Escape
+// closes and returns focus to the trigger.
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -22,7 +26,10 @@ export function TenantSwitcher() {
   const [active, setActive] = useState<string>(DEFAULT_TENANT);
   const [tenants, setTenants] = useState<string[]>([DEFAULT_TENANT]);
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   // Hydrate active id once on mount (cookie/localStorage are browser-only).
   useEffect(() => {
@@ -45,8 +52,23 @@ export function TenantSwitcher() {
     return () => document.removeEventListener("mousedown", onClick);
   }, [open]);
 
-  function pick(id: string) {
+  // Roving focus — keep the focused option in sync with activeIndex.
+  useEffect(() => {
+    if (open) itemRefs.current[activeIndex]?.focus();
+  }, [open, activeIndex]);
+
+  function openList(index: number) {
+    setActiveIndex(Math.max(0, Math.min(index, tenants.length - 1)));
+    setOpen(true);
+  }
+
+  function closeList(returnFocus: boolean) {
     setOpen(false);
+    if (returnFocus) triggerRef.current?.focus();
+  }
+
+  function pick(id: string) {
+    closeList(true);
     if (id === active) return;
     setCurrentTenant(id);
     setActive(id);
@@ -54,15 +76,61 @@ export function TenantSwitcher() {
     router.refresh();
   }
 
+  function onTriggerKeyDown(ev: React.KeyboardEvent) {
+    const selected = Math.max(0, tenants.indexOf(active));
+    switch (ev.key) {
+      case "Enter":
+      case " ":
+      case "ArrowDown":
+        ev.preventDefault();
+        openList(selected);
+        break;
+      case "ArrowUp":
+        ev.preventDefault();
+        openList(tenants.length - 1);
+        break;
+    }
+  }
+
+  function onListKeyDown(ev: React.KeyboardEvent) {
+    switch (ev.key) {
+      case "ArrowDown":
+        ev.preventDefault();
+        setActiveIndex((i) => (i + 1) % tenants.length);
+        break;
+      case "ArrowUp":
+        ev.preventDefault();
+        setActiveIndex((i) => (i - 1 + tenants.length) % tenants.length);
+        break;
+      case "Home":
+        ev.preventDefault();
+        setActiveIndex(0);
+        break;
+      case "End":
+        ev.preventDefault();
+        setActiveIndex(tenants.length - 1);
+        break;
+      case "Escape":
+        ev.preventDefault();
+        closeList(true);
+        break;
+      case "Tab":
+        closeList(false);
+        break;
+    }
+  }
+
   return (
     <div ref={wrapRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Switch tenant"
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-mono rounded border border-[var(--border)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors"
+        onClick={() => (open ? closeList(false) : openList(Math.max(0, tenants.indexOf(active))))}
+        onKeyDown={onTriggerKeyDown}
+        className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-mono rounded border border-[var(--border)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         data-testid="tenant-switcher-button"
       >
         <span className="text-[var(--text-muted)] uppercase tracking-wide">tenant</span>
@@ -81,17 +149,23 @@ export function TenantSwitcher() {
         <ul
           role="listbox"
           aria-label="Available tenants"
+          aria-activedescendant={`tenant-option-${activeIndex}`}
+          onKeyDown={onListKeyDown}
           className="absolute right-0 mt-1 min-w-[14rem] max-h-72 overflow-y-auto z-50 rounded border border-[var(--border)] bg-[var(--bg)] shadow-lg"
           data-testid="tenant-switcher-menu"
         >
-          {tenants.map((id) => {
+          {tenants.map((id, index) => {
             const isActive = id === active;
             return (
-              <li key={id} role="option" aria-selected={isActive}>
+              <li key={id} role="option" aria-selected={isActive} id={`tenant-option-${index}`}>
                 <button
+                  ref={(el) => {
+                    itemRefs.current[index] = el;
+                  }}
                   type="button"
+                  tabIndex={-1}
                   onClick={() => pick(id)}
-                  className={`w-full text-left px-3 py-1.5 text-xs font-mono flex items-center justify-between gap-2 hover:bg-[var(--bg-surface)] ${
+                  className={`w-full text-left px-3 py-1.5 text-xs font-mono flex items-center justify-between gap-2 hover:bg-[var(--bg-surface)] focus-visible:outline-none focus-visible:bg-[var(--bg-surface)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--accent)] ${
                     isActive
                       ? "text-[var(--accent)]"
                       : "text-[var(--text-secondary)]"

@@ -15,6 +15,37 @@ Requires Go 1.22+.
 ## Quickstart
 
 ```go
+ctx := context.Background()
+client := sauronid.NewClient(sauronid.ClientOptions{BaseURL: "http://localhost:8080"})
+
+auth, err := client.UserAuth(ctx, "ops@example.com", "password") // dev-only legacy auth
+if err != nil { log.Fatal(err) }
+
+agent, err := sauronid.RegisterLLMAgent(ctx, client, sauronid.RegisterLLMAgentOptions{
+	UserSession:  auth.Session,
+	UserKeyImage: auth.KeyImage,
+	ModelID:      "gpt-4o",
+	SystemPrompt: "You are a payments copilot.",
+	Tools:        []string{"send_email"},
+})
+if err != nil { log.Fatal(err) }
+
+resp, err := agent.Call(ctx, "POST", "/agent/action/challenge", body) // signed x-sauron-* headers
+if err != nil { log.Fatal(err) }
+defer resp.Body.Close()
+
+_ = agent.Revoke(ctx, auth.Session)
+```
+
+`RegisterLLMAgent` generates the Ed25519 PoP keypair in-process, lets the
+server compute the binding config digest, and returns a `SignedAgent` whose
+`Call` signs every request with the protocol-v2 call signature. See also
+`RegisterMCPAgent`, `RegisterCustomAgent`, `AuthorizePayment`,
+`EgressRequest`, `ReportEgress`, `SignActionChallenge`.
+
+## Local policy enforcement
+
+```go
 package main
 
 import (
@@ -71,7 +102,9 @@ For the one-shot wiring use `sauronid.CreateEnforcer(ctx, opts)`.
 
 ## API surface
 
-- `Client` — HTTP client for agent register/revoke, policy upload/list/evaluate, spend ledger, stats submit.
+- `Client` — HTTP client for user auth, agent register/revoke, policy upload/list/evaluate, spend ledger, stats submit.
+- `RegisterLLMAgent` / `RegisterMCPAgent` / `RegisterCustomAgent` — registration + PoP keypair generation, returns a `SignedAgent`.
+- `SignedAgent` — signed `Call`, `AuthorizePayment`, `EgressRequest`, `ReportEgress`, `SignActionChallenge`, `Revoke`.
 - `PolicyCache` — fetches compiled policies via `GET /v1/policy/:id`, background refresh.
 - `BudgetTracker` — in-memory spend + rate ledger, optional server-side flush.
 - `Bind` — wraps an arbitrary tool with policy enforcement.
@@ -114,5 +147,6 @@ immediately.
 | `stats.go` | StatsSubmission + Client.SubmitStats |
 | `pop_keys.go` | Ed25519 PoP keypair helpers |
 | `call_sig.go` | Signed-call header bundle |
+| `signed_agent.go` | SignedAgent runtime + Register*Agent helpers |
 | `client.go` | Bare HTTP client (agent / policy / spend) |
 | `examples/main.go` | End-to-end demo |

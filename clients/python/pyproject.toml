@@ -1,10 +1,11 @@
 [project]
 name = "sauronid-client"
 version = "0.2.0"
-description = "SauronID Python client + LangChain/OpenAI/Anthropic adapters for AI-agent binding."
+description = "SauronID Python client + LangChain/OpenAI/Anthropic/LlamaIndex/CrewAI/AutoGen adapters for AI-agent binding."
 readme = "sauronid_client/README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "SauronID maintainers" }]
 keywords = ["ai-agent", "auth", "binding", "dpop", "anthropic", "openai", "langchain"]
 classifiers = [
@@ -22,12 +23,24 @@ dependencies = [
     "cryptography>=42.0",
 ]
 
+# All adapters are duck-typed: none of these packages is required at
+# runtime. The extras exist so `pip install 'sauronid-client[crewai]'`
+# pulls the matching framework in one step.
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.1"]
+llamaindex = ["llama-index-core>=0.10"]
+crewai = ["crewai>=0.28"]
+autogen = ["pyautogen>=0.2"]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.25"]
+
 [project.urls]
-"Homepage" = "https://github.com/your-org/sauronid"
-"Documentation" = "https://github.com/your-org/sauronid/blob/main/docs/empirical-comparison.md"
+"Homepage" = "https://github.com/tejoker/Colosseum2026"
+"Repository" = "https://github.com/tejoker/Colosseum2026"
+"Documentation" = "https://github.com/tejoker/Colosseum2026/tree/main/docs"
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

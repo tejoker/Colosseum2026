@@ -1,0 +1,41 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "SauronID",
+  "colors": {
+    "primary": "#2563EB",
+    "dark": "#06090F"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting started",
+        "pages": [
+          "concepts",
+          "quickstart-python",
+          "quickstart-typescript",
+          "quickstart-go"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "guides/payments",
+          "guides/egress",
+          "guides/policies",
+          "guides/siem"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "api-reference"
+        ]
+      }
+    ]
+  },
+  "footerSocials": {
+    "github": "https://github.com/tejoker/HackNation2026"
+  }
+}

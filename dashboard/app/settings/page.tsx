@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
   const t = await getTranslations("settings");
+  const tc = await getTranslations("common");
   const [companiesResult, peopleResult] = await Promise.all([
     fetchCompanies(),
     fetchPeople(),
@@ -25,7 +26,15 @@ export default async function SettingsPage() {
           {t("tabCompanies")}
         </h2>
         {companies.length === 0 ? (
-          <p className="text-sm text-[var(--text-muted)] py-8">{t("companiesEmpty")}</p>
+          <div className="py-8">
+            <p className="text-sm text-[var(--text-muted)] mb-2">{t("companiesEmpty")}</p>
+            <Link
+              href="/welcome"
+              className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+            >
+              {tc("emptyCta")} →
+            </Link>
+          </div>
         ) : (
           <Table>
             <Thead>
@@ -65,7 +74,15 @@ export default async function SettingsPage() {
           {t("tabPeople")}
         </h2>
         {people.length === 0 ? (
-          <p className="text-sm text-[var(--text-muted)] py-8">{t("peopleEmpty")}</p>
+          <div className="py-8">
+            <p className="text-sm text-[var(--text-muted)] mb-2">{t("peopleEmpty")}</p>
+            <Link
+              href="/welcome"
+              className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+            >
+              {tc("emptyCta")} →
+            </Link>
+          </div>
         ) : (
           <Table>
             <Thead>

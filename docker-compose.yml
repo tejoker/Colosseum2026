@@ -1,0 +1,71 @@
+# DEV ONLY — one-command evaluator stack. From the repo root:
+#
+#     docker compose up
+#
+# Boots core (dev mode, SQLite on a named volume, port 3001), the dashboard
+# (port 3000, dev/dev login), and a one-shot seed job that loads demo clients
+# and users once core is healthy. No .env editing required; the admin key
+# below is a fixed dev value and must never reach production.
+#
+# Production: deploy/docker-compose.prod.yml (no default secrets).
+# Other scenarios (postgres, VM demo, systemd, helm, terraform): deploy/README.md.
+
+services:
+  backend:
+    build: ./core
+    image: sauronid-backend:dev
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - ENV=development
+      - DATABASE_PATH=/var/lib/sauronid/sauron.db
+      - SAURON_ACCEPT_SINGLE_NODE_SQLITE=1
+      - SAURON_ENABLE_DEV_ENDPOINTS=1
+      - SAURON_ADMIN_KEY=dev-only-admin-key-not-for-production
+    volumes:
+      - sauron_data:/var/lib/sauronid
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/healthz"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      args:
+        # Baked at build time; the browser talks to core on localhost:3001.
+        NEXT_PUBLIC_API_URL: "http://localhost:3001"
+    image: sauronid-dashboard:dev
+    ports:
+      - "3000:3000"
+    environment:
+      - SAURON_CORE_INTERNAL_URL=http://backend:3001
+      - SAURON_ADMIN_KEY=dev-only-admin-key-not-for-production
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # One-shot demo seed: runs core/seed.sh (baked into the core image) against
+  # the backend, then exits. scripts/ is mounted so seed.sh can source
+  # scripts/lib/dev_secrets.sh at /scripts/lib/dev_secrets.sh.
+  seed:
+    build: ./core
+    image: sauronid-backend:dev
+    command: ["bash", "/app/seed.sh"]
+    environment:
+      - SAURON_URL=http://backend:3001
+      - SAURON_ADMIN_KEY=dev-only-admin-key-not-for-production
+    volumes:
+      - ./scripts:/scripts:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  sauron_data:

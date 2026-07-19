@@ -7,7 +7,7 @@ interface PageShellProps {
 export function PageShell({ children, title, subtitle }: PageShellProps) {
   return (
     <div className="min-h-screen pt-12">
-      <main className="max-w-5xl mx-auto px-6 py-10">
+      <main id="main" className="max-w-5xl mx-auto px-6 py-10">
         {(title || subtitle) && (
           <div className="mb-8">
             {title && (

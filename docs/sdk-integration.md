@@ -81,3 +81,14 @@ For comparison, a server roundtrip (`POST /v1/policy/evaluate`) over a healthy L
 - **Server admission middleware (call-sig)** — last-resort defence against direct-call bypass.
 
 Three layers, defence in depth.
+
+## DPoP compatibility
+
+Opt-in RFC 9449 surface for clients that already speak DPoP. When `SAURON_ACCEPT_DPOP=1`, the call-sig middleware accepts a `DPoP: <proof JWS>` header as an alternative to the `x-sauron-call-sig` header set (still alongside `x-sauron-agent-id`). The proof is a compact JWS:
+
+- header `{typ:"dpop+jwt", alg:"EdDSA", jwk:{kty:"OKP", crv:"Ed25519", x:<agent PoP public key, base64url no-pad>}}`
+- claims `{htm:<method>, htu:<full request URI, no query/fragment>, iat:<unix seconds>, jti:<unique id>}`, optional `ath` = base64url(SHA-256(A-JWT bearer token))
+
+Server-side mapping onto the existing machinery: `jwk.x` must equal the agent's registered `pop_public_key_b64u`; `htm`/`htu` must match the request; `iat` uses the same `SAURON_CALL_SIG_SKEW_MS` window (default 60000 ms); `jti` is single-use, consumed through the same `agent_call_nonces` table under a `dpop:` prefix.
+
+**Body-digest caveat.** A DPoP proof binds method + URI + time + jti only — it carries no `body_sha256` and no config digest, so within the skew window a captured proof allows body substitution, and config drift is not detected on this path. That is why it is default-off, and why production runtimes ignore `SAURON_ACCEPT_DPOP=1` unless `SAURON_ACCEPT_DPOP_IN_PROD=1` explicitly acknowledges the weakened binding. Prefer call-sig v2 (`x-sauron-call-sig`) everywhere you control the client.
