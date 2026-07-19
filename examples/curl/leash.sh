@@ -8,7 +8,7 @@
 set -euo pipefail
 
 CORE_URL="${CORE_URL:-http://localhost:3001}"
-ADMIN_KEY="dev-only-admin-key-not-for-production"
+ADMIN_KEY="${ADMIN_KEY:-dev-only-admin-key-not-for-production}"
 EMAIL="leash-demo-$(date +%s)@sauron.dev"
 PASSWORD="pass_demo"
 

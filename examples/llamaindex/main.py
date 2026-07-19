@@ -6,10 +6,12 @@ Prereqs: `docker compose up` at the repo root and
 
 from llama_index.core.tools import FunctionTool
 
+import os
+
 from sauronid_client import SauronIDClient, wrap
 
 CORE_URL = "http://localhost:3001"
-DEV_ADMIN_KEY = "dev-only-admin-key-not-for-production"
+DEV_ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY", "dev-only-admin-key-not-for-production")
 
 POLICY = """\
 version: "1"

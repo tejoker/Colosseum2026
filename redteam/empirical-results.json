@@ -6,7 +6,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "status=200 valid=false",
-      "latency_ms": 78,
+      "latency_ms": 79,
       "pass": true,
       "dynamic": true
     },
@@ -26,7 +26,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "first=422 second=409",
-      "latency_ms": 4,
+      "latency_ms": 2,
       "pass": true,
       "dynamic": true
     },
@@ -36,7 +36,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "status=401",
-      "latency_ms": 1,
+      "latency_ms": 2,
       "pass": true,
       "dynamic": true
     },
@@ -66,7 +66,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "status=401",
-      "latency_ms": 2,
+      "latency_ms": 3,
       "pass": true,
       "dynamic": true
     },
@@ -76,7 +76,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "status=401",
-      "latency_ms": 2,
+      "latency_ms": 1,
       "pass": true,
       "dynamic": true
     },
@@ -96,7 +96,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "status=400",
-      "latency_ms": 2,
+      "latency_ms": 4,
       "pass": true,
       "dynamic": true
     },
@@ -106,7 +106,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "N=20 winners=1 already_used=19",
-      "latency_ms": 42,
+      "latency_ms": 122,
       "pass": true,
       "dynamic": true,
       "evidence": "Promise.all(20) → 1 claim + 19 × HTTP 409 \"Consent token already used\""
@@ -117,7 +117,7 @@
       "expected": "blocked",
       "observed": "blocked",
       "detail": "limit=60 sent=65 status_200=60 status_429=5",
-      "latency_ms": 2260,
+      "latency_ms": 2166,
       "pass": true,
       "dynamic": true,
       "evidence": "5/65 requests returned HTTP 429 (risk::check_and_increment denied)"
@@ -127,8 +127,8 @@
       "description": "CORS hard-fail: disallowed Origin not reflected in ACAO (preflight + actual)",
       "expected": "blocked",
       "observed": "blocked",
-      "detail": "preflight_status=200 preflight_ACAO=\"\" actual_status=401 actual_ACAO=\"\"",
-      "latency_ms": 2,
+      "detail": "preflight_status=200 preflight_ACAO=\"\" actual_status=200 actual_ACAO=\"\"",
+      "latency_ms": 3,
       "pass": true,
       "dynamic": true,
       "evidence": "Origin: http://attacker.example.com → ACAO absent / not echoed → browser would block (CorsLayer.allow_origin allowlist)"
@@ -138,30 +138,30 @@
       "description": "Audit-log integrity: tampered receipt leaf invalidates merkle inclusion proof",
       "expected": "blocked",
       "observed": "blocked",
-      "detail": "receipt_id=ar_a4d8f6941… orig_match=true tampered_match=false root_diff=true",
-      "latency_ms": 2,
+      "detail": "receipt_id=ar_ed1cddfaf… orig_match=true tampered_match=false root_diff=true",
+      "latency_ms": 1,
       "pass": true,
       "dynamic": true,
-      "evidence": "tree_size=1 leaf_index=0 batch_root=4f1b84a25a7a3fa8… flipped first nibble → root mismatch"
+      "evidence": "tree_size=1 leaf_index=0 batch_root=78c2ba031aae2b45… flipped first nibble → root mismatch"
     },
     {
       "id": "A15",
       "description": "HMAC compare timing oracle: 2000 iters early-diff vs late-diff session sig",
       "expected": "blocked",
       "observed": "blocked",
-      "detail": "early_mean=986.47µs σ=206.97 | late_mean=978.60µs σ=203.92 | Δ=7.86µs t=1.15",
-      "latency_ms": 4933,
+      "detail": "early_mean=1279.77µs σ=276.22 | late_mean=1276.08µs σ=273.48 | Δ=3.68µs t=0.40",
+      "latency_ms": 7944,
       "pass": true,
       "dynamic": true,
-      "evidence": "Welch-style |t|=1.15 (<3 ⇒ no oracle); subtle::ConstantTimeEq walks full sig regardless of first mismatch"
+      "evidence": "Welch-style |t|=0.40 (<3 ⇒ no oracle); subtle::ConstantTimeEq walks full sig regardless of first mismatch"
     },
     {
       "id": "A16",
       "description": "Agent runtime config drift (claimed digest != registered checksum) blocked",
       "expected": "blocked",
       "observed": "blocked",
-      "detail": "status=401 body=agent runtime config digest does not match registered checksum (config drift; ca",
-      "latency_ms": 2,
+      "detail": "status=401 body={\"error\":{\"code\":\"call_sig_config_digest_mismatch\",\"fix\":\"runtime config drifted",
+      "latency_ms": 1,
       "pass": true,
       "dynamic": true,
       "evidence": "call-sig accepted, but x-sauron-agent-config-digest mismatched registered checksum → HTTP 401 \"config drift\""
@@ -170,5 +170,5 @@
   "passed": 16,
   "total": 16,
   "skipped": 0,
-  "generated_at": "2026-07-15T14:00:23.341Z"
+  "generated_at": "2026-07-19T19:14:31.830Z"
 }

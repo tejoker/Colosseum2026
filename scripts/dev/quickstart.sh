@@ -97,13 +97,23 @@ rm -f sauron.db sauron.db-shm sauron.db-wal
 if [ "$ENFORCE_MODE" = "1" ]; then
     export SAURON_REQUIRE_CALL_SIG=1
 fi
+# Dev-only: the seed step and the suites read deployment-global admin views
+# (/admin/stats, /admin/users), which regular tenant-scoped keys cannot.
+export SAURON_ADMIN_CROSS_TENANT=1
+# Dev-only: seeding and the empirical suite use /dev/register_user and
+# /dev/buy_tokens, which are unmounted unless explicitly enabled.
+export SAURON_ENABLE_DEV_ENDPOINTS=1
+# Dev-only: the empirical suite is a deliberate localhost load generator; the
+# default per-IP limiter (200 rps, burst 50) throttles it into 429s.
+export SAURON_GLOBAL_RATE_LIMIT_RPS=5000
+export SAURON_GLOBAL_RATE_LIMIT_BURST=2000
 ./target/release/sauron-core > /tmp/sauron-quickstart.log 2>&1 &
 CORE_PID=$!
 trap 'kill $CORE_PID 2>/dev/null || true; fuser -k 3001/tcp 2>/dev/null || true' EXIT
 
-# Wait for /admin/stats
+# Wait for readiness (liveness endpoint; authz-free)
 for i in $(seq 1 30); do
-    if curl -sf "$SAURON_CORE_URL/admin/stats" -H "x-admin-key: $SAURON_ADMIN_KEY" >/dev/null 2>&1; then
+    if curl -sf "$SAURON_CORE_URL/healthz" >/dev/null 2>&1; then
         ok "core ready (pid=$CORE_PID)"
         break
     fi

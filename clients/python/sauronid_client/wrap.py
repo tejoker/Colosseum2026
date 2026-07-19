@@ -103,10 +103,12 @@ def wrap(
         if not x:
             return []
         first = x[0]
-        mod = type(first).__module__ or ""
-        if mod.startswith("crewai"):
+        # User tools subclass a framework base class in their own module, so
+        # sniff the whole MRO, not just the leaf class.
+        mro_mods = [c.__module__ or "" for c in type(first).__mro__]
+        if any(m.startswith("crewai") for m in mro_mods):
             return bind_crewai_tools(x, enf, raise_on_deny=raise_on_deny, **common)
-        if mod.startswith("llama_index") or (
+        if any(m.startswith("llama_index") for m in mro_mods) or (
             hasattr(first, "metadata") and hasattr(first, "call")
         ):
             return bind_llamaindex_tools(x, enf, raise_on_deny=raise_on_deny, **common)
