@@ -100,7 +100,7 @@ export default async function CohortsListPage({
                       <Td>
                         <Link
                           href={`/cohorts/${encodeURIComponent(c.cohort_id)}`}
-                          className="text-[var(--accent)] hover:text-[var(--accent-hover)]"
+                          className="text-[var(--accent-text)] hover:text-[var(--accent-hover)]"
                         >
                           {c.label}
                         </Link>

@@ -49,7 +49,7 @@ export function AuditTimeline({ events }: { events: AuditEvent[] }) {
                       href={`https://explorer.solana.com/tx/${event.anchor_ref}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+                      className="text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
                     >
                       Verify on Solana ↗
                     </a>

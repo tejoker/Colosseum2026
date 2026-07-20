@@ -38,7 +38,7 @@ export default async function ProtectedPage() {
           <p className="text-sm text-[var(--text-muted)] mb-3">{t("empty")}</p>
           <Link
             href="/welcome"
-            className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+            className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
           >
             {tc("emptyCta")} →
           </Link>

@@ -147,7 +147,7 @@ export default async function AgentDetailPage({
       <div className="flex items-center gap-3">
         <Link
           href={`/agents/${id}/audit`}
-          className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+          className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
         >
           {t("audit")} →
         </Link>

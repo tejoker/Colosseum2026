@@ -38,7 +38,7 @@ export function AnchorChainBadge({
         <Badge variant={btcRoot ? "ok" : "neutral"}>BTC</Badge>
         {btcRoot ? (
           <a
-            className="text-mono-sm text-[var(--accent)] hover:underline truncate max-w-[28ch]"
+            className="text-mono-sm text-[var(--accent-text)] hover:underline truncate max-w-[28ch]"
             href={btcUrl(btcRoot)!}
             target="_blank"
             rel="noopener noreferrer"
@@ -59,7 +59,7 @@ export function AnchorChainBadge({
         <Badge variant={solanaSig ? "ok" : "neutral"}>SOL</Badge>
         {solanaSig ? (
           <a
-            className="text-mono-sm text-[var(--accent)] hover:underline truncate max-w-[28ch]"
+            className="text-mono-sm text-[var(--accent-text)] hover:underline truncate max-w-[28ch]"
             href={solUrl(solanaSig)!}
             target="_blank"
             rel="noopener noreferrer"

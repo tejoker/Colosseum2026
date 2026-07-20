@@ -30,7 +30,7 @@ export default async function SettingsPage() {
             <p className="text-sm text-[var(--text-muted)] mb-2">{t("companiesEmpty")}</p>
             <Link
               href="/welcome"
-              className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+              className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
             >
               {tc("emptyCta")} →
             </Link>
@@ -50,7 +50,7 @@ export default async function SettingsPage() {
                   <Td>
                     <Link
                       href={`/companies/${c.id}`}
-                      className="text-[var(--text-primary)] hover:text-[var(--accent)] transition-colors duration-150 ease-out"
+                      className="text-[var(--text-primary)] hover:text-[var(--accent-text)] transition-colors duration-150 ease-out"
                     >
                       {c.name}
                     </Link>
@@ -78,7 +78,7 @@ export default async function SettingsPage() {
             <p className="text-sm text-[var(--text-muted)] mb-2">{t("peopleEmpty")}</p>
             <Link
               href="/welcome"
-              className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+              className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
             >
               {tc("emptyCta")} →
             </Link>

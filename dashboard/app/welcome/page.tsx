@@ -169,6 +169,12 @@ export default function WelcomePage() {
               copiedLabel={tc("copied")}
             />
           </div>
+          <Link
+            href="/onboard"
+            className="inline-block mt-3 text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+          >
+            {t("needKey")} →
+          </Link>
         </Step>
 
         <Step n={3} title={t("step3Title")}>
@@ -184,6 +190,12 @@ export default function WelcomePage() {
               copiedLabel={tc("copied")}
             />
           </div>
+          <Link
+            href="/onboard"
+            className="inline-block mt-3 text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+          >
+            {t("needKey")} →
+          </Link>
         </Step>
 
         <Step n={4} title={t("step4Title")}>
@@ -209,7 +221,7 @@ export default function WelcomePage() {
                 </div>
                 <Link
                   href="/activity"
-                  className="inline-block mt-3 text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+                  className="inline-block mt-3 text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
                 >
                   {t("step4GoActivity")} →
                 </Link>

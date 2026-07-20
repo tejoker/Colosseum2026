@@ -25,7 +25,7 @@ export default async function ProofsPage() {
                 href="https://opentimestamps.org"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-mono-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+                className="text-mono-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
               >
                 {t("verifyOn", { chain: "OTS" })} →
               </a>
@@ -65,7 +65,7 @@ export default async function ProofsPage() {
                 href="https://explorer.solana.com"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-mono-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+                className="text-mono-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
               >
                 {t("verifyOn", { chain: "Solana Explorer" })} →
               </a>
@@ -155,7 +155,7 @@ export default async function ProofsPage() {
                       {b.btc_anchor_id ? (
                         <a
                           href={`/api/proofs/ots/${encodeURIComponent(b.btc_anchor_id)}`}
-                          className="text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+                          className="text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
                           title="Download the OpenTimestamps .ots proof. Verify with: ots upgrade <file>.ots && ots info <file>.ots"
                         >
                           ↓ Download proof

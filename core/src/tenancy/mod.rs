@@ -112,7 +112,9 @@ impl std::fmt::Display for TenantId {
 /// Validate a tenant-id string is well-formed: 1..=64 chars, ASCII
 /// alphanumeric + `-` + `_`. Anything else is rejected at the middleware
 /// boundary as `400 Bad Request` to keep injection / smuggling at bay.
-fn valid_tenant_id(s: &str) -> bool {
+/// Public so admin provisioning (`/admin/keys/issue`) validates tenant
+/// allowlists with the exact same rule the middleware enforces.
+pub fn valid_tenant_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_TENANT_ID_LEN
         && s.chars()

@@ -22,9 +22,15 @@
   --border-hover: rgba(255, 255, 255, 0.12);
   --text-primary: #ffffff;
   --text-secondary: rgba(255, 255, 255, 0.55);
-  --text-muted: rgba(255, 255, 255, 0.30);
+  /* 0.30 failed WCAG AA (2.6:1) as body text; 0.50 clears it (5.3:1) while
+     staying visibly below --text-secondary. */
+  --text-muted: rgba(255, 255, 255, 0.50);
   --accent: #2563eb;
   --accent-hover: #4f8cfe;
+  /* Accent as text/icon foreground. #2563eb fails WCAG AA on the dark canvas
+     (3.86:1); this lighter blue clears it (6.18:1). --accent stays for
+     backgrounds, where white text sits on it. */
+  --accent-text: #4f8cfe;
   --status-ok: #34d399;
   --status-stopped: #f87171;
   --status-warning: rgba(251, 191, 36, 0.6);
@@ -38,10 +44,14 @@
   --border: rgba(0, 0, 0, 0.08);
   --border-hover: rgba(0, 0, 0, 0.16);
   --text-primary: #0f172a;
-  --text-secondary: rgba(15, 23, 42, 0.55);
-  --text-muted: rgba(15, 23, 42, 0.35);
+  /* Light-mode dark-on-light needs higher alpha to clear AA: 0.55/0.35 failed
+     (3.9/2.2:1). 0.72 -> 6.9:1, 0.62 -> 5.0:1, hierarchy preserved. */
+  --text-secondary: rgba(15, 23, 42, 0.72);
+  --text-muted: rgba(15, 23, 42, 0.62);
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
+  /* On the light canvas #2563eb already clears AA as text (4.94:1). */
+  --accent-text: #2563eb;
   --status-ok: #059669;
   --status-stopped: #dc2626;
   --status-warning: rgba(217, 119, 6, 0.7);
