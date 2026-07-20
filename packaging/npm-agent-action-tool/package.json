@@ -1,0 +1,21 @@
+{
+  "name": "@sauronid/agent-action-tool",
+  "version": "0.1.0",
+  "description": "Prebuilt SauronID agent-action-tool binaries (Ristretto ring keygen and challenge signing) for all supported platforms",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tejoker/Colosseum2026.git",
+    "directory": "packaging/npm-agent-action-tool"
+  },
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "bin"
+  ],
+  "keywords": [
+    "sauronid",
+    "ristretto",
+    "ring-signature"
+  ]
+}

@@ -12,8 +12,9 @@ The dev admin key used throughout is
 `dev-only-admin-key-not-for-production`.
 
 The three quickstarts register a real agent, which needs the
-`agent-action-tool` binary for ring-key generation:
-`cd core && cargo build --release`, or set
+`agent-action-tool` binary for ring-key generation. Installed packages bundle
+it (Python platform wheels; `@sauronid/agent-action-tool` on npm). From a
+source checkout: `cd core && cargo build --release`, or set
 `SAURONID_AGENT_ACTION_TOOL=/path/to/agent-action-tool`. The adapter
 examples only upload a policy and need no Rust toolchain.
 

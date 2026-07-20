@@ -7,8 +7,9 @@ Register an agent and make a signed call in under a minute.
 - A running core. From the repo root: `docker compose up`
   (core on `http://localhost:3001`, dashboard on `http://localhost:3000`,
   dev login `dev`/`dev`, seeded demo users like `alice@sauron.dev`).
-- The `agent-action-tool` binary for ring-key generation:
-  `cd core && cargo build --release`, or point
+- Ring-key generation uses the bundled `agent-action-tool` binary — platform
+  wheels ship it, nothing to install. From a source checkout (or on an
+  unsupported platform): `cd core && cargo build --release`, or point
   `SAURONID_AGENT_ACTION_TOOL` at an existing binary.
 
 ## Install

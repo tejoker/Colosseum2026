@@ -36,7 +36,8 @@ await agent.revoke(auth.session);
 ```
 
 `registerLlmAgent` generates the Ed25519 PoP keypair in-process and a
-Ristretto ring keypair via the `agent-action-tool` binary (build with
+Ristretto ring keypair via the `agent-action-tool` binary (install the
+prebuilt `@sauronid/agent-action-tool` package, build with
 `cd core && cargo build --release`, or set `$SAURONID_AGENT_ACTION_TOOL`).
 Operators holding their own ring keys pass `publicKeyHex`, `ringSecretHex`,
 and `ringKeyImageHex` explicitly. Also available: `registerMcpAgent`,
