@@ -526,14 +526,24 @@ class SignedAgent:
 def _agent_action_tool_path() -> str:
     """Locate the Rust `agent-action-tool` binary.
 
-    Override path: if `SAURONID_AGENT_ACTION_TOOL` env var points at a binary,
-    use that. Otherwise look in `$PATH` and finally the repo-local
-    `core/target/release/` directory. Raises RuntimeError if not found.
+    Resolution order:
+      1. the binary bundled inside this package's platform wheel (`_bin/`),
+      2. the `SAURONID_AGENT_ACTION_TOOL` env var,
+      3. `$PATH`,
+      4. the repo-local `core/target/release/` directory (source checkouts).
+    Raises RuntimeError if none exist.
     """
     import os as _os
     import shutil as _shutil
+    import sys as _sys
 
+    bundled = _os.path.join(
+        _os.path.dirname(__file__),
+        "_bin",
+        "agent-action-tool.exe" if _sys.platform == "win32" else "agent-action-tool",
+    )
     candidates = [
+        bundled,
         _os.environ.get("SAURONID_AGENT_ACTION_TOOL"),
         _shutil.which("agent-action-tool"),
         _os.path.abspath(
@@ -547,9 +557,10 @@ def _agent_action_tool_path() -> str:
     if binary is None:
         raise RuntimeError(
             "Could not locate the `agent-action-tool` binary. Either:\n"
-            "  1. Build the SauronID core: `cd core && cargo build --release`\n"
-            "  2. Set $SAURONID_AGENT_ACTION_TOOL=/path/to/agent-action-tool\n"
-            "  3. Pass `public_key_hex`, `ring_key_image_hex` (and `ring_secret_hex`) explicitly"
+            "  1. Install a platform wheel of sauronid-client (bundles it), or\n"
+            "  2. Build the SauronID core: `cd core && cargo build --release`\n"
+            "  3. Set $SAURONID_AGENT_ACTION_TOOL=/path/to/agent-action-tool\n"
+            "  4. Pass `public_key_hex`, `ring_key_image_hex` (and `ring_secret_hex`) explicitly"
         )
     return binary
 

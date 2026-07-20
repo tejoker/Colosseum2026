@@ -7,9 +7,9 @@ Register an agent and make a signed call. Requires Go 1.22+.
 - A running core. From the repo root: `docker compose up`
   (core on `http://localhost:3001`, dashboard on `http://localhost:3000`,
   dev login `dev`/`dev`, seeded demo users like `alice@sauron.dev`).
-- The `agent-action-tool` binary for ring-key generation:
-  `cd core && cargo build --release`, or point
-  `SAURONID_AGENT_ACTION_TOOL` at an existing binary.
+- Ring-key generation uses the `agent-action-tool` binary:
+  `cd core && cargo build --release` (no prebuilt channel for Go yet), or
+  point `SAURONID_AGENT_ACTION_TOOL` at an existing binary.
 
 ## Install
 

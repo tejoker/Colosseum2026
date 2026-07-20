@@ -19,6 +19,91 @@ permissions:
   id-token: write
 
 jobs:
+  # Per-platform agent-action-tool binaries. Consumed by the platform wheels,
+  # the npm binary package, and attached to the GitHub release.
+  tool-binaries:
+    name: Build agent-action-tool (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest,   target: linux-x64,   bin: agent-action-tool,     plat: manylinux_2_17_x86_64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64, bin: agent-action-tool,     plat: manylinux_2_17_aarch64 }
+          - { os: macos-13,        target: darwin-x64,  bin: agent-action-tool,     plat: macosx_10_12_x86_64 }
+          - { os: macos-latest,    target: darwin-arm64, bin: agent-action-tool,    plat: macosx_11_0_arm64 }
+          - { os: windows-latest,  target: win32-x64,   bin: agent-action-tool.exe, plat: win_amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --bin agent-action-tool
+        working-directory: core
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tool-${{ matrix.target }}
+          path: core/target/release/${{ matrix.bin }}
+          if-no-files-found: error
+
+  wheels:
+    name: Platform wheels (sauronid-client)
+    needs: tool-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { target: linux-x64,   bin: agent-action-tool,     plat: manylinux_2_17_x86_64 }
+          - { target: linux-arm64, bin: agent-action-tool,     plat: manylinux_2_17_aarch64 }
+          - { target: darwin-x64,  bin: agent-action-tool,     plat: macosx_10_12_x86_64 }
+          - { target: darwin-arm64, bin: agent-action-tool,    plat: macosx_11_0_arm64 }
+          - { target: win32-x64,   bin: agent-action-tool.exe, plat: win_amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: tool-${{ matrix.target }}
+          path: clients/python/sauronid_client/_bin/
+      - run: chmod +x clients/python/sauronid_client/_bin/${{ matrix.bin }}
+      - run: python -m pip install build wheel && python -m build --wheel
+        working-directory: clients/python
+      - name: Retag wheel for the target platform
+        run: python -m wheel tags --remove --python-tag py3 --abi-tag none --platform-tag ${{ matrix.plat }} dist/*.whl
+        working-directory: clients/python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: clients/python/dist/*.whl
+
+  npm-tool:
+    name: Publish @sauronid/agent-action-tool
+    needs: tool-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tool-*
+          path: staging/
+      - name: Assemble per-platform bin tree
+        run: |
+          cd packaging/npm-agent-action-tool
+          for t in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+            mkdir -p "bin/$t"
+            cp ../../staging/tool-$t/* "bin/$t/"
+            chmod +x "bin/$t/"* || true
+          done
+      - name: Publish (skipped when NPM_TOKEN is absent)
+        if: ${{ env.NODE_AUTH_TOKEN != '' }}
+        run: npm publish --access public
+        working-directory: packaging/npm-agent-action-tool
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   images:
     name: Push images to GHCR
     runs-on: ubuntu-latest
@@ -73,6 +158,7 @@ jobs:
 
   pypi:
     name: Publish sauronid-client
+    needs: wheels
     runs-on: ubuntu-latest
     environment: pypi
     steps:
@@ -80,8 +166,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install build && python -m build
+      # sdist has no bundled binary; it falls back to env/PATH/repo lookup.
+      - run: python -m pip install build && python -m build --sdist
         working-directory: clients/python
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: clients/python/dist/
       - name: Publish via trusted publishing
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

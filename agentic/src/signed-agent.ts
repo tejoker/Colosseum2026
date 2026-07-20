@@ -51,25 +51,36 @@ function jwtClaim(token: string, claim: string): string {
 
 /**
  * Locate the Rust `agent-action-tool` binary (Ristretto ring keygen/signing).
- * Override with $SAURONID_AGENT_ACTION_TOOL, else $PATH, else the repo-local
- * `core/target/release/` directory.
+ * Resolution order: the optional `@sauronid/agent-action-tool` npm package
+ * (per-platform binaries), $SAURONID_AGENT_ACTION_TOOL, $PATH, then the
+ * repo-local `core/target/release/` directory (source checkouts).
  */
 function agentActionToolPath(): string {
+    const exe = process.platform === "win32" ? "agent-action-tool.exe" : "agent-action-tool";
+    let packaged: string | undefined;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        packaged = require("@sauronid/agent-action-tool").binaryPath as string;
+    } catch {
+        packaged = undefined; // optional package not installed
+    }
     const candidates: Array<string | undefined> = [
+        packaged,
         process.env.SAURONID_AGENT_ACTION_TOOL,
         ...(process.env.PATH ?? "")
             .split(path.delimiter)
             .filter(Boolean)
-            .map((dir) => path.join(dir, "agent-action-tool")),
-        path.resolve(__dirname, "..", "..", "..", "core", "target", "release", "agent-action-tool"),
+            .map((dir) => path.join(dir, exe)),
+        path.resolve(__dirname, "..", "..", "..", "core", "target", "release", exe),
     ];
     const hit = candidates.find((c) => c && fs.existsSync(c) && fs.statSync(c).isFile());
     if (!hit) {
         throw new Error(
             "Could not locate the `agent-action-tool` binary. Either:\n" +
-                "  1. Build the SauronID core: `cd core && cargo build --release`\n" +
-                "  2. Set $SAURONID_AGENT_ACTION_TOOL=/path/to/agent-action-tool\n" +
-                "  3. Pass publicKeyHex, ringKeyImageHex (and ringSecretHex) explicitly"
+                "  1. npm install @sauronid/agent-action-tool (prebuilt binaries), or\n" +
+                "  2. Build the SauronID core: `cd core && cargo build --release`\n" +
+                "  3. Set $SAURONID_AGENT_ACTION_TOOL=/path/to/agent-action-tool\n" +
+                "  4. Pass publicKeyHex, ringKeyImageHex (and ringSecretHex) explicitly"
         );
     }
     return hit;

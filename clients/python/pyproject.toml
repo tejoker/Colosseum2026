@@ -46,3 +46,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sauronid_client*"]
+
+[tool.setuptools.package-data]
+# Platform wheels bundle the Rust agent-action-tool binary (built in release
+# CI per target); sdists and dev checkouts fall back to env/PATH/repo lookup.
+sauronid_client = ["_bin/agent-action-tool", "_bin/agent-action-tool.exe"]
