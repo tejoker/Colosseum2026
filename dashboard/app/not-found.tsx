@@ -6,7 +6,7 @@ export default function NotFound() {
       <p className="text-sm text-[var(--text-muted)]">Page not found.</p>
       <Link
         href="/"
-        className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+        className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
       >
         Return home
       </Link>

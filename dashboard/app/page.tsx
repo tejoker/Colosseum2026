@@ -34,7 +34,7 @@ export default async function HomePage() {
           <p className="text-sm text-[var(--text-muted)] mb-3">{t("empty")}</p>
           <a
             href="https://github.com/tejoker/Colosseum2026"
-            className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+            className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
           >
             {t("emptyLink")} →
           </a>

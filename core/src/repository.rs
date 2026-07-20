@@ -132,6 +132,14 @@ impl Repo {
                     .await
                     .map_err(|e| format!("postgres connect: {e}"))?;
                 tracing::info!(target: "sauron::repo", backend = "postgres", "repository pool ready");
+                // The Postgres port is partial: only a few tables route here;
+                // the rest still write to the SQLite sidecar. Say so loudly so
+                // no operator believes selecting postgres gives them full HA.
+                tracing::warn!(
+                    target: "sauron::repo",
+                    "SAURON_DB_BACKEND=postgres is a partial port: most tables still use the SQLite sidecar. \
+                     See docs/postgres-port-status.md for the exact coverage before relying on Postgres for HA."
+                );
                 Ok(Repo::Postgres(pool))
             }
             _ => {

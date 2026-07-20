@@ -56,7 +56,7 @@ export default async function CompliancePage() {
             <p className="text-sm text-[var(--text-muted)]">
               No reports yet — generate one via{" "}
               <Link
-                className="text-[var(--accent)] hover:underline"
+                className="text-[var(--accent-text)] hover:underline"
                 href="/compliance/new"
               >
                 New report
@@ -87,7 +87,7 @@ export default async function CompliancePage() {
                       <Td>
                         <Link
                           href={`/compliance/${encodeURIComponent(r.report_id)}`}
-                          className="text-[var(--accent)] hover:text-[var(--accent-hover)] font-mono text-mono-sm"
+                          className="text-[var(--accent-text)] hover:text-[var(--accent-hover)] font-mono text-mono-sm"
                         >
                           {r.report_id.slice(0, 12)}…
                         </Link>

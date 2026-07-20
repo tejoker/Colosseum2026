@@ -678,6 +678,9 @@ pub fn admin_router() -> Router<Arc<RwLock<ServerState>>> {
         .route("/egress/recent", get(admin::get_recent_egress))
         .route("/checksum/audit/{agent_id}", get(admin::get_checksum_audit))
         .route("/health/detailed", get(admin::health))
+        // Self-serve provisioning: mint a scoped, tenant-locked admin JWT
+        // (super-admin only; 503 until SAURON_ADMIN_JWT_HS256_SECRET is set).
+        .route("/keys/issue", post(admin::issue_admin_key))
         // Anonymous ring-policy admin ops (phase 2; gated by SAURON_ANON_RINGS).
         .route(
             "/rings",

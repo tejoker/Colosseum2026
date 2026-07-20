@@ -90,10 +90,22 @@ jobs:
           echo "postgres never became ready" >&2
           exit 1
 
-      - name: Apply Postgres schema
+      - name: Apply Postgres schema (all migrations, in order)
         run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -d sauron_test \
-            -f migrations/postgres/0001_initial.sql
+          for m in $(ls migrations/postgres/*.sql | sort); do
+            echo "applying $m"
+            PGPASSWORD=postgres psql -h localhost -U postgres -d sauron_test \
+              -v ON_ERROR_STOP=1 -f "$m"
+          done
+
+      - name: Assert schema parity with SQLite
+        run: bash scripts/ops/check-schema-parity.sh
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: sauron_test
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4

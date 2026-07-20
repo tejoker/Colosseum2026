@@ -46,7 +46,7 @@ export default async function PoliciesListPage() {
             <div className="flex items-center gap-3">
               <Link
                 href="/policies/new"
-                className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)]"
+                className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)]"
               >
                 Create your first policy →
               </Link>
@@ -77,7 +77,7 @@ export default async function PoliciesListPage() {
                     <Td>
                       <Link
                         href={`/policies/${encodeURIComponent(p.policy_id)}`}
-                        className="text-mono-sm text-[var(--accent)] hover:text-[var(--accent-hover)]"
+                        className="text-mono-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)]"
                       >
                         {truncateHash(p.policy_id, 10)}
                       </Link>

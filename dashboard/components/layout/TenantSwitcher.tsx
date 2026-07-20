@@ -167,13 +167,13 @@ export function TenantSwitcher() {
                   onClick={() => pick(id)}
                   className={`w-full text-left px-3 py-1.5 text-xs font-mono flex items-center justify-between gap-2 hover:bg-[var(--bg-surface)] focus-visible:outline-none focus-visible:bg-[var(--bg-surface)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--accent)] ${
                     isActive
-                      ? "text-[var(--accent)]"
+                      ? "text-[var(--accent-text)]"
                       : "text-[var(--text-secondary)]"
                   }`}
                 >
                   <span className="truncate">{id}</span>
                   {isActive && (
-                    <span aria-hidden className="text-[var(--accent)]">
+                    <span aria-hidden className="text-[var(--accent-text)]">
                       ✓
                     </span>
                   )}

@@ -70,7 +70,7 @@ export function AgentPolicyBindingSection({
             <span className="text-[var(--text-muted)]">Policy:</span>{" "}
             <Link
               href={`/policies/${encodeURIComponent(boundId)}`}
-              className="font-mono text-[var(--accent)] hover:text-[var(--accent-hover)] break-all"
+              className="font-mono text-[var(--accent-text)] hover:text-[var(--accent-hover)] break-all"
             >
               {boundId}
             </Link>
@@ -78,7 +78,7 @@ export function AgentPolicyBindingSection({
           <div className="flex items-center gap-3">
             <Link
               href={`/policies/${encodeURIComponent(boundId)}`}
-              className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)]"
+              className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)]"
             >
               View policy →
             </Link>
@@ -102,7 +102,7 @@ export function AgentPolicyBindingSection({
           </p>
           <Link
             href={`/agents/${encodeURIComponent(agentId)}/binding`}
-            className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)]"
+            className="text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)]"
           >
             Bind a policy →
           </Link>

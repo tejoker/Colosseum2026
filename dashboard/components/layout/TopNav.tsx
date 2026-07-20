@@ -19,6 +19,7 @@ const NAV_LINKS = [
   { key: "proofs",    href: "/proofs" },
   { key: "explorer",  href: "/explorer" },
   { key: "try",       href: "/try" },
+  { key: "onboard",   href: "/onboard" },
   { key: "settings",  href: "/settings" },
 ] as const;
 
@@ -40,7 +41,7 @@ export function TopNav() {
           className="text-sm font-semibold tracking-tight"
           style={{ fontFamily: "var(--font-sans)" }}
         >
-          Sauron<span className="text-[var(--accent)]">ID</span>
+          Sauron<span className="text-[var(--accent-text)]">ID</span>
         </span>
       </Link>
 

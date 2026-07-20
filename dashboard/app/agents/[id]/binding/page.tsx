@@ -128,7 +128,7 @@ export default function AgentBindingPage({
             <div className="flex items-center gap-3 flex-wrap">
               <Link
                 href={`/policies/${encodeURIComponent(boundId)}`}
-                className="font-mono text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] break-all"
+                className="font-mono text-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] break-all"
               >
                 {boundId}
               </Link>
@@ -155,7 +155,7 @@ export default function AgentBindingPage({
           {policies.length === 0 ? (
             <p className="text-sm text-[var(--text-muted)]">
               No policies available.{" "}
-              <Link href="/policies/new" className="text-[var(--accent)]">
+              <Link href="/policies/new" className="text-[var(--accent-text)]">
                 Create one
               </Link>
               .
