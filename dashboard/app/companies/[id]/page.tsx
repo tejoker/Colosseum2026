@@ -2,7 +2,7 @@ import Link from "next/link";
 import { getTranslations } from "next-intl/server";
 import { fetchCompany, fetchCompanyPeople } from "@/lib/api";
 import { Table, Thead, Tbody, Th, Td, Tr } from "@/components/ui/Table";
-import { fmtNumber, fmtTimestamp } from "@/lib/format";
+import { fmtTimestamp } from "@/lib/format";
 
 interface Props {
   params: Promise<{ id: string }>;

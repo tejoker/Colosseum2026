@@ -337,9 +337,9 @@ fn validate_payload_shape(payload: &ActionLogProofPayload) -> Result<(), ZkVerif
     if version_text.is_none()
         || version_text.is_some_and(|v| v.is_empty() || !v.chars().all(|c| c.is_ascii_digit()))
     {
+        let non_dev_prefix = format!("{}.vk@v", payload.circuit);
         return Err(ZkVerifyError::Malformed(format!(
-            "vk_id must be '{}<decimal-version>' (or the .dev variant)",
-            format!("{}.vk@v", payload.circuit)
+            "vk_id must be '{non_dev_prefix}<decimal-version>' (or the .dev variant)"
         )));
     }
     let version: u64 = version_text.unwrap().parse().map_err(|_| {
