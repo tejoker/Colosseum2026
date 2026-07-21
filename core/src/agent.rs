@@ -221,14 +221,10 @@ pub fn verify_ajwt(jwt_secret: &[u8], token: &str) -> Option<serde_json::Value> 
     if payload.get("aud").and_then(|v| v.as_str()) != Some(ajwt_audience().as_str()) {
         return None;
     }
-    if payload
+    payload
         .get("tenant_id")
         .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty())
-        .is_none()
-    {
-        return None;
-    }
+        .filter(|v| !v.is_empty())?;
 
     let signing_key =
         derive_agent_signing_key(jwt_secret, agent_id, human_key_image, agent_checksum);

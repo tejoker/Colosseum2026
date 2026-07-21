@@ -66,7 +66,7 @@ describe("setCurrentTenant()", () => {
 
 describe("availableTenants()", () => {
   it("fetches /api/tenants and merges the response with DEFAULT_TENANT", async () => {
-    const fetchMock = vi.fn(async (..._args: unknown[]) => ({
+    const fetchMock = vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => ({ tenants: ["acme", "globex"] }),
