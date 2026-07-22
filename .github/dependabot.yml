@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # The workflows use immutable commit SHAs. Dependabot preserves that
+  # property while advancing the human-readable major-version comments.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

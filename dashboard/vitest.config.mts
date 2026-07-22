@@ -1,3 +1,4 @@
+// Native ESM config avoids Vite's deprecated CommonJS Node API bridge.
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";

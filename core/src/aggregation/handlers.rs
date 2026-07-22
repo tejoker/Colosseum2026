@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::aggregation::cohorts::{CohortDefinition, CohortError};
 use crate::aggregation::publish::{publish_cohort_with_ledger, PublishError, PublishedCohort};
-use crate::aggregation::store::{
-    anchor_submission, list_cohort, list_for_cohort, synthetic_action_hash, upsert_submission,
-};
+use crate::aggregation::store::{list_cohort, list_for_cohort, persist_verified_submission};
 use crate::aggregation::submission::{
     CohortRow, StatsSubmission, StatsSubmitResponse, TransparentStatsSubmission,
 };
@@ -124,12 +122,7 @@ pub async fn submit_handler(
             .map_err(|_| AppError::Internal("state lock".into()))?;
         st.db.clone()
     };
-    upsert_submission(&db, &body, now).map_err(map_agg_err)?;
-    let statement_hash = anchor_submission(&db, &body, now).unwrap_or_else(|_| {
-        // Anchor failure is non-fatal — the row is stored and the merkle
-        // batcher will pick it up on the next pass once the column is free.
-        synthetic_action_hash(&body)
-    });
+    let (_, statement_hash) = persist_verified_submission(&db, &body, now).map_err(map_agg_err)?;
 
     Ok(Json(StatsSubmitResponse {
         stored: true,
@@ -292,9 +285,8 @@ pub async fn submit_transparent_handler(
             .map_err(|_| AppError::Internal("state lock".into()))?;
         st.db.clone()
     };
-    upsert_submission(&db, &stored, now).map_err(map_agg_err)?;
-    let statement_hash =
-        anchor_submission(&db, &stored, now).unwrap_or_else(|_| synthetic_action_hash(&stored));
+    let (_, statement_hash) =
+        persist_verified_submission(&db, &stored, now).map_err(map_agg_err)?;
     Ok(Json(StatsSubmitResponse {
         stored: true,
         latency_ms_verify,

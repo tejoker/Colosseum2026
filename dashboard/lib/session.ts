@@ -7,11 +7,11 @@
 //
 //   * Operators authenticate (`/api/auth/login`) against `SAURON_DASHBOARD_OPERATORS`.
 //   * A signed, httpOnly session cookie carries the operator's authorized
-//     tenants + super flag. `middleware.ts` verifies it (Edge/Web Crypto) and
+//     tenants + super flag. `proxy.ts` verifies it (Web Crypto) and
 //     derives the tenant from the SESSION, not from client input.
 //
 // Signing here uses node:crypto (API routes run in the Node runtime). The Edge
-// middleware verifies with Web Crypto over the identical HMAC-SHA256 payload.
+// Proxy verifies with Web Crypto over the identical HMAC-SHA256 payload.
 
 import { createHmac, createHash, scryptSync, timingSafeEqual } from "crypto";
 

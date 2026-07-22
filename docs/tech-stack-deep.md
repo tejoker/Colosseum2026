@@ -29,9 +29,9 @@ Audience: engineers joining the project, security auditors, anyone considering f
 8. [Policy DSL: parser, compiler, evaluator](#8-policy-dsl-parser-compiler-evaluator)
 9. [Multi-tenancy model](#9-multi-tenancy-model)
 10. [Differential privacy implementation](#10-differential-privacy-implementation)
-11. [Homomorphic encryption (Paillier)](#11-homomorphic-encryption-paillier)
+11. [Legacy homomorphic encryption (Paillier)](#11-legacy-homomorphic-encryption-paillier-production-quarantined)
 12. [Hardware attestation backends](#12-hardware-attestation-backends)
-13. [Zero-knowledge proof pipeline (Circom + Groth16)](#13-zero-knowledge-proof-pipeline-circom--groth16)
+13. [Legacy zero-knowledge pipeline](#13-legacy-zero-knowledge-pipeline-circom--groth16-development-only)
 14. [Database schemas and migrations](#14-database-schemas-and-migrations)
 15. [TypeScript SDK internals](#15-typescript-sdk-internals)
 16. [Python SDK and LLM adapters](#16-python-sdk-and-llm-adapters)
@@ -871,7 +871,7 @@ See [privacy-model.md](privacy-model.md).
 
 ---
 
-## 11. Homomorphic encryption (Paillier)
+## 11. Legacy homomorphic encryption (Paillier; production-quarantined)
 
 `core/src/he/` implements additive Paillier HE.
 
@@ -1002,7 +1002,11 @@ See [tee-deployment.md](tee-deployment.md).
 
 ---
 
-## 13. Zero-knowledge proof pipeline (Circom + Groth16)
+## 13. Legacy zero-knowledge pipeline (Circom + Groth16; development only)
+
+The production proof path is the ceremony-free RISC Zero STARK implementation
+in [`../transparent-zk/`](../transparent-zk/). This section documents only the
+refused-by-default compatibility implementation.
 
 ### 13.1 Circuit source
 
@@ -1073,7 +1077,8 @@ export async function prove(circuit: string, inputs: object): Promise<Proof> {
 
 `core/src/zk_verifier.rs` loads a pinned verification key and invokes
 `snarkjs groth16 verify` with proof-size and timeout limits. Groth16 defaults
-off in production; the transparent replacement is not yet implemented.
+off in production; production uses the pinned native `Succinct`
+STARK verifier in `core/src/transparent_proof.rs`.
 
 ```rust
 pub fn verify_proof(

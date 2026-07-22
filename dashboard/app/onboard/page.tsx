@@ -159,7 +159,15 @@ function SdkKeyCard({ isSuper }: { isSuper: boolean }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setTenants(currentTenant());
+    // Browser storage is external state. Defer its snapshot so hydration is
+    // complete before updating this controlled input.
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setTenants(currentTenant());
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function submit(e: React.FormEvent) {
@@ -298,7 +306,15 @@ function OperatorCard() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setTenants(currentTenant());
+    // Browser storage is external state. Defer its snapshot so hydration is
+    // complete before updating this controlled input.
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setTenants(currentTenant());
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function submit(e: React.FormEvent) {

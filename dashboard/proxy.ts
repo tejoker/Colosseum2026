@@ -1,4 +1,4 @@
-// Next.js middleware — dashboard auth + tenant-isolation gate.
+// Next.js proxy — dashboard auth + tenant-isolation gate.
 //
 // This is the single enforcement point. It runs on the Edge runtime, so it
 // verifies the operator session with Web Crypto (the API routes sign it with
@@ -102,7 +102,7 @@ function isExempt(pathname: string): boolean {
   );
 }
 
-export async function middleware(req: NextRequest): Promise<NextResponse> {
+export async function proxy(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   if (isExempt(pathname)) return NextResponse.next();
 

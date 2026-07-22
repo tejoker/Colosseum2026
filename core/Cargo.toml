@@ -54,9 +54,12 @@ num-traits = "0.2"
 # Transparent production proof verifier.  We deliberately compile the verifier
 # without prover/Bonsai features and with dev-mode disabled.  The application
 # additionally rejects Groth16 and Fake receipt variants at the wire boundary;
-# only native RISC Zero STARK receipts are accepted.
-risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std", "disable-dev-mode"] }
+# only native RISC Zero Succinct STARK receipts are accepted.
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["disable-dev-mode"] }
 sauron-transparent-types = { path = "../transparent-zk/types" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 # Hardware-attestation features. M1 ships parsing skeletons only; full TPM2

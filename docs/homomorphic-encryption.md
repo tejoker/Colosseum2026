@@ -5,6 +5,13 @@
 > deployments must engage a cryptographic auditor before processing
 > regulated, confidential, or business-sensitive secrets through this code
 > path. See the "Disclaimer" section at the bottom for the full notice.
+>
+> **Production status:** quarantined. Production requests are rejected unless
+> an operator deliberately enables the unsafe legacy override. The supported
+> aggregation path is the transparent local-computation STARK described in
+> [`stats-submission.md`](stats-submission.md); it proves computation but does
+> not provide encrypted multi-party aggregation. Use an independently reviewed
+> threshold-HE service if that separate property is required.
 
 ## What Paillier is + why we use it
 

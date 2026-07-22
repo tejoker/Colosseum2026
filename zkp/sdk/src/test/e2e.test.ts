@@ -250,9 +250,11 @@ async function main() {
         console.log(`  Results: ${passed} passed, ${failed} failed`);
         console.log("══════════════════════════════════════════════════");
 
-        if (failed > 0) {
-            process.exit(1);
-        }
+        // snarkjs/ffjavascript may retain worker handles after every awaited
+        // proof has completed. This file is an executable compatibility test,
+        // so terminate explicitly or the repository-wide release gate can
+        // hang indefinitely after printing a successful result.
+        process.exit(failed > 0 ? 1 : 0);
     } catch (err: any) {
         console.error("\n  ✗ FATAL ERROR:", err.message || err);
         console.error(err.stack);

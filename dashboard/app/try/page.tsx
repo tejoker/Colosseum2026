@@ -41,20 +41,27 @@ export default function ConsolePage() {
   // Restore any prior session state once, on mount (after hydration, to avoid
   // an SSR mismatch).
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const s = JSON.parse(raw);
-        if (s.model === "gemma" || s.model === "groq") setModel(s.model);
-        if (typeof s.prompt === "string") setPrompt(s.prompt);
-        if (s.run) setRun(s.run);
-        if (s.misbehave) setMisbehave(s.misbehave);
-        if (typeof s.anchorMsg === "string") setAnchorMsg(s.anchorMsg);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      try {
+        const raw = sessionStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const s = JSON.parse(raw);
+          if (s.model === "gemma" || s.model === "groq") setModel(s.model);
+          if (typeof s.prompt === "string") setPrompt(s.prompt);
+          if (s.run) setRun(s.run);
+          if (s.misbehave) setMisbehave(s.misbehave);
+          if (typeof s.anchorMsg === "string") setAnchorMsg(s.anchorMsg);
+        }
+      } catch {
+        /* ignore corrupt/absent storage */
       }
-    } catch {
-      /* ignore corrupt/absent storage */
-    }
-    setHydrated(true);
+      setHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Mirror state to sessionStorage so it survives tab switches. Skip the first

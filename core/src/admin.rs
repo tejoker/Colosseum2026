@@ -2148,9 +2148,13 @@ mod tests {
 
     #[test]
     fn issue_requires_nonempty_valid_tenants() {
-        let err =
-            issue_admin_jwt(Some(TEST_SECRET), true, &issue_req(&["admin:read"], &[], None), now())
-                .unwrap_err();
+        let err = issue_admin_jwt(
+            Some(TEST_SECRET),
+            true,
+            &issue_req(&["admin:read"], &[], None),
+            now(),
+        )
+        .unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         let err = issue_admin_jwt(
             Some(TEST_SECRET),

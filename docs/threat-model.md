@@ -114,8 +114,6 @@ server-side credential injection. `deploy/kubernetes/agent-network-isolation.yam
 denies direct agent egress so the proxy is the only application path. A cluster
 probe must still demonstrate that its CNI actually enforces the policy.
 
-The forward-proxy implementation is documented but not shipped this session. Operators wanting strict enforcement should either layer Cloudflare AI Gateway / Anthropic MCP in front of the agent (battle-tested) or wait for the next-session deliverable.
-
 ## Audit-log integrity for agent actions
 
 Every `/agent/action/receipt/verify` call appends a row to `agent_action_receipts`. Without on-chain anchoring, a database-write attacker could rewrite that history.
@@ -204,7 +202,7 @@ The STRIDE matrix below decomposes the system into five components and walks eac
 
 | Category | Threat | Mitigation | Residual risk |
 |---|---|---|---|
-| **Spoofing** | Prover selects an attacker guest or proof format | Program ID resolves to a production-pinned image ID; only native RISC Zero `Composite`/`Succinct` STARK receipts are accepted | Reproducible image-ID review is a release obligation |
+| **Spoofing** | Prover selects an attacker guest or proof format | Program ID resolves to a production-pinned image ID; only native RISC Zero `Succinct` STARK receipts are accepted | Reproducible image-ID review is a release obligation |
 | **Tampering** | Prover changes tenant, predicate, metric, value, period, root, size, or anchor | The guest journal binds the statement and the server requires an exact match to a tenant-scoped finalized checkpoint | A malicious source can still lie before data enters the protected log |
 | **Repudiation** | Prover claims they never produced a proof | All accepted proofs are stored with their submission timestamp and anchored in the next batch | n/a |
 | **Information disclosure** | Receipt leaks private witness data | Native STARK zero-knowledge under the pinned RISC Zero proof-system assumptions | Independent review must check guest outputs and dependency/version assumptions |

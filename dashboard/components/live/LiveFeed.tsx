@@ -33,10 +33,12 @@ export function LiveFeed() {
   }, [filter]);
 
   useEffect(() => {
-    setLoading(true);
-    load();
+    const initial = window.setTimeout(() => void load(), 0);
     const interval = setInterval(load, 15_000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    };
   }, [load]);
 
   const filters: Filter[] = ["all", "allowed", "stopped"];
@@ -59,7 +61,10 @@ export function LiveFeed() {
         {filters.map((f) => (
           <button
             key={f}
-            onClick={() => setFilter(f)}
+            onClick={() => {
+              setLoading(true);
+              setFilter(f);
+            }}
             className={`px-3 py-1.5 text-sm rounded transition-colors duration-150 ease-out ${
               filter === f
                 ? "text-[var(--text-primary)] bg-[var(--bg-elevated)]"

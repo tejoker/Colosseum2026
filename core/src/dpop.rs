@@ -112,8 +112,7 @@ fn decode_json_part(part: &str, what: &'static str) -> Result<serde_json::Value,
 /// tests can drive every rejection path.
 pub fn verify_proof(proof: &str, registered_pop_pk_b64u: &str) -> Result<DpopProof, AppError> {
     let mut parts = proof.trim().splitn(3, '.');
-    let (Some(h_b64), Some(c_b64), Some(s_b64)) = (parts.next(), parts.next(), parts.next())
-    else {
+    let (Some(h_b64), Some(c_b64), Some(s_b64)) = (parts.next(), parts.next(), parts.next()) else {
         return Err(malformed("DPoP proof must have three dot-separated parts"));
     };
 
@@ -465,7 +464,14 @@ mod tests {
     fn valid_proof_accepted() {
         let (sk, pk) = keypair();
         let iat = NOW_MS / 1000;
-        let proof = make_proof(&sk, "POST", "https://api.example.com/agent/vc/issue", iat, "jti-1", None);
+        let proof = make_proof(
+            &sk,
+            "POST",
+            "https://api.example.com/agent/vc/issue",
+            iat,
+            "jti-1",
+            None,
+        );
         let parsed = verify_proof(&proof, &pk).expect("proof verifies");
         check_context(
             &parsed,
@@ -482,8 +488,19 @@ mod tests {
     #[test]
     fn wrong_key_rejected() {
         let (sk, _) = keypair();
-        let other_pk = URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes());
-        let proof = make_proof(&sk, "POST", "https://api.example.com/x", NOW_MS / 1000, "jti-2", None);
+        let other_pk = URL_SAFE_NO_PAD.encode(
+            SigningKey::from_bytes(&[9u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let proof = make_proof(
+            &sk,
+            "POST",
+            "https://api.example.com/x",
+            NOW_MS / 1000,
+            "jti-2",
+            None,
+        );
         let err = verify_proof(&proof, &other_pk).unwrap_err();
         assert_eq!(code_of(&err), "dpop_wrong_key");
     }
@@ -492,7 +509,14 @@ mod tests {
     fn stale_iat_rejected() {
         let (sk, pk) = keypair();
         let stale = NOW_MS / 1000 - 3600;
-        let proof = make_proof(&sk, "POST", "https://api.example.com/x", stale, "jti-3", None);
+        let proof = make_proof(
+            &sk,
+            "POST",
+            "https://api.example.com/x",
+            stale,
+            "jti-3",
+            None,
+        );
         let parsed = verify_proof(&proof, &pk).unwrap();
         let err = check_context(&parsed, "POST", "/x", None, NOW_MS, SKEW_MS).unwrap_err();
         assert_eq!(code_of(&err), "dpop_stale_iat");
@@ -502,9 +526,17 @@ mod tests {
     fn htu_mismatch_rejected() {
         let (sk, pk) = keypair();
         let iat = NOW_MS / 1000;
-        let proof = make_proof(&sk, "POST", "https://api.example.com/other/path", iat, "jti-4", None);
+        let proof = make_proof(
+            &sk,
+            "POST",
+            "https://api.example.com/other/path",
+            iat,
+            "jti-4",
+            None,
+        );
         let parsed = verify_proof(&proof, &pk).unwrap();
-        let err = check_context(&parsed, "POST", "/agent/vc/issue", None, NOW_MS, SKEW_MS).unwrap_err();
+        let err =
+            check_context(&parsed, "POST", "/agent/vc/issue", None, NOW_MS, SKEW_MS).unwrap_err();
         assert_eq!(code_of(&err), "dpop_htu_mismatch");
         // Host mismatch also rejects even when the path matches.
         let err = check_context(

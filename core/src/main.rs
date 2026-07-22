@@ -468,10 +468,10 @@ async fn main() {
                 .on_request(DefaultOnRequest::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
-        // H1: global 64KB request-body cap. Per-route overrides (e.g. /agent/register
-        // for PEM cert chains) are applied via .route_layer(DefaultBodyLimit::max(...))
-        // on the individual route. tower body-limit short-circuits before the
-        // route handler reads the body.
+        // H1: global 64KB request-body cap. Per-route overrides (agent PEM
+        // registration and native STARK receipts) are applied with a bounded
+        // DefaultBodyLimit on only those routes. The body limit short-circuits
+        // before the route handler reads the body.
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer({
             let allowed_origins: Vec<axum::http::HeaderValue> =

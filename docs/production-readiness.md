@@ -65,7 +65,7 @@ or persist a generated private key.
 ## Proof and authentication boundary
 
 - Production rejects Groth16 even if its compatibility flag is set. The
-  RISC Zero verifier accepts pinned native `Composite`/`Succinct` STARK receipts
+  RISC Zero verifier accepts pinned native `Succinct` STARK receipts
   from the two reviewed guests in `transparent-zk/`; fake and Groth16-compressed
   receipts fail closed.
 - Human login uses the partner/bank-bound Ed25519 challenge flow at
@@ -90,11 +90,16 @@ At minimum, the gate should include:
 
 - Rust unit tests and clippy,
 - Agentic SDK tests,
-- ZKP circuit audit,
+- transparent guest review, reproducible image-ID comparison and native STARK
+  receipts verified by the separate customer verifier on release tags; Circom
+  circuit tests apply only to the quarantined legacy path,
 - issuer/acquirer SDK tests,
 - revocation contract tests,
 - frontend lint and production builds,
 - confidence suite and scripted KYA red-team on a machine that can bind local ports.
+- current RustSec/npm/Python/Go advisory scans. The production core and minimal
+  verifier must have no known vulnerability; prover-only upstream exceptions
+  must be documented and re-evaluated on every RISC Zero release.
 
 ## Current Production Boundary
 

@@ -128,7 +128,7 @@ Honest table. Re-verifiable from the source.
 - Complete v2 Merkle commitment of action receipts → Bitcoin
   (OpenTimestamps) + Solana (Memo), with authoritative tenant-scoped proof
   checkpoints.
-- Native RISC Zero `Succinct`/`Composite` STARK verification for stats and
+- Native RISC Zero `Succinct` STARK verification for stats and
   action-policy statements. Fake, Groth16-compressed, unknown, wrong-program,
   wrong-tenant, and wrong-checkpoint receipts fail closed.
 - Tenant-bound passwordless user challenge/response using an Ed25519 key, with

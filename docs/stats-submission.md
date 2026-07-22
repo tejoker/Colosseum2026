@@ -246,7 +246,7 @@ sched.start();
 
 `submitWeeklyStats(opts)` is the one-shot variant for ad-hoc backfills.
 
-## Audit anchoring
+## Legacy audit anchoring (development compatibility only)
 
 After a successful insert, the server writes a row into
 `agent_action_receipts` with:
@@ -274,23 +274,20 @@ the next OTS + Solana attestation. This means an auditor with a single
 So tampering with `customer_stats` post-anchor would also require
 forging Bitcoin and Solana attestations — not a realistic adversary.
 
-## What we don't cover yet
+## Current limitations
 
-- **Percentile metrics in ZK.** Need a permutation-argument circuit.
-  Tracked in `zkp/ceremony/circuits-list.json` as a follow-up.
-- **Distinct-cardinality metrics in ZK.** Same — needs a sorted-
-  uniqueness gadget.
-- **Arity above four.** The current circuit is deliberately fixed at four and
-  proves complete coverage only for that fixed tree. A transparent zkVM/STARK
-  or a reviewed recursive construction is the migration path; independently
-  proving chunks does not establish completeness for the union by itself.
-- **Real trusted setup ceremony.** Sprint 4 already labelled the DEV
-  keys as `*.dev.zkey` / `*.dev.vkey.json`. Production deployments
-  MUST swap them; the file naming convention prevents a silent drop-in.
-- **DP publishing endpoint.** Sprint 8 introduces `cohort.rs` and
-  `publish.rs`; this sprint only stores per-tenant raw claims.
-- **Cohort definitions (vendor=Gemini, sector=banking).** Sprint 8.
-- **Dashboard UI for cohort views.** Sprint 9.
+- The reviewed STARK guest intentionally supports four metrics:
+  `success_rate`, `error_rate`, `tool_call_count`, and USD `cost_total`.
+  Percentiles and distinct-cardinality statements require additional reviewed
+  guest logic before they can become production claims.
+- Completeness is relative to the exact server-finalized protected checkpoint.
+  Neither a STARK nor an anchor can prove that truthful real-world events were
+  submitted to the protected path in the first place.
+- Differential-privacy publication is a separate mechanism and has not received
+  an independent cryptographic review.
+- The legacy Circom path remains available for development compatibility only;
+  running a trusted-setup ceremony would not promote it into the production
+  path, which rejects Groth16 receipt variants.
 
 ## File map
 
@@ -298,20 +295,21 @@ forging Bitcoin and Solana attestations — not a realistic adversary.
 agentic/src/stats/
   metric-catalog.ts          — 10 metrics + sensitivity + provable flag
   local-aggregate.ts         — LocalAggregator (compute / computeAll)
-  integrity-proof.ts         — StatsProver, witness layout, NotProvableError
+  transparent.ts             — strict transparent-STARK submission client
+  integrity-proof.ts         — legacy Circom development compatibility
 
 agentic/src/scheduler.ts     — WeeklyStatsScheduler + submitWeeklyStats
 
-zkp/circuits/StatsHonestComputation.circom
-zkp/circuits/test/stats.test.js
-zkp/sdk/src/action-log.ts    — proveStatsHonest helper (new)
+transparent-zk/             — production guests, prover, minimal verifier
+zkp/                        — legacy Circom/Groth16 development path
 
 core/src/aggregation/
   mod.rs       — re-exports
-  submission.rs — StatsSubmission / StatsSubmitResponse / CohortRow
-  verify.rs    — verify_stats_submission + AggError
-  store.rs     — upsert + list + anchor + synthetic_action_hash
-  handlers.rs  — POST /v1/stats/submit, GET /v1/stats/cohort
+  submission.rs — transparent proof request/response types
+  handlers.rs  — production transparent submit + quarantined legacy handlers
+  store.rs     — stats statement persistence
+
+core/src/transparent_proof.rs — pinned native receipt verification
 
 core/src/db.rs              — customer_stats table (sqlite)
 migrations/postgres/0005_customer_stats.sql
