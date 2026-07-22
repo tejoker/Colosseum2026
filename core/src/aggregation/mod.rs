@@ -39,8 +39,8 @@ pub use publish::{
     PublishedMetric, QUARTILE_SENSITIVITY,
 };
 pub use store::{
-    anchor_submission, get_one, list_cohort, list_for_cohort, synthetic_action_hash,
-    upsert_submission,
+    anchor_submission, get_one, list_cohort, list_for_cohort, persist_verified_submission,
+    synthetic_action_hash, upsert_submission,
 };
 pub use submission::{CohortRow, StatsSubmission, StatsSubmitResponse};
 pub use verify::{stats_scope_hash, verify_stats_submission, AggError, PROVABLE_METRICS};

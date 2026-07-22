@@ -2,8 +2,8 @@
 //!
 //! SauronID accepts native RISC Zero STARK receipts only.  In particular, the
 //! verifier rejects RISC Zero's optional Groth16-compressed receipt, fake
-//! development receipts, and unknown future receipt variants before invoking
-//! the cryptographic verifier.  The expected guest image ID is selected from
+//! development receipts, Composite receipts, and unknown future receipt
+//! variants before invoking the cryptographic verifier. The expected guest image ID is selected from
 //! operator configuration by `program_id`; it is never supplied by the prover.
 //!
 //! This removes the Groth16 toxic-waste ceremony from the trust model.  It does
@@ -25,9 +25,14 @@ pub use sauron_transparent_types::{
     STATS_PROGRAM_ID,
 };
 
-const MAX_RECEIPT_B64_BYTES: usize = 96 * 1024 * 1024;
-const MAX_RECEIPT_JSON_BYTES: usize = 72 * 1024 * 1024;
+const MAX_RECEIPT_B64_BYTES: usize = 24 * 1024 * 1024;
+const MAX_RECEIPT_JSON_BYTES: usize = 18 * 1024 * 1024;
 const MAX_JOURNAL_BYTES: usize = 64 * 1024;
+
+/// Route-level override for the global 64 KiB JSON cap. It covers the maximum
+/// base64 receipt plus the small statement/checkpoint envelope while bounding
+/// memory before the verification semaphore is acquired.
+pub const MAX_TRANSPARENT_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 
 static VERIFY_SLOTS: Lazy<Arc<Semaphore>> = Lazy::new(|| {
     let permits = std::env::var("SAURON_TRANSPARENT_VERIFY_CONCURRENCY")
@@ -147,9 +152,13 @@ fn decode_receipt(payload: &TransparentProofPayload) -> Result<Receipt, Transpar
 
 fn require_native_stark(receipt: &Receipt) -> Result<(), TransparentProofError> {
     match &receipt.inner {
-        InnerReceipt::Composite(_) | InnerReceipt::Succinct(_) => Ok(()),
+        InnerReceipt::Succinct(_) => Ok(()),
+        InnerReceipt::Composite(_) => Err(TransparentProofError::Unsupported(
+            "Composite receipts are not accepted; recursively compress to a native Succinct STARK receipt"
+                .into(),
+        )),
         InnerReceipt::Groth16(_) => Err(TransparentProofError::Unsupported(
-            "Groth16-compressed RISC Zero receipts are refused; submit a native Composite or Succinct STARK receipt"
+            "Groth16-compressed RISC Zero receipts are refused; submit a native Succinct STARK receipt"
                 .into(),
         )),
         InnerReceipt::Fake(_) => Err(TransparentProofError::Unsupported(
@@ -270,5 +279,17 @@ mod tests {
         assert!(validate_program_id(STATS_PROGRAM_ID).is_ok());
         assert!(validate_program_id(ACTION_POLICY_PROGRAM_ID).is_ok());
         assert!(validate_program_id("attacker-program").is_err());
+    }
+
+    #[test]
+    fn route_cap_covers_the_largest_encoded_receipt() {
+        // Standard base64 expands by at most 4/3 (rounded to one quartet).
+        let decoded_max = std::hint::black_box(MAX_RECEIPT_JSON_BYTES);
+        let encoded_cap = std::hint::black_box(MAX_RECEIPT_B64_BYTES);
+        let request_cap = std::hint::black_box(MAX_TRANSPARENT_REQUEST_BYTES);
+        let journal_cap = std::hint::black_box(MAX_JOURNAL_BYTES);
+        let encoded_max = decoded_max.div_ceil(3) * 4;
+        assert!(encoded_cap >= encoded_max);
+        assert!(request_cap > encoded_cap + journal_cap);
     }
 }

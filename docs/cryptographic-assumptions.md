@@ -88,7 +88,7 @@ This doc complements `docs/threat-model.md`. The threat model says *what* attack
 | Source | RISC Zero proof-system specification and implementation pinned to `risc0-zkvm = 3.0.5`. |
 | Used for | Production stats and action-policy statements in `transparent-zk/`, verified by `core/src/transparent_proof.rs` or the standalone client verifier. |
 | Public identity | Clients pin the compiled guest image IDs in `transparent-zk/image-ids.json` and can reproduce them from committed source and lock files. |
-| Fail-closed rule | Production accepts native `Composite` or `Succinct` receipts only. Groth16-compressed, fake, unknown, wrong-program and wrong-checkpoint receipts are rejected. |
+| Fail-closed rule | Production accepts native `Succinct` receipts only. Composite, Groth16-compressed, fake, unknown, wrong-program and wrong-checkpoint receipts are rejected. |
 | If broken | A prover may forge the computation statement or leak witness data. External Bitcoin anchoring still timestamps the committed root but cannot rescue a forged computation proof. |
 | Scope limit | The guest proves computation over the complete finalized receipt batch. It cannot prove that real-world source data was honest or that an event omitted before ingestion occurred. |
 

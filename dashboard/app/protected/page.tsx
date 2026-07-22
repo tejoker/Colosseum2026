@@ -12,11 +12,15 @@ export default async function ProtectedPage() {
   const result = await fetchProtected({ limit: 1000 });
   const events = result.ok ? result.data : [];
 
+  // This is a force-dynamic async Server Component, not a repeatable client
+  // render. A request-time clock snapshot is therefore intentional.
+  // eslint-disable-next-line react-hooks/purity
+  const now = Date.now();
   const today = events.filter(
-    (e) => new Date(e.timestamp) > new Date(Date.now() - 86_400_000)
+    (e) => new Date(e.timestamp).getTime() > now - 86_400_000
   ).length;
   const week = events.filter(
-    (e) => new Date(e.timestamp) > new Date(Date.now() - 7 * 86_400_000)
+    (e) => new Date(e.timestamp).getTime() > now - 7 * 86_400_000
   ).length;
 
   return (

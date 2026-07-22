@@ -33,10 +33,16 @@ export function TenantSwitcher() {
 
   // Hydrate active id once on mount (cookie/localStorage are browser-only).
   useEffect(() => {
-    setActive(currentTenant());
-    void availableTenants().then((list) => {
-      if (list.length > 0) setTenants(list);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setActive(currentTenant());
     });
+    void availableTenants().then((list) => {
+      if (!cancelled && list.length > 0) setTenants(list);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Close the dropdown on outside-click.

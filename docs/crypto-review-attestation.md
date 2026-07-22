@@ -1,5 +1,12 @@
 # Cryptographic Review of SauronID Differential Privacy and Homomorphic Encryption Modules
 
+> **Historical internal review artifact — not an independent audit.** The
+> reviewer identity below is an unfilled placeholder, so this document is not
+> commercial assurance and must never be presented as third-party
+> certification. The custom Paillier path is quarantined in production. Current
+> release claims and required independent work are in
+> [`production-readiness.md`](production-readiness.md).
+
 **Date of original review:** 2026-05-25
 **Date of remediation addendum:** 2026-05-25
 **Repository:** hackeurope-24, commit 7ac659e on branch `main` (original review); remediation applied post-review on same date

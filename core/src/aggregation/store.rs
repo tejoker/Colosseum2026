@@ -6,7 +6,7 @@
 //! producing a duplicate. This mirrors how the spend ledger handles its
 //! `(policy_id, agent_id, period_start)` key.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::aggregation::submission::{CohortRow, StatsSubmission};
 use crate::aggregation::verify::AggError;
@@ -19,6 +19,14 @@ pub fn upsert_submission(
     submitted_at: i64,
 ) -> Result<CohortRow, AggError> {
     let conn = db.lock().map_err(|e| AggError::Storage(e.to_string()))?;
+    upsert_submission_conn(&conn, sub, submitted_at)
+}
+
+fn upsert_submission_conn(
+    conn: &Connection,
+    sub: &StatsSubmission,
+    submitted_at: i64,
+) -> Result<CohortRow, AggError> {
     let agent_key = sub.agent_id_or_none.clone().unwrap_or_default();
     conn.execute(
         r#"INSERT INTO customer_stats
@@ -257,6 +265,14 @@ pub fn anchor_submission(
     submitted_at: i64,
 ) -> Result<String, AggError> {
     let conn = db.lock().map_err(|e| AggError::Storage(e.to_string()))?;
+    anchor_submission_conn(&conn, sub, submitted_at)
+}
+
+fn anchor_submission_conn(
+    conn: &Connection,
+    sub: &StatsSubmission,
+    submitted_at: i64,
+) -> Result<String, AggError> {
     let action_hash = synthetic_action_hash(sub);
     conn.execute(
         r#"INSERT OR IGNORE INTO stats_submission_receipts
@@ -272,6 +288,25 @@ pub fn anchor_submission(
     )
     .map_err(|e| AggError::Storage(e.to_string()))?;
     Ok(action_hash)
+}
+
+/// Atomically persist a verified submission and its immutable statement
+/// commitment. A caller must never acknowledge `stored: true` unless both
+/// records commit: otherwise an accepted row can exist without the audit
+/// record that binds its complete proof statement.
+pub fn persist_verified_submission(
+    db: &DbHandle,
+    sub: &StatsSubmission,
+    submitted_at: i64,
+) -> Result<(CohortRow, String), AggError> {
+    let mut conn = db.lock().map_err(|e| AggError::Storage(e.to_string()))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| AggError::Storage(e.to_string()))?;
+    let row = upsert_submission_conn(&tx, sub, submitted_at)?;
+    let statement_hash = anchor_submission_conn(&tx, sub, submitted_at)?;
+    tx.commit().map_err(|e| AggError::Storage(e.to_string()))?;
+    Ok((row, statement_hash))
 }
 
 #[cfg(test)]
@@ -366,6 +401,56 @@ mod tests {
             })
             .unwrap();
         assert_eq!(action_rows, 0, "stats must not poison action proof batches");
+    }
+
+    #[test]
+    fn verified_submission_and_statement_commit_together() {
+        let db = temp_db("atomic-success");
+        let sub = sample("t1", None);
+        let (row, hash) = persist_verified_submission(&db, &sub, 100).unwrap();
+        assert_eq!(row.tenant_id, "t1");
+        assert_eq!(hash, synthetic_action_hash(&sub));
+
+        let conn = db.lock().unwrap();
+        let stats_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM customer_stats", [], |r| r.get(0))
+            .unwrap();
+        let statement_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stats_submission_receipts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!((stats_rows, statement_rows), (1, 1));
+    }
+
+    #[test]
+    fn statement_failure_rolls_back_verified_submission() {
+        let db = temp_db("atomic-rollback");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_stats_statement
+                 BEFORE INSERT ON stats_submission_receipts
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced statement failure');
+                 END;",
+            )
+            .unwrap();
+        }
+
+        let result = persist_verified_submission(&db, &sample("t1", None), 100);
+        assert!(result.is_err(), "forced statement failure must be surfaced");
+
+        let conn = db.lock().unwrap();
+        let stats_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM customer_stats", [], |r| r.get(0))
+            .unwrap();
+        let statement_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM stats_submission_receipts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!((stats_rows, statement_rows), (0, 0));
     }
 
     #[test]

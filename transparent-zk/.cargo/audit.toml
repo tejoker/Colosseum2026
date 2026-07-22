@@ -1,0 +1,24 @@
+[advisories]
+# RISC Zero 3.0.5 (current upstream release) enables Arkworks through its
+# prover-only `prove` feature. Arkworks pins tracing-subscriber 0.2.25. The
+# Sauron prover does not install that subscriber or log witness data, and this
+# dependency is absent from both the production core and the standalone client
+# verifier. See README.md "Prover-only upstream advisory". Remove this exception
+# as soon as RISC Zero/Arkworks releases a patched dependency graph.
+ignore = [
+    "RUSTSEC-2025-0055",
+    # rsa is pulled by RISC Zero's rzup/toolchain-download client. The Marvin
+    # advisory concerns observable private-key RSA operations; this prover does
+    # not hold or perform an RSA private-key operation.
+    "RUSTSEC-2023-0071",
+    # Latest RISC Zero also carries two maintenance-status notices through its
+    # verifier/Arkworks graph. They are not vulnerability or unsoundness
+    # advisories; every unexcepted warning is still denied in CI.
+    "RUSTSEC-2024-0388",
+    "RUSTSEC-2024-0436",
+    # Prover/build-only serialization dependencies pinned by RISC Zero 3.0.5.
+    # These are maintenance-status notices, not vulnerability/unsoundness
+    # findings. Neither crate is part of Sauron's proof statement or verifier.
+    "RUSTSEC-2023-0089", # atomic-polyfill through risc0-build/postcard
+    "RUSTSEC-2025-0141", # bincode 1.x through the prover-enabled zkVM
+]

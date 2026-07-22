@@ -1,0 +1,11 @@
+[advisories]
+# RISC Zero 3.0.5 is the pinned production verifier. Its dependency graph
+# still includes these two unmaintained macro crates. They are not vulnerability
+# or unsoundness advisories and cannot be removed without replacing/forking the
+# current upstream verifier. Keep `cargo audit --deny warnings` enabled so every
+# other advisory remains release-blocking, and remove these exceptions as soon
+# as upstream does.
+ignore = [
+    "RUSTSEC-2024-0388", # derivative, through risc0-groth16/Arkworks
+    "RUSTSEC-2024-0436", # paste, through risc0-zkvm/Arkworks
+]

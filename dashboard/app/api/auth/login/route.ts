@@ -11,7 +11,7 @@ const WINDOW_MS = 60_000;
 const MAX_ATTEMPTS = 8;
 
 // POST { operator, password } → sets the signed, httpOnly session cookie.
-// This route is exempt from the middleware auth gate (you can't log in if the
+// This route is exempt from the proxy auth gate (you can't log in if the
 // gate blocks the login call).
 export async function POST(req: Request): Promise<Response> {
   let body: { operator?: string; password?: string };

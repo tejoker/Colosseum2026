@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Json as AxumJson, State},
+    extract::{DefaultBodyLimit, Extension, Json as AxumJson, State},
     http::StatusCode,
     middleware,
     routing::get,
@@ -14,6 +14,10 @@ use crate::{
     audit::handlers as audit_report_handlers, middleware::audit_log, policy::binding_handlers,
     policy::handlers as policy_handlers, rings, state::ServerState, tenancy, usage, zk_verifier,
 };
+
+fn transparent_body_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(crate::transparent_proof::MAX_TRANSPARENT_REQUEST_BYTES)
+}
 
 /// Router for `/v1/policy/*` — Sprint 2 policy DSL endpoints.
 ///
@@ -75,7 +79,10 @@ pub fn agent_spend_router() -> Router<Arc<RwLock<ServerState>>> {
 pub fn proofs_router() -> Router<Arc<RwLock<ServerState>>> {
     Router::new()
         .route("/action-log/verify", post(action_log_verify_handler))
-        .route("/transparent/verify", post(transparent_verify_handler))
+        .route(
+            "/transparent/verify",
+            post(transparent_verify_handler).route_layer(transparent_body_limit()),
+        )
         .route("/checkpoint/finalize", post(finalize_proof_checkpoint))
         .route_layer(middleware::from_fn(admin::auth_middleware))
         .route_layer(middleware::from_fn(tenancy::extract_tenant))
@@ -224,8 +231,9 @@ async fn finalize_proof_checkpoint(
             let conn = db
                 .lock()
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let mut stmt = conn.prepare(
-                "SELECT receipt_id, action_hash, agent_id, ring_key_image_hex,
+            let mut stmt = conn
+                .prepare(
+                    "SELECT receipt_id, action_hash, agent_id, ring_key_image_hex,
                         policy_version, ajwt_jti, pop_jkt, status, signature,
                         created_at, COALESCE(ring_id, ''), COALESCE(config_digest, ''), tenant_id
                  FROM agent_action_receipts
@@ -233,16 +241,16 @@ async fn finalize_proof_checkpoint(
                    AND (created_at > ?2 OR (created_at = ?2 AND receipt_id >= ?3))
                    AND (created_at < ?4 OR (created_at = ?4 AND receipt_id <= ?5))
                  ORDER BY created_at, receipt_id",
-            )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                )
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let rows = stmt
                 .query_map(
                     rusqlite::params![
-                    &tenant_id,
-                    from_created_at,
-                    &from_receipt_id,
-                    to_created_at,
-                    &to_receipt_id
+                        &tenant_id,
+                        from_created_at,
+                        &from_receipt_id,
+                        to_created_at,
+                        &to_receipt_id
                     ],
                     |r| {
                         Ok((
@@ -269,8 +277,8 @@ async fn finalize_proof_checkpoint(
             let mut compatible = 0i64;
             let mut valid_macs = 0i64;
             for row in rows {
-                let (receipt, ring_id, config_digest) = row
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                let (receipt, ring_id, config_digest) =
+                    row.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 total += 1;
                 if !receipt.agent_id.is_empty()
                     && !receipt.ring_key_image_hex.is_empty()
@@ -543,7 +551,7 @@ pub fn stats_router() -> Router<Arc<RwLock<ServerState>>> {
         .route("/submit", post(agg_handlers::submit_handler))
         .route(
             "/submit-transparent",
-            post(agg_handlers::submit_transparent_handler),
+            post(agg_handlers::submit_transparent_handler).route_layer(transparent_body_limit()),
         )
         // Sprint 13-14 Tier 2: optional Paillier-encrypted submission path.
         // NEEDS_CRYPTO_REVIEW — see core/src/he/ disclaimer block.
@@ -696,4 +704,53 @@ pub fn admin_router() -> Router<Arc<RwLock<ServerState>>> {
         // 11.5; today the operator MUST treat `/admin/*` output as
         // cross-tenant aggregate (see docs/multi-tenancy.md §"Admin").
         .route_layer(middleware::from_fn(tenancy::extract_tenant))
+}
+
+#[cfg(test)]
+mod body_limit_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        Json,
+    };
+    use tower::ServiceExt;
+
+    async fn accept_large_json(Json(_): Json<serde_json::Value>) -> StatusCode {
+        StatusCode::OK
+    }
+
+    fn large_json_request(path: &str) -> Request<Body> {
+        let body = serde_json::json!({"payload": "x".repeat(65 * 1024)}).to_string();
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn transparent_route_override_beats_the_global_64k_limit_only_on_that_route() {
+        let app = Router::new()
+            .route(
+                "/transparent",
+                post(accept_large_json).route_layer(transparent_body_limit()),
+            )
+            .route("/ordinary", post(accept_large_json))
+            .layer(DefaultBodyLimit::max(64 * 1024));
+
+        let transparent = app
+            .clone()
+            .oneshot(large_json_request("/transparent"))
+            .await
+            .expect("response");
+        assert_eq!(transparent.status(), StatusCode::OK);
+
+        let ordinary = app
+            .oneshot(large_json_request("/ordinary"))
+            .await
+            .expect("response");
+        assert_eq!(ordinary.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 }

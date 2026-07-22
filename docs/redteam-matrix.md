@@ -24,7 +24,7 @@ The existing `docs/empirical-comparison.md` keeps the A1-A16 invariant matrix vs
 | T2 | cross-tenant | GET spend for unknown (agent, policy). | Zeros or uniform 404 (shape-identical). | dynamic — `tenant-spend-leak.ts` |
 | T3 | cross-tenant | Tenant A hammers rate limit; tenant B unaffected. | B's quota intact, returns 200. | dynamic — `tenant-rate-limit-cross.ts` |
 | D1 | egress-privacy | DP cohort de-anonymise via N snapshots. | Variance consistent with calibrated noise OR cached values when budget exhausted. | dynamic — `dp-cohort-deanonymize.ts` |
-| E1 | egress-privacy | Agent reports outbound to disallowed domain. | Server LOGS but does NOT block (voluntary today; documented). | dynamic (admin read path) — `egress-leak-claim.ts` |
+| E1 | egress-privacy | Agent requests a capability for a disallowed host/method/path or tries to reuse one. | Capability issuance/proxy fails closed; direct egress must be denied by the deployment network policy. | dynamic gateway tests + deployment negative probe — legacy `egress-leak-claim.ts` covers only the old log path |
 | X1 | egress-privacy | Revoke phantom agent; ensure clean 404 path; full TEE cascade documented. | Phantom revoke returns 404 (not 200/500). | dynamic — `tee-revoke.ts` |
 
 ## Summary

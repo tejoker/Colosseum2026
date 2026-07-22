@@ -1,13 +1,15 @@
 # Design spec: in-path agent egress gateway
 
-Status: **spec only, not built.** Closes threat-model **Gap 2** (egress logging is
-voluntary; forward-proxy enforcement deferred) and the audit's "SDK is advisory"
-weakness. Prompted by hodor.ai (an in-path agent security gateway) — but this
-reuses SauronID's existing binding/policy/anchor stack; it is not a rebuild.
+Status: **implemented for HTTP egress; deployment enforcement required.** The
+one-use capability and forward-proxy path described below ships in
+`core/src/egress_gateway.rs`. A deny-by-default CNI/firewall boundary is still
+required because application code cannot stop a hostile process from opening
+its own socket. This design closed threat-model **Gap 2** for protected traffic
+while reusing SauronID's existing binding, policy and anchor stack.
 
 ## Problem
 
-Today enforcement is **advisory / voluntary**:
+The original gap was **advisory / voluntary** enforcement:
 - `agentic/src/tool-proxy.ts` wraps a tool with a local policy check, but it is
   opt-in — an agent that never calls `bind()` skips it entirely.
 - `POST /agent/egress/log` records outbound calls, but the agent has to

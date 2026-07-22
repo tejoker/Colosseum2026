@@ -56,17 +56,49 @@ cargo run --release --manifest-path transparent-zk/Cargo.toml --bin sauron-trans
 ```
 
 The binary has RISC Zero dev mode compiled out and explicitly asks for a
-`Succinct` STARK receipt. The core accepts `Succinct` and `Composite` native
-STARK receipts only; `Groth16`, `Fake`, and unknown future variants fail closed.
+`Succinct` STARK receipt. The core accepts only that native receipt form;
+`Composite`, `Groth16`, `Fake`, and unknown future variants fail closed.
 
 Clients verify the receipt; they do not run the SauronID test suite or trust a
 server boolean:
 
 ```sh
-cargo run --locked --release --manifest-path transparent-zk/Cargo.toml \
-  --bin sauron-transparent-verify -- proof-output.json
+cargo run --locked --release --manifest-path transparent-zk/verifier/Cargo.toml \
+  -- proof-output.json
 ```
 
-That verifier pins the guest IDs compiled from the published source, rejects
-non-STARK receipt types, runs the RISC Zero verifier locally, and prints only
-the cryptographically committed public journal.
+That minimal verifier pins the published guest IDs, rejects non-STARK receipt
+types, runs the RISC Zero verifier locally, and prints only the
+cryptographically committed public journal. It is a separate crate so customer
+verification does not inherit the prover, guest-build, or `rzup` toolchain
+dependencies. RISC Zero's current universal receipt crate still compiles its
+Groth16/Arkworks verifier branch; SauronID rejects that enum variant before
+verification, so it is dependency attack surface but not a trusted setup or an
+accepted proof path.
+
+## Prover-only upstream advisory
+
+RISC Zero 3.0.5 is the current upstream release. Its `prove` feature
+unconditionally compiles `risc0-groth16`/Arkworks even when this prover requests
+only native `Succinct` STARK receipts. That branch pins
+`tracing-subscriber 0.2.25`, reported by RUSTSEC-2025-0055 for ANSI terminal-log
+injection. Sauron's prover installs no tracing subscriber and never logs the
+private witness; the affected formatter is therefore unreachable here. The
+exception is explicit in `.cargo/audit.toml` and must be removed on the first
+patched RISC Zero/Arkworks release. The production core and separate client
+verifier compile RISC Zero without `std`/`prove` and have no known RustSec
+vulnerability in the current advisory database. They still inherit the
+upstream Groth16 verifier branch described above plus `derivative` and `paste`
+maintenance notices; the narrow maintenance exceptions are documented in each
+crate's `.cargo/audit.toml`, while every unexcepted warning remains
+release-blocking.
+
+The same prover feature also pulls `rsa` through RISC Zero's `rzup` toolchain
+download client. RUSTSEC-2023-0071 concerns network-observable timing of RSA
+*private-key* operations; Sauron's prover performs no RSA private-key operation.
+That narrow, prover-only exception is recorded beside the tracing exception.
+The prover additionally inherits maintenance-only notices for
+`atomic-polyfill` and `bincode` from RISC Zero's build/prover graph; they are
+recorded in the same file and are not part of Sauron's proof statement.
+
+Run proof generation as an offline build job, not as a public network service.

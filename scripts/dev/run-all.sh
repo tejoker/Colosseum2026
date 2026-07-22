@@ -16,23 +16,41 @@ install_if_needed() {
   fi
 }
 
-step "core cargo test + binaries"
-(cd "$ROOT/core" && cargo test && cargo build --bins)
+step "core cargo test + binaries + static checks"
+(cd "$ROOT/core" && cargo test && cargo build --bins && cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings)
+
+step "immutable CI action references"
+"$ROOT/scripts/ci/check-actions-pinned.sh"
+
+step "transparent proof lock + image-ID + verifier checks"
+"$ROOT/scripts/ci/verify-transparent-zk.sh"
 
 step "dev leash demo smoke"
 "$ROOT/core/tests/smoke_dev_leash_demo.sh"
 
-step "agentic sdk build + tests"
+step "agentic sdk build + crypto/enforcement/stats tests"
 install_if_needed "$ROOT/agentic"
-(cd "$ROOT/agentic" && npm run build && npm test)
+(cd "$ROOT/agentic" && npm run build && npm test && npm run test:enforcement && npm run test:stats)
+
+step "python sdk tests"
+python -m pytest "$ROOT/clients/python/tests" -q
+
+step "go sdk tests"
+(cd "$ROOT/clients/go/sauronid" && go test ./...)
+
+step "legacy circuit structural audit + compatibility SDK tests"
+install_if_needed "$ROOT/zkp"
+(cd "$ROOT/zkp" && npm test)
+install_if_needed "$ROOT/zkp/sdk"
+(cd "$ROOT/zkp/sdk" && npm run build && npm test)
 
 step "redteam build"
 install_if_needed "$ROOT/redteam"
 (cd "$ROOT/redteam" && npm run build)
 
-step "dashboard lint + build"
+step "dashboard tests + lint + build"
 install_if_needed "$ROOT/dashboard"
-(cd "$ROOT/dashboard" && npm run lint && npm run build)
+(cd "$ROOT/dashboard" && npm test && npm run lint && npm run build)
 
 step "core confidence suite with leash e2e + redteam"
 CONF_SHARED_ITERS="${CONF_SHARED_ITERS:-1}" \

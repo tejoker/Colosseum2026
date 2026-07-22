@@ -8,15 +8,12 @@ const config = [
   ...coreWebVitals,
   ...typescript,
   {
-    // Calibration, NOT suppression: these two are React-Compiler *advisories*
-    // from eslint-plugin-react-hooks v6 (perf / purity hints), which Next 16
-    // ships as errors. They are surfaced as warnings so they stay visible but
-    // don't gate the release build — every correctness, security, and Next
-    // best-practice rule still errors. Flip to "error" if you adopt the React
-    // Compiler and want them enforced.
+    // Keep React 19 purity rules release-blocking. A genuine force-dynamic
+    // Server Component clock snapshot is suppressed at its call site with a
+    // narrow explanation; client effects must remain cascade-free.
     rules: {
-      "react-hooks/set-state-in-effect": "warn",
-      "react-hooks/purity": "warn",
+      "react-hooks/set-state-in-effect": "error",
+      "react-hooks/purity": "error",
     },
   },
 ];

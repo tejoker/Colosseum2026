@@ -17,7 +17,7 @@ explicitly enables that assurance tier.
 
 `transparent-zk/` contains two RISC Zero 3.0.5 guest programs and a prover. The
 core pins their image IDs by stable program ID and accepts only native
-`Composite` or `Succinct` STARK receipts. It rejects `Groth16`, fake development
+`Succinct` STARK receipts. It rejects `Composite`, `Groth16`, fake development
 receipts, unknown future receipt variants, request-selected image IDs, and
 unreviewed statement types.
 
