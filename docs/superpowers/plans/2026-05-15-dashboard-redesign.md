@@ -1665,7 +1665,7 @@ export default async function HomePage() {
         <div className="py-16 text-center">
           <p className="text-sm text-[var(--text-muted)] mb-3">{t("empty")}</p>
           <a
-            href="https://github.com/tejoker/Colosseum2026"
+            href="https://github.com/tejoker/HackNation2026"
             className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] transition-colors duration-150"
           >
             {t("emptyLink")} →

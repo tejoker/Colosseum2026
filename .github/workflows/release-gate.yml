@@ -1,6 +1,7 @@
 name: Release Gate
 
 on:
+  workflow_call:
   push:
     branches: [main, pocv1]
     tags: ['v*']
@@ -15,6 +16,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.91.1
+          components: clippy,rustfmt
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -26,24 +30,28 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.22.10"
           cache: false
 
       - name: Rust tests
         working-directory: core
-        run: cargo test
+        run: cargo test --locked
 
       - name: Rust clippy
         working-directory: core
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Rust formatting
         working-directory: core
         run: cargo fmt --all -- --check
 
+      - name: Release metadata (release tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: bash scripts/ci/verify-release-metadata.sh "${GITHUB_REF_NAME}"
+
       - name: Rust dependency audit (cargo-audit)
         run: |
-          cargo install --locked cargo-audit
+          cargo install --locked cargo-audit --version 0.22.1
           bash scripts/ci/audit-rust.sh
 
       - name: JavaScript dependency audits
@@ -74,6 +82,10 @@ jobs:
           python -m pip install -e clients/python pytest "pip-audit==2.10.1"
           python -m pytest clients/python/tests -q
           python -m pip_audit clients/python
+
+      - name: SQLite clean-room backup and restore drill
+        run: |
+          python core/tests/sqlite_backup_restore.py
 
       - name: Go SDK
         working-directory: clients/go/sauronid
@@ -140,7 +152,7 @@ jobs:
             SAURON_GLOBAL_RATE_LIMIT_BURST=100000 \
             DATABASE_PATH="${RUNNER_TEMP:-/tmp}/empirical.db" \
             PORT=3001 \
-            cargo run --release --bin sauron-core ) &
+            cargo run --locked --release --bin sauron-core ) &
           CORE_PID=$!
           for i in $(seq 1 90); do
             curl -sf http://127.0.0.1:3001/health >/dev/null 2>&1 && break
@@ -154,10 +166,11 @@ jobs:
           test -f empirical-results.json || { echo "empirical-results.json missing — suite did not complete"; exit 1; }
           PASS_COUNT=$(jq '.passed' empirical-results.json)
           TOTAL=$(jq '.total' empirical-results.json)
-          DYNAMIC=$(jq '[.results[] | select(.dynamic == true)] | length')
-          if [ "$PASS_COUNT" != "$TOTAL" ] || [ "$TOTAL" -lt 16 ] || [ "$DYNAMIC" -lt 16 ]; then
+          DYNAMIC=$(jq '[.results[] | select(.dynamic == true)] | length' empirical-results.json)
+          SKIPPED=$(jq '.skipped' empirical-results.json)
+          if [ "$PASS_COUNT" != "$TOTAL" ] || [ "$TOTAL" -lt 16 ] || [ "$DYNAMIC" != "$TOTAL" ] || [ "$SKIPPED" != "0" ]; then
             echo "Empirical suite regression: $PASS_COUNT / $TOTAL"
-            echo "Dynamic attack count: $DYNAMIC / 16"
+            echo "Dynamic attack count: $DYNAMIC / $TOTAL; skipped: $SKIPPED"
             exit 1
           fi
           echo "Empirical suite OK: $PASS_COUNT / $TOTAL"

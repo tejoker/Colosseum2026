@@ -2,7 +2,7 @@
 name = "sauronid-client"
 version = "0.2.0"
 description = "SauronID Python client + LangChain/OpenAI/Anthropic/LlamaIndex/CrewAI/AutoGen adapters for AI-agent binding."
-readme = "sauronid_client/README.md"
+readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -35,9 +35,9 @@ openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.25"]
 
 [project.urls]
-"Homepage" = "https://github.com/tejoker/Colosseum2026"
-"Repository" = "https://github.com/tejoker/Colosseum2026"
-"Documentation" = "https://github.com/tejoker/Colosseum2026/tree/main/docs"
+"Homepage" = "https://github.com/tejoker/HackNation2026"
+"Repository" = "https://github.com/tejoker/HackNation2026"
+"Documentation" = "https://github.com/tejoker/HackNation2026/tree/main/docs"
 
 [build-system]
 requires = ["setuptools>=77", "wheel"]

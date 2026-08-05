@@ -22,6 +22,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.91.1
 
       - name: Cache cargo registry + target
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -36,11 +38,11 @@ jobs:
 
       - name: cargo check
         working-directory: core
-        run: cargo check --lib
+        run: cargo check --locked --lib
 
       - name: cargo test --lib
         working-directory: core
-        run: cargo test --lib
+        run: cargo test --locked --lib
 
   test-postgres:
     name: cargo test --lib + race scenario (Postgres backend)
@@ -72,6 +74,8 @@ jobs:
         run: echo "SAURON_ADMIN_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.91.1
 
       - name: Install postgres client
         run: |
@@ -125,9 +129,9 @@ jobs:
         # scenario below — the unit suite proves the helper compiles + the
         # SQLite branch behaves correctly.
         run: |
-          cargo test --lib repository::tests
-          cargo test --lib ajwt
-          cargo test --lib risk
+          cargo test --locked --lib repository::tests
+          cargo test --locked --lib ajwt
+          cargo test --locked --lib risk
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -154,7 +158,7 @@ jobs:
           # runtime. This CI box IS single-node, so accepting it is honest.
           SAURON_ACCEPT_SINGLE_NODE_SQLITE: "1"
         run: |
-          cargo build --bin sauron-core
+          cargo build --locked --bin sauron-core
           nohup ./target/debug/sauron-core > /tmp/sauron-core.log 2>&1 &
           echo $! > /tmp/sauron-core.pid
 

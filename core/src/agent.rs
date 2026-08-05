@@ -1457,8 +1457,8 @@ pub async fn revoke_agent(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.query_row(
-            "SELECT public_key_hex FROM agents WHERE agent_id = ?1",
-            params![agent_id],
+            "SELECT public_key_hex FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
+            params![tenant_id, agent_id],
             |r| r.get(0),
         )
         .ok()

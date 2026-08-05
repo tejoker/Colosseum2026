@@ -238,7 +238,10 @@ fn sha256_hex(s: &str) -> String {
 /// True if `ip` must never be reached via the egress proxy: loopback, private,
 /// link-local (incl. the cloud metadata endpoint 169.254.169.254), CGNAT,
 /// unspecified, multicast/broadcast, and the IPv6 equivalents (ULA fc00::/7,
-/// link-local fe80::/10, and IPv4-mapped forms of any of the above).
+/// link-local fe80::/10, IPv4 mapped/compatible forms, and transition ranges
+/// that can tunnel an otherwise blocked IPv4 destination (NAT64, 6to4,
+/// Teredo). Transition mechanisms are refused wholesale: the gateway cannot
+/// safely prove which final IPv4 address a downstream translator will reach.
 pub fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -254,8 +257,8 @@ pub fn is_blocked_ip(ip: IpAddr) -> bool {
                 || (o[0] == 100 && (o[1] & 0xC0) == 64) // 100.64.0.0/10 CGNAT
         }
         IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_blocked_ip(IpAddr::V4(mapped));
+            if let Some(embedded) = v6.to_ipv4() {
+                return is_blocked_ip(IpAddr::V4(embedded));
             }
             let seg = v6.segments();
             v6.is_loopback()
@@ -263,6 +266,9 @@ pub fn is_blocked_ip(ip: IpAddr) -> bool {
                 || v6.is_multicast()
                 || (seg[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
                 || (seg[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0 && seg[3] == 0) // NAT64 64:ff9b::/96
+                || seg[0] == 0x2002 // 6to4 2002::/16
+                || (seg[0] == 0x2001 && seg[1] == 0) // Teredo 2001::/32
         }
     }
 }
@@ -1255,6 +1261,22 @@ mod tests {
         assert!(
             is_blocked_ip("::ffff:169.254.169.254".parse().unwrap()),
             "v4-mapped metadata blocked"
+        );
+        assert!(
+            is_blocked_ip("::169.254.169.254".parse().unwrap()),
+            "v4-compatible metadata blocked"
+        );
+        assert!(
+            is_blocked_ip("64:ff9b::a9fe:a9fe".parse().unwrap()),
+            "NAT64 metadata destination blocked"
+        );
+        assert!(
+            is_blocked_ip("2002:a9fe:a9fe::1".parse().unwrap()),
+            "6to4 metadata destination blocked"
+        );
+        assert!(
+            is_blocked_ip("2001:0000:4136:e378:8000:63bf:3fff:fdd2".parse().unwrap()),
+            "Teredo transition address blocked"
         );
     }
 

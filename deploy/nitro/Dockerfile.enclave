@@ -10,7 +10,7 @@
 # context, so invoke with `docker build -f deploy/nitro/Dockerfile.enclave .`
 # from the repo root — see deploy/nitro/run.sh which handles this for you).
 
-FROM amazonlinux:2023 AS builder
+FROM amazonlinux:2023@sha256:694092ae18877ed4e3cb9b643759ba95df1f12af12528fefa18f60f79d4c1568 AS builder
 
 # Toolchain. We pin rustc/cargo to whatever Amazon Linux 2023 ships rather
 # than dragging in rustup — keeps the EIF image lean.
@@ -34,7 +34,7 @@ RUN cargo build \
 # inside the enclave's init system, so we keep the libc / dynamic-loader env
 # identical to the build host.
 
-FROM amazonlinux:2023
+FROM amazonlinux:2023@sha256:694092ae18877ed4e3cb9b643759ba95df1f12af12528fefa18f60f79d4c1568
 COPY --from=builder /build/core/target/release/nitro-enclave /usr/local/bin/
 
 # Default port = 5005. Override via `SAURON_ENCLAVE_PORT` if your operator

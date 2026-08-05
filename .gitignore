@@ -111,6 +111,16 @@ tarpaulin-report.html
 
 # Local dev-only generated secrets (admin key, etc.) — never commit.
 .dev-secrets
+prod.secrets.env
+
+# Internal-only material. This repository is public: prospect lists, outreach
+# plans, unreviewed legal templates and internal assessments stay local.
+docs/EXTERNAL-REVIEW-*.md
+docs/sales/icp-lead-brief.md
+docs/sales/outreach-playbook.md
+docs/sales/lead-list-*.xlsx
+docs/legal/
+.~lock.*#
 
 # vercel
 .vercel

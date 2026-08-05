@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Json, State},
+    extract::{Extension, Json, State},
     http::StatusCode,
 };
 use hmac::{Hmac, Mac};
@@ -9,7 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
 
-use crate::{policy, ring, state::ServerState};
+use crate::{policy, ring, state::ServerState, tenancy::TenantId};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -118,6 +118,28 @@ pub fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+fn active_tenant_ring(
+    db: &Connection,
+    tenant_id: &str,
+    now: i64,
+) -> rusqlite::Result<Vec<(String, curve25519_dalek::ristretto::RistrettoPoint)>> {
+    let mut stmt = db.prepare(
+        "SELECT public_key_hex FROM agents \
+         WHERE tenant_id = ?1 AND revoked = 0 AND expires_at > ?2 \
+         AND public_key_hex != '' ORDER BY agent_id",
+    )?;
+    let rows = stmt.query_map(params![tenant_id, now], |row| row.get::<_, String>(0))?;
+    Ok(rows
+        .filter_map(Result::ok)
+        .filter_map(|hex_key| {
+            let bytes = hex::decode(&hex_key).ok()?;
+            let encoded = <[u8; 32]>::try_from(bytes).ok()?;
+            let point = curve25519_dalek::ristretto::CompressedRistretto(encoded).decompress()?;
+            Some((hex_key, point))
+        })
+        .collect())
 }
 
 fn json_str(s: &str) -> String {
@@ -370,14 +392,22 @@ pub fn validate_agent_action(
                 StatusCode::UNAUTHORIZED,
                 "Agent public key point invalid".to_string(),
             ))?;
-        if !st.agent_group.members.contains(&pt) {
+        // Reconstruct exactly the same authenticated tenant ring returned by
+        // /agent/action/challenge. The process-wide cache is only an indexing
+        // convenience and must never become a cross-tenant proof statement.
+        let tenant_ring: Vec<_> = active_tenant_ring(&db, opts.tenant_id, now)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .map(|(_, point)| point)
+            .collect();
+        if !tenant_ring.contains(&pt) {
             return Err((
                 StatusCode::UNAUTHORIZED,
-                "Agent public key is not in delegated ring".into(),
+                "Agent public key is not in authenticated tenant ring".into(),
             ));
         }
 
-        let ring_ok = ring::verify(&canonical, &st.agent_group.members, &proof.ring_signature);
+        let ring_ok = ring::verify(&canonical, &tenant_ring, &proof.ring_signature);
         if ring_ok {
             db.execute(
                 "DELETE FROM agent_action_nonces WHERE expires_at < ?1",
@@ -675,6 +705,7 @@ pub async fn submit_anon_action(
 
 pub async fn action_challenge(
     State(state): State<Arc<RwLock<ServerState>>>,
+    Extension(tenant): Extension<TenantId>,
     Json(payload): Json<AgentActionChallengeBody>,
 ) -> Result<Json<AgentActionChallengeResponse>, (StatusCode, String)> {
     if payload.agent_id.trim().is_empty()
@@ -694,8 +725,8 @@ pub async fn action_challenge(
         let db = st.db.lock().unwrap();
         let signing_public_key_hex: String = db
             .query_row(
-                "SELECT IFNULL(public_key_hex, '') FROM agents WHERE agent_id = ?1 AND human_key_image = ?2 AND revoked = 0 AND expires_at > ?3",
-                params![payload.agent_id, payload.human_key_image, now],
+                "SELECT IFNULL(public_key_hex, '') FROM agents WHERE tenant_id = ?1 AND agent_id = ?2 AND human_key_image = ?3 AND revoked = 0 AND expires_at > ?4",
+                params![tenant.as_str(), payload.agent_id, payload.human_key_image, now],
                 |r| r.get(0),
             )
             .map_err(|_| {
@@ -728,21 +759,22 @@ pub async fn action_challenge(
                 StatusCode::UNAUTHORIZED,
                 "Agent public key point invalid".to_string(),
             ))?;
-        let signer_index = st
-            .agent_group
-            .members
+        let agent_ring_public_keys_hex: Vec<String> = active_tenant_ring(&db, tenant.as_str(), now)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .map(|(hex_key, _)| hex_key)
+            .collect();
+        let signer_index = agent_ring_public_keys_hex
             .iter()
-            .position(|p| p == &signing_point)
+            .position(|hex_key| hex_key == &signing_public_key_hex)
             .ok_or((
                 StatusCode::UNAUTHORIZED,
-                "Agent public key is not in delegated ring".to_string(),
+                "Agent public key is not in authenticated tenant ring".to_string(),
             ))?;
-        let agent_ring_public_keys_hex = st
-            .agent_group
-            .members
-            .iter()
-            .map(|p| hex::encode(p.compress().as_bytes()))
-            .collect();
+        debug_assert_eq!(
+            hex::encode(signing_point.compress().as_bytes()),
+            signing_public_key_hex
+        );
         (
             agent_ring_public_keys_hex,
             signer_index,
@@ -875,6 +907,50 @@ mod tests {
         let msg = canonical_envelope_bytes(&sample_env());
         let sig = ring::sign(&msg, &ring_members, &outsider, 0);
         assert!(!ring::verify(&msg, &ring_members, &sig));
+    }
+
+    #[test]
+    fn active_ring_is_authoritatively_tenant_scoped_and_ordered() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents (
+                agent_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                public_key_hex TEXT NOT NULL,
+                revoked INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        let a_first = crate::identity::Identity::random();
+        let a_second = crate::identity::Identity::random();
+        let other_tenant = crate::identity::Identity::random();
+        let revoked = crate::identity::Identity::random();
+        for (agent_id, tenant_id, identity, is_revoked, expires_at) in [
+            ("a-2", "tenant-a", &a_second, 0, 200),
+            ("a-1", "tenant-a", &a_first, 0, 200),
+            ("b-1", "tenant-b", &other_tenant, 0, 200),
+            ("a-revoked", "tenant-a", &revoked, 1, 200),
+        ] {
+            db.execute(
+                "INSERT INTO agents (agent_id, tenant_id, public_key_hex, revoked, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    agent_id,
+                    tenant_id,
+                    identity.public_hex(),
+                    is_revoked,
+                    expires_at
+                ],
+            )
+            .unwrap();
+        }
+
+        let ring = active_tenant_ring(&db, "tenant-a", 100).unwrap();
+        let keys: Vec<_> = ring.into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, vec![a_first.public_hex(), a_second.public_hex()]);
+        assert!(!keys.contains(&other_tenant.public_hex()));
+        assert!(!keys.contains(&revoked.public_hex()));
     }
 
     #[test]

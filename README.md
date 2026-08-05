@@ -2,15 +2,15 @@
 
 **A fail-closed authorization and verifiable-audit boundary for AI agents.**
 
-[![Tests](https://github.com/tejoker/Colosseum2026/actions/workflows/test.yml/badge.svg)](https://github.com/tejoker/Colosseum2026/actions/workflows/test.yml)
-[![Security scans](https://github.com/tejoker/Colosseum2026/actions/workflows/security.yml/badge.svg)](https://github.com/tejoker/Colosseum2026/actions/workflows/security.yml)
-[![Release gate](https://github.com/tejoker/Colosseum2026/actions/workflows/release-gate.yml/badge.svg)](https://github.com/tejoker/Colosseum2026/actions/workflows/release-gate.yml)
+[![Tests](https://github.com/tejoker/HackNation2026/actions/workflows/test.yml/badge.svg)](https://github.com/tejoker/HackNation2026/actions/workflows/test.yml)
+[![Security scans](https://github.com/tejoker/HackNation2026/actions/workflows/security.yml/badge.svg)](https://github.com/tejoker/HackNation2026/actions/workflows/security.yml)
+[![Release gate](https://github.com/tejoker/HackNation2026/actions/workflows/release-gate.yml/badge.svg)](https://github.com/tejoker/HackNation2026/actions/workflows/release-gate.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Try it in two minutes
+## Build and try the source release
 
 ```bash
-git clone https://github.com/tejoker/Colosseum2026 sauronid && cd sauronid
+git clone https://github.com/tejoker/HackNation2026 sauronid && cd sauronid
 docker compose up        # core :3001 + dashboard :3000 + seeded demo tenant
 ```
 
@@ -18,7 +18,7 @@ Then leash your first agent (Python shown; same 15 lines in
 [TypeScript](agentic/README.md) and [Go](clients/go/sauronid/README.md)):
 
 ```python
-# pip install sauronid-client
+# from the repository: python -m pip install -e ./clients/python
 from sauronid_client import SauronIDClient, register_llm_agent
 
 client = SauronIDClient(base_url="http://localhost:3001")
@@ -181,10 +181,10 @@ Same 15-line path in every language: `client` → `user_auth` → `register_llm_
 
 | Surface | Install | Adapters |
 |---|---|---|
-| [Python](clients/python/sauronid_client/) | `pip install sauronid-client` | LangChain, LlamaIndex, CrewAI, AutoGen, OpenAI, Anthropic — or `sauronid_client.wrap(...)` for one-import wrapping |
-| [TypeScript](agentic/) | `npm install @sauronid/agentic` | Vercel AI SDK, OpenAI tool calls, Anthropic tool use |
-| [Go](clients/go/sauronid/) | `go get github.com/sauronid/go-sdk` | Local policy guard + full signed-call flow |
-| [MCP server](mcp-server/) | `npx @sauronid/mcp-server` | Any MCP client (Claude Code, Claude Desktop, ...) — seven tools (status, register, payment, leashed fetch, egress log, receipts, revoke), no SDK integration needed |
+| [Python](clients/python/sauronid_client/) | `python -m pip install -e ./clients/python` | LangChain, LlamaIndex, CrewAI, AutoGen, OpenAI, Anthropic — or `sauronid_client.wrap(...)` for one-import wrapping |
+| [TypeScript](agentic/) | `npm ci --prefix agentic` | Vercel AI SDK, OpenAI tool calls, Anthropic tool use |
+| [Go](clients/go/sauronid/) | `cd clients/go/sauronid && go test ./...` | Local policy guard + full signed-call flow |
+| [MCP server](mcp-server/) | `npm ci --prefix mcp-server && npm run build --prefix mcp-server` | Any MCP client — seven tools (status, register, payment, leashed fetch, egress log, receipts, revoke) |
 
 The per-call signature is DPoP-style by construction; an RFC 9449 DPoP
 compatibility envelope is available opt-in (`SAURON_ACCEPT_DPOP=1`) for stacks
@@ -192,14 +192,21 @@ that already speak DPoP — see [docs/sdk-integration.md](docs/sdk-integration.m
 for the body-digest caveat. Full HTTP surface:
 [`schemas/openapi.yaml`](schemas/openapi.yaml).
 
-## Quickstart (build from source, 60 seconds)
+## Quickstart (build from source)
 
 ```bash
-git clone https://github.com/tejoker/Colosseum2026 sauronid && cd sauronid
+git clone https://github.com/tejoker/HackNation2026 sauronid && cd sauronid
 ./scripts/dev/quickstart.sh
 ```
 
-The script: builds the Rust core, builds the TS clients, starts the server in dev mode, seeds clients/users, and runs the 9-scenario invariant suite + the empirical suite (10 attacks dynamic, 6 attacks via source-code review). Both must pass green at the end.
+The script builds the Rust core and TS clients, starts the development server,
+seeds test identities, and runs the invariant and empirical suites. The release
+gate additionally requires all 16 empirical scenarios to execute dynamically,
+pass, and report zero skips.
+
+A cold build downloads and compiles hundreds of crates and can take roughly
+15–45 minutes depending on hardware and cache state. No shorter time-to-first-
+call claim is made until release containers and packages have actually shipped.
 
 By default the server runs in **advisory** mode (logs call-signature violations but accepts them). To run in **fail-closed** (production-like) enforcement mode:
 
@@ -207,7 +214,7 @@ By default the server runs in **advisory** mode (logs call-signature violations 
 SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
 ```
 
-The "16/16 blocked" empirical claim assumes this flag is set.
+Results produced without fail-closed enforcement are not release evidence.
 
 For a full local demo (core + analytics shim + branded Next.js dashboard) in one shot:
 
@@ -302,16 +309,18 @@ For TypeScript: [`agentic/src/`](agentic/src/).
 Every claim above has a runnable test. See [docs/empirical-comparison.md](docs/empirical-comparison.md) for:
 
 - 16 concrete attacks against AI-agent binding systems.
-- SauronID's score in fail-closed mode: **10/16 blocked via live dynamic execution (A1–A10)**, **6/16 verified via source-code review against canonical patterns (A11–A16)** — atomic `UPDATE ... WHERE` for TOCTOU, constant-time HMAC compares, `UNIQUE` constraints on consume tables. Dynamic harness for A11–A16 is on the redteam roadmap.
+- A release-gated result in fail-closed mode: all 16 scenarios must execute
+  dynamically with zero skips. This is regression evidence for those modeled
+  attacks, not proof of security against unmodeled attacks.
 - Comparison vs DPoP (RFC 9449), HTTP Message Signatures (RFC 9421), GNAP (RFC 9635), Anthropic MCP, Auth0 Agent Identities, AWS IAM Roles for Agents.
-- Latency benchmark: p50=2 ms, p99=8 ms at conc=1; p50=13 ms, p99=25 ms at conc=10.
+- Reproducible load-test configuration, raw JSON, and the observed SQLite tail-latency limitations.
 
 To reproduce the empirical claim (requires fail-closed mode):
 
 ```bash
 SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
-# at the end, the dynamic empirical suite reports "10/10 blocked" for A1–A10.
-# A11–A16 are validated by reading core/src for the canonical patterns.
+# at the end, inspect redteam/empirical-results.json; release evidence requires
+# passed == total, skipped == 0, and every result dynamic == true.
 ```
 
 ## Architecture (high level)
@@ -345,7 +354,7 @@ SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
 ## Repo layout
 
 ```
-core/                  Rust axum service (~14k lines core Rust)
+core/                  Rust axum service (~50k lines under core/src)
 dashboard/             Next.js Mandate Console (live data from core)
 clients/python/        Python SDK (SignedAgent + LangChain/LlamaIndex/CrewAI/AutoGen/OpenAI/Anthropic adapters)
 clients/go/            Go SDK (same signed-call flow)
@@ -374,7 +383,7 @@ archive/banking-2025/  Pre-pivot bank-KYC code. Feature-flagged off by default; 
 
 ## Critical files
 
-- Core service: [`core/`](core/) — Rust, axum, ~14k lines core Rust (count: `find core/src -name '*.rs' | xargs wc -l`).
+- Core service: [`core/`](core/) — Rust, axum, ~50k lines under `core/src` (recount with `find core/src -name '*.rs' -print0 | xargs -0 wc -l`).
 - Mandate Console: [`dashboard/`](dashboard/) — Next.js + Chart.js, dark branded UI reading live core data only.
 - Brand system: [`branding/`](branding/) — `BRANDING.md`, eye logo, brand book.
 - TypeScript client: [`agentic/`](agentic/) — `signCall`, `register`, `popKeys`.
@@ -418,7 +427,7 @@ Full guide: [docs/operations.md](docs/operations.md).
 
 ## Repo provenance
 
-This codebase was started during the **Solana Colosseum 2026 hackathon**, building on a prior **2025 hackathon prototype** (which is preserved under `legacy/` for git-history continuity). Active development continues post-hackathon. Reviewers and auditors should keep this provenance in mind: some surfaces are production-grade and battle-tested, others are hackathon-grade and explicitly flagged in the "Partial" and "Cannot do" sections above. The boundary is the boundary — don't infer maturity from polish.
+This codebase was started during the **Solana Colosseum 2026 hackathon**, building on a prior **2025 hackathon prototype** (preserved under `archive/banking-2025/`). Active development continues post-hackathon. Reviewers and auditors should rely on the implemented/partial/cannot-do boundaries above rather than infer maturity from presentation.
 
 ## Security and trust
 

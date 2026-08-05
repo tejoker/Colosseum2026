@@ -794,6 +794,7 @@ impl Repo {
     #[allow(clippy::type_complexity)]
     pub async fn consume_consent_token(
         &self,
+        tenant_id: &str,
         consent_token: &str,
         now: i64,
     ) -> Result<(String, String, Option<String>, String), RepoError> {
@@ -806,21 +807,22 @@ impl Repo {
         match self {
             Repo::Sqlite(_) => {
                 let consent_token = consent_token.to_string();
+                let tenant_id = tenant_id.to_string();
                 self.txn_immediate_sqlite(move |conn| {
                     let rows = conn
                         .execute(
                             "UPDATE consent_log SET token_used = 1 \
-                             WHERE consent_token = ?1 AND token_used = 0 AND revoked = 0 \
-                             AND (consent_expires_at = 0 OR consent_expires_at > ?2)",
-                            rusqlite::params![consent_token, now],
+                             WHERE tenant_id = ?1 AND consent_token = ?2 AND token_used = 0 AND revoked = 0 \
+                             AND (consent_expires_at = 0 OR consent_expires_at > ?3)",
+                            rusqlite::params![tenant_id, consent_token, now],
                         )
                         .map_err(|e| RepoError::Backend(e.to_string()))?;
                     if rows == 0 {
                         // Distinguish replay/expired/revoked for caller mapping.
                         let status = conn.query_row(
                             "SELECT token_used, revoked, consent_expires_at FROM consent_log \
-                             WHERE consent_token = ?1",
-                            rusqlite::params![consent_token],
+                             WHERE tenant_id = ?1 AND consent_token = ?2",
+                            rusqlite::params![tenant_id, consent_token],
                             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
                         );
                         return match status {
@@ -841,8 +843,8 @@ impl Repo {
                     let row: (String, String, Option<String>, String) = conn
                         .query_row(
                             "SELECT user_key_image, site_name, issuing_agent_id, requested_claims_json \
-                             FROM consent_log WHERE consent_token = ?1",
-                            rusqlite::params![consent_token],
+                             FROM consent_log WHERE tenant_id = ?1 AND consent_token = ?2",
+                            rusqlite::params![tenant_id, consent_token],
                             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                         )
                         .map_err(|_| RepoError::Replay(
@@ -853,8 +855,10 @@ impl Repo {
             }
             Repo::Postgres(_) => {
                 let consent_token = consent_token.to_string();
+                let tenant_id = tenant_id.to_string();
                 self.txn_serializable_pg(move |tx| {
                     let consent_token = consent_token.clone();
+                    let tenant_id = tenant_id.clone();
                     Box::pin(async move {
                         // FOR UPDATE locks the row; RETURNING confirms we
                         // flipped 0→1. If RETURNING is empty, the row is
@@ -862,11 +866,12 @@ impl Repo {
                         let claimed: Option<(String, String, Option<String>, String)> =
                             sqlx::query_as(
                                 "UPDATE consent_log SET token_used = 1 \
-                                 WHERE consent_token = $1 AND token_used = 0 AND revoked = 0 \
-                                 AND (consent_expires_at = 0 OR consent_expires_at > $2) \
+                                 WHERE tenant_id = $1 AND consent_token = $2 AND token_used = 0 AND revoked = 0 \
+                                 AND (consent_expires_at = 0 OR consent_expires_at > $3) \
                                  RETURNING user_key_image, site_name, issuing_agent_id, \
                                            requested_claims_json",
                             )
+                            .bind(&tenant_id)
                             .bind(&consent_token)
                             .bind(now)
                             .fetch_optional(&mut **tx)
@@ -885,8 +890,9 @@ impl Repo {
                         // Disambiguate the failure path.
                         let status: Option<(i64, i64, i64)> = sqlx::query_as(
                             "SELECT token_used, revoked, consent_expires_at FROM consent_log \
-                             WHERE consent_token = $1",
+                             WHERE tenant_id = $1 AND consent_token = $2",
                         )
+                        .bind(&tenant_id)
                         .bind(&consent_token)
                         .fetch_optional(&mut **tx)
                         .await
@@ -912,6 +918,7 @@ impl Repo {
     /// request_id; the consent_token is filled later when the user grants.
     pub async fn insert_pending_consent(
         &self,
+        tenant_id: &str,
         request_id: &str,
         site_name: &str,
         requested_claims_json: &str,
@@ -921,9 +928,9 @@ impl Repo {
                 let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
                 conn.execute(
                     "INSERT INTO consent_log (request_id, user_key_image, site_name, \
-                     requested_claims_json, granted_at, token_used, revoked) \
-                     VALUES (?1, '', ?2, ?3, 0, 0, 0)",
-                    rusqlite::params![request_id, site_name, requested_claims_json],
+                     requested_claims_json, granted_at, token_used, revoked, tenant_id) \
+                     VALUES (?1, '', ?2, ?3, 0, 0, 0, ?4)",
+                    rusqlite::params![request_id, site_name, requested_claims_json, tenant_id],
                 )
                 .map_err(|e| RepoError::Backend(e.to_string()))?;
                 Ok(())
@@ -931,12 +938,13 @@ impl Repo {
             Repo::Postgres(pool) => {
                 sqlx::query(
                     "INSERT INTO consent_log (request_id, user_key_image, site_name, \
-                     requested_claims_json, granted_at, token_used, revoked) \
-                     VALUES ($1, '', $2, $3, 0, 0, 0)",
+                     requested_claims_json, granted_at, token_used, revoked, tenant_id) \
+                     VALUES ($1, '', $2, $3, 0, 0, 0, $4)",
                 )
                 .bind(request_id)
                 .bind(site_name)
                 .bind(requested_claims_json)
+                .bind(tenant_id)
                 .execute(pool)
                 .await
                 .map_err(|e| RepoError::Backend(format!("pg insert consent: {e}")))?;
@@ -954,6 +962,7 @@ impl Repo {
     /// (user_key_image, issuing_agent_id) for a non-revoked consent token.
     pub async fn get_consent_by_token(
         &self,
+        tenant_id: &str,
         consent_token: &str,
     ) -> Result<Option<(String, Option<String>)>, RepoError> {
         match self {
@@ -962,8 +971,8 @@ impl Repo {
                 Ok(conn
                     .query_row(
                         "SELECT user_key_image, issuing_agent_id FROM consent_log \
-                         WHERE consent_token = ?1 AND revoked = 0",
-                        rusqlite::params![consent_token],
+                         WHERE tenant_id = ?1 AND consent_token = ?2 AND revoked = 0",
+                        rusqlite::params![tenant_id, consent_token],
                         |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
                     )
                     .ok())
@@ -971,8 +980,9 @@ impl Repo {
             Repo::Postgres(pool) => {
                 let row: Option<(String, Option<String>)> = sqlx::query_as(
                     "SELECT user_key_image, issuing_agent_id FROM consent_log \
-                     WHERE consent_token = $1 AND revoked = 0",
+                     WHERE tenant_id = $1 AND consent_token = $2 AND revoked = 0",
                 )
+                .bind(tenant_id)
                 .bind(consent_token)
                 .fetch_optional(pool)
                 .await
@@ -985,6 +995,7 @@ impl Repo {
     /// user_key_image for a live, unused consent token scoped to a site.
     pub async fn resolve_consent_user(
         &self,
+        tenant_id: &str,
         consent_token: &str,
         site_name: &str,
         now: i64,
@@ -995,9 +1006,9 @@ impl Repo {
                 Ok(conn
                     .query_row(
                         "SELECT user_key_image FROM consent_log \
-                         WHERE consent_token = ?1 AND site_name = ?2 AND token_used = 0 AND revoked = 0 \
-                         AND (consent_expires_at = 0 OR consent_expires_at > ?3)",
-                        rusqlite::params![consent_token, site_name, now],
+                         WHERE tenant_id = ?1 AND consent_token = ?2 AND site_name = ?3 AND token_used = 0 AND revoked = 0 \
+                         AND (consent_expires_at = 0 OR consent_expires_at > ?4)",
+                        rusqlite::params![tenant_id, consent_token, site_name, now],
                         |r| r.get::<_, String>(0),
                     )
                     .ok())
@@ -1005,9 +1016,10 @@ impl Repo {
             Repo::Postgres(pool) => {
                 let row: Option<(String,)> = sqlx::query_as(
                     "SELECT user_key_image FROM consent_log \
-                     WHERE consent_token = $1 AND site_name = $2 AND token_used = 0 AND revoked = 0 \
-                     AND (consent_expires_at = 0 OR consent_expires_at > $3)",
+                     WHERE tenant_id = $1 AND consent_token = $2 AND site_name = $3 AND token_used = 0 AND revoked = 0 \
+                     AND (consent_expires_at = 0 OR consent_expires_at > $4)",
                 )
+                .bind(tenant_id)
                 .bind(consent_token)
                 .bind(site_name)
                 .bind(now)
@@ -1022,6 +1034,7 @@ impl Repo {
     /// (site_name, requested_claims_json, consent_token) for a request id.
     pub async fn get_consent_info(
         &self,
+        tenant_id: &str,
         request_id: &str,
     ) -> Result<Option<(String, String, Option<String>)>, RepoError> {
         match self {
@@ -1030,8 +1043,8 @@ impl Repo {
                 Ok(conn
                     .query_row(
                         "SELECT site_name, requested_claims_json, consent_token FROM consent_log \
-                         WHERE request_id = ?1",
-                        rusqlite::params![request_id],
+                         WHERE tenant_id = ?1 AND request_id = ?2",
+                        rusqlite::params![tenant_id, request_id],
                         |r| {
                             Ok((
                                 r.get::<_, String>(0)?,
@@ -1045,8 +1058,9 @@ impl Repo {
             Repo::Postgres(pool) => {
                 let row: Option<(String, String, Option<String>)> = sqlx::query_as(
                     "SELECT site_name, requested_claims_json, consent_token FROM consent_log \
-                     WHERE request_id = $1",
+                     WHERE tenant_id = $1 AND request_id = $2",
                 )
+                .bind(tenant_id)
                 .bind(request_id)
                 .fetch_optional(pool)
                 .await
@@ -1060,6 +1074,7 @@ impl Repo {
     /// also requires `consent_token IS NULL` (not yet granted).
     pub async fn pending_consent_site(
         &self,
+        tenant_id: &str,
         request_id: &str,
         require_ungranted: bool,
     ) -> Result<Option<String>, RepoError> {
@@ -1073,10 +1088,10 @@ impl Repo {
                 let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
                 let sql = format!(
                     "SELECT site_name FROM consent_log \
-                     WHERE request_id = ?1 AND token_used = 0 AND revoked = 0{ungranted_sql}"
+                     WHERE tenant_id = ?1 AND request_id = ?2 AND token_used = 0 AND revoked = 0{ungranted_sql}"
                 );
                 Ok(conn
-                    .query_row(&sql, rusqlite::params![request_id], |r| {
+                    .query_row(&sql, rusqlite::params![tenant_id, request_id], |r| {
                         r.get::<_, String>(0)
                     })
                     .ok())
@@ -1084,9 +1099,10 @@ impl Repo {
             Repo::Postgres(pool) => {
                 let sql = format!(
                     "SELECT site_name FROM consent_log \
-                     WHERE request_id = $1 AND token_used = 0 AND revoked = 0{ungranted_sql}"
+                     WHERE tenant_id = $1 AND request_id = $2 AND token_used = 0 AND revoked = 0{ungranted_sql}"
                 );
                 let row: Option<(String,)> = sqlx::query_as(&sql)
+                    .bind(tenant_id)
                     .bind(request_id)
                     .fetch_optional(pool)
                     .await
@@ -1102,6 +1118,7 @@ impl Repo {
     #[allow(clippy::too_many_arguments)]
     pub async fn grant_consent_token(
         &self,
+        tenant_id: &str,
         request_id: &str,
         user_key_image: &str,
         granted_at: i64,
@@ -1116,13 +1133,14 @@ impl Repo {
                     .execute(
                         "UPDATE consent_log SET user_key_image = ?1, granted_at = ?2, \
                          consent_expires_at = ?3, consent_token = ?4, issuing_agent_id = ?5 \
-                         WHERE request_id = ?6 AND consent_token IS NULL AND revoked = 0 AND token_used = 0",
+                         WHERE tenant_id = ?6 AND request_id = ?7 AND consent_token IS NULL AND revoked = 0 AND token_used = 0",
                         rusqlite::params![
                             user_key_image,
                             granted_at,
                             consent_expires_at,
                             consent_token,
                             issuing_agent_id,
+                            tenant_id,
                             request_id
                         ],
                     )
@@ -1133,13 +1151,14 @@ impl Repo {
                 let res = sqlx::query(
                     "UPDATE consent_log SET user_key_image = $1, granted_at = $2, \
                      consent_expires_at = $3, consent_token = $4, issuing_agent_id = $5 \
-                     WHERE request_id = $6 AND consent_token IS NULL AND revoked = 0 AND token_used = 0",
+                     WHERE tenant_id = $6 AND request_id = $7 AND consent_token IS NULL AND revoked = 0 AND token_used = 0",
                 )
                 .bind(user_key_image)
                 .bind(granted_at)
                 .bind(consent_expires_at)
                 .bind(consent_token)
                 .bind(issuing_agent_id)
+                .bind(tenant_id)
                 .bind(request_id)
                 .execute(pool)
                 .await
@@ -1233,6 +1252,7 @@ impl Repo {
 
     pub async fn consume_payment_authorization(
         &self,
+        tenant_id: &str,
         auth_id: &str,
         now: i64,
     ) -> Result<(), RepoError> {
@@ -1242,12 +1262,13 @@ impl Repo {
         match self {
             Repo::Sqlite(_) => {
                 let auth_id = auth_id.to_string();
+                let tenant_id = tenant_id.to_string();
                 self.txn_immediate_sqlite(move |conn| {
                     let rows = conn
                         .execute(
                             "UPDATE agent_payment_authorizations SET consumed = 1 \
-                             WHERE auth_id = ?1 AND consumed = 0 AND expires_at > ?2",
-                            rusqlite::params![auth_id, now],
+                             WHERE tenant_id = ?1 AND auth_id = ?2 AND consumed = 0 AND expires_at > ?3",
+                            rusqlite::params![tenant_id, auth_id, now],
                         )
                         .map_err(|e| RepoError::Backend(e.to_string()))?;
                     if rows == 0 {
@@ -1260,14 +1281,17 @@ impl Repo {
             }
             Repo::Postgres(_) => {
                 let auth_id = auth_id.to_string();
+                let tenant_id = tenant_id.to_string();
                 self.txn_serializable_pg(move |tx| {
                     let auth_id = auth_id.clone();
+                    let tenant_id = tenant_id.clone();
                     Box::pin(async move {
                         let claimed: Option<(String,)> = sqlx::query_as(
                             "UPDATE agent_payment_authorizations SET consumed = 1 \
-                             WHERE auth_id = $1 AND consumed = 0 AND expires_at > $2 \
+                             WHERE tenant_id = $1 AND auth_id = $2 AND consumed = 0 AND expires_at > $3 \
                              RETURNING auth_id",
                         )
+                        .bind(&tenant_id)
                         .bind(&auth_id)
                         .bind(now)
                         .fetch_optional(&mut **tx)
@@ -1298,6 +1322,7 @@ impl Repo {
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_payment_authorization(
         &self,
+        tenant_id: &str,
         auth_id: &str,
         agent_id: &str,
         jti: &str,
@@ -1314,8 +1339,8 @@ impl Repo {
                 conn.execute(
                     "INSERT INTO agent_payment_authorizations (auth_id, agent_id, jti, \
                      amount_minor, currency, merchant_id, payment_ref, created_at, \
-                     expires_at, consumed) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+                     expires_at, consumed, tenant_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
                     rusqlite::params![
                         auth_id,
                         agent_id,
@@ -1326,6 +1351,7 @@ impl Repo {
                         payment_ref,
                         created_at,
                         expires_at,
+                        tenant_id,
                     ],
                 )
                 .map_err(|e| {
@@ -1342,8 +1368,8 @@ impl Repo {
                 let res = sqlx::query(
                     "INSERT INTO agent_payment_authorizations (auth_id, agent_id, jti, \
                      amount_minor, currency, merchant_id, payment_ref, created_at, \
-                     expires_at, consumed) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)",
+                     expires_at, consumed, tenant_id) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10)",
                 )
                 .bind(auth_id)
                 .bind(agent_id)
@@ -1354,6 +1380,7 @@ impl Repo {
                 .bind(payment_ref)
                 .bind(created_at)
                 .bind(expires_at)
+                .bind(tenant_id)
                 .execute(pool)
                 .await;
                 match res {
@@ -1374,19 +1401,24 @@ impl Repo {
     /// Attempt to flip credential_codes.claimed 0→1 for the given key image.
     /// Returns Ok(true) if this caller won the race, Ok(false) if the row
     /// was already claimed (caller should re-check `user_credentials`).
-    pub async fn claim_credential_code(&self, key_image_hex: &str) -> Result<bool, RepoError> {
+    pub async fn claim_credential_code(
+        &self,
+        tenant_id: &str,
+        key_image_hex: &str,
+    ) -> Result<bool, RepoError> {
         if key_image_hex.is_empty() {
             return Err(RepoError::Backend("missing key_image_hex".into()));
         }
         match self {
             Repo::Sqlite(_) => {
                 let key = key_image_hex.to_string();
+                let tenant_id = tenant_id.to_string();
                 self.txn_immediate_sqlite(move |conn| {
                     let rows = conn
                         .execute(
                             "UPDATE credential_codes SET claimed = 1 \
-                             WHERE key_image_hex = ?1 AND claimed = 0",
-                            rusqlite::params![key],
+                             WHERE tenant_id = ?1 AND key_image_hex = ?2 AND claimed = 0",
+                            rusqlite::params![tenant_id, key],
                         )
                         .map_err(|e| RepoError::Backend(e.to_string()))?;
                     Ok(rows == 1)
@@ -1394,14 +1426,17 @@ impl Repo {
             }
             Repo::Postgres(_) => {
                 let key = key_image_hex.to_string();
+                let tenant_id = tenant_id.to_string();
                 self.txn_serializable_pg(move |tx| {
                     let key = key.clone();
+                    let tenant_id = tenant_id.clone();
                     Box::pin(async move {
                         let claimed: Option<(String,)> = sqlx::query_as(
                             "UPDATE credential_codes SET claimed = 1 \
-                             WHERE key_image_hex = $1 AND claimed = 0 \
+                             WHERE tenant_id = $1 AND key_image_hex = $2 AND claimed = 0 \
                              RETURNING key_image_hex",
                         )
+                        .bind(&tenant_id)
                         .bind(&key)
                         .fetch_optional(&mut **tx)
                         .await
@@ -1423,14 +1458,18 @@ impl Repo {
 
     /// Release a previously claimed credential code so the user can retry.
     /// Used on the failure paths in the /credential/claim flow.
-    pub async fn release_credential_code(&self, key_image_hex: &str) -> Result<(), RepoError> {
+    pub async fn release_credential_code(
+        &self,
+        tenant_id: &str,
+        key_image_hex: &str,
+    ) -> Result<(), RepoError> {
         match self {
             Repo::Sqlite(db) => {
                 let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
                 conn.execute(
                     "UPDATE credential_codes SET claimed = 0 \
-                     WHERE key_image_hex = ?1 AND claimed = 1",
-                    rusqlite::params![key_image_hex],
+                     WHERE tenant_id = ?1 AND key_image_hex = ?2 AND claimed = 1",
+                    rusqlite::params![tenant_id, key_image_hex],
                 )
                 .map_err(|e| RepoError::Backend(e.to_string()))?;
                 Ok(())
@@ -1438,8 +1477,9 @@ impl Repo {
             Repo::Postgres(pool) => {
                 sqlx::query(
                     "UPDATE credential_codes SET claimed = 0 \
-                     WHERE key_image_hex = $1 AND claimed = 1",
+                     WHERE tenant_id = $1 AND key_image_hex = $2 AND claimed = 1",
                 )
+                .bind(tenant_id)
                 .bind(key_image_hex)
                 .execute(pool)
                 .await
@@ -1452,6 +1492,7 @@ impl Repo {
     /// Look up the pre-auth code + subject DID for a credential request.
     pub async fn select_credential_code(
         &self,
+        tenant_id: &str,
         key_image_hex: &str,
     ) -> Result<Option<(String, String)>, RepoError> {
         match self {
@@ -1460,8 +1501,8 @@ impl Repo {
                 let row = conn
                     .query_row(
                         "SELECT pre_auth_code, subject_did FROM credential_codes \
-                         WHERE key_image_hex = ?1",
-                        rusqlite::params![key_image_hex],
+                         WHERE tenant_id = ?1 AND key_image_hex = ?2",
+                        rusqlite::params![tenant_id, key_image_hex],
                         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                     )
                     .ok();
@@ -1470,8 +1511,9 @@ impl Repo {
             Repo::Postgres(pool) => {
                 let row: Option<(String, String)> = sqlx::query_as(
                     "SELECT pre_auth_code, subject_did FROM credential_codes \
-                     WHERE key_image_hex = $1",
+                     WHERE tenant_id = $1 AND key_image_hex = $2",
                 )
+                .bind(tenant_id)
                 .bind(key_image_hex)
                 .fetch_optional(pool)
                 .await
@@ -1834,6 +1876,7 @@ impl Repo {
     /// Cache the issuer-minted VC for a user (idempotent upsert by key image).
     pub async fn upsert_user_credential(
         &self,
+        tenant_id: &str,
         key_image_hex: &str,
         credential_json: &str,
         issued_at: i64,
@@ -1841,28 +1884,42 @@ impl Repo {
         match self {
             Repo::Sqlite(db) => {
                 let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO user_credentials (key_image_hex, credential_json, issued_at) \
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![key_image_hex, credential_json, issued_at],
+                let changed = conn.execute(
+                    "INSERT INTO user_credentials (key_image_hex, credential_json, issued_at, tenant_id) \
+                     VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT(key_image_hex) DO UPDATE SET credential_json=excluded.credential_json, issued_at=excluded.issued_at \
+                     WHERE user_credentials.tenant_id=excluded.tenant_id",
+                    rusqlite::params![key_image_hex, credential_json, issued_at, tenant_id],
                 )
                 .map_err(|e| RepoError::Backend(e.to_string()))?;
+                if changed == 0 {
+                    return Err(RepoError::Backend(
+                        "credential key image already belongs to another tenant".into(),
+                    ));
+                }
                 Ok(())
             }
             Repo::Postgres(pool) => {
-                sqlx::query(
-                    "INSERT INTO user_credentials (key_image_hex, credential_json, issued_at) \
-                     VALUES ($1, $2, $3) \
+                let result = sqlx::query(
+                    "INSERT INTO user_credentials (key_image_hex, credential_json, issued_at, tenant_id) \
+                     VALUES ($1, $2, $3, $4) \
                      ON CONFLICT (key_image_hex) DO UPDATE SET \
                        credential_json = EXCLUDED.credential_json, \
-                       issued_at = EXCLUDED.issued_at",
+                       issued_at = EXCLUDED.issued_at \
+                     WHERE user_credentials.tenant_id = EXCLUDED.tenant_id",
                 )
                 .bind(key_image_hex)
                 .bind(credential_json)
                 .bind(issued_at)
+                .bind(tenant_id)
                 .execute(pool)
                 .await
                 .map_err(|e| RepoError::Backend(format!("pg upsert user cred: {e}")))?;
+                if result.rows_affected() == 0 {
+                    return Err(RepoError::Backend(
+                        "credential key image already belongs to another tenant".into(),
+                    ));
+                }
                 Ok(())
             }
         }
@@ -1871,6 +1928,7 @@ impl Repo {
     /// Fetch the cached VC, if any.
     pub async fn select_user_credential(
         &self,
+        tenant_id: &str,
         key_image_hex: &str,
     ) -> Result<Option<String>, RepoError> {
         match self {
@@ -1878,8 +1936,8 @@ impl Repo {
                 let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
                 let row = conn
                     .query_row(
-                        "SELECT credential_json FROM user_credentials WHERE key_image_hex = ?1",
-                        rusqlite::params![key_image_hex],
+                        "SELECT credential_json FROM user_credentials WHERE tenant_id = ?1 AND key_image_hex = ?2",
+                        rusqlite::params![tenant_id, key_image_hex],
                         |r| r.get::<_, String>(0),
                     )
                     .ok();
@@ -1887,8 +1945,9 @@ impl Repo {
             }
             Repo::Postgres(pool) => {
                 let row: Option<(String,)> = sqlx::query_as(
-                    "SELECT credential_json FROM user_credentials WHERE key_image_hex = $1",
+                    "SELECT credential_json FROM user_credentials WHERE tenant_id = $1 AND key_image_hex = $2",
                 )
+                .bind(tenant_id)
                 .bind(key_image_hex)
                 .fetch_optional(pool)
                 .await
@@ -1901,6 +1960,7 @@ impl Repo {
     /// Append a user_registration row (idempotent — `INSERT OR IGNORE`).
     pub async fn insert_user_registration(
         &self,
+        tenant_id: &str,
         client_name: &str,
         user_key_image_hex: &str,
         source: &str,
@@ -1910,22 +1970,23 @@ impl Repo {
             Repo::Sqlite(db) => {
                 let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
                 conn.execute(
-                    "INSERT OR IGNORE INTO user_registrations (client_name, user_key_image_hex, source, timestamp) \
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![client_name, user_key_image_hex, source, timestamp],
+                    "INSERT OR IGNORE INTO user_registrations (client_name, user_key_image_hex, source, timestamp, tenant_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![client_name, user_key_image_hex, source, timestamp, tenant_id],
                 )
                 .map_err(|e| RepoError::Backend(e.to_string()))?;
                 Ok(())
             }
             Repo::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO user_registrations (client_name, user_key_image_hex, source, timestamp) \
-                     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                    "INSERT INTO user_registrations (client_name, user_key_image_hex, source, timestamp, tenant_id) \
+                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
                 )
                 .bind(client_name)
                 .bind(user_key_image_hex)
                 .bind(source)
                 .bind(timestamp)
+                .bind(tenant_id)
                 .execute(pool)
                 .await
                 .map_err(|e| RepoError::Backend(format!("pg insert registration: {e}")))?;
@@ -1939,6 +2000,7 @@ impl Repo {
     /// Append a commitment to the merkle ledger (idempotent on UNIQUE).
     pub async fn insert_merkle_leaf(
         &self,
+        tenant_id: &str,
         commitment_hex: &str,
         registered_at: i64,
     ) -> Result<(), RepoError> {
@@ -1946,20 +2008,21 @@ impl Repo {
             Repo::Sqlite(db) => {
                 let conn = db.lock().map_err(|e| RepoError::Backend(e.to_string()))?;
                 conn.execute(
-                    "INSERT OR IGNORE INTO merkle_leaves (commitment_hex, registered_at) \
-                     VALUES (?1, ?2)",
-                    rusqlite::params![commitment_hex, registered_at],
+                    "INSERT OR IGNORE INTO merkle_leaves (commitment_hex, registered_at, tenant_id) \
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![commitment_hex, registered_at, tenant_id],
                 )
                 .map_err(|e| RepoError::Backend(e.to_string()))?;
                 Ok(())
             }
             Repo::Postgres(pool) => {
                 sqlx::query(
-                    "INSERT INTO merkle_leaves (commitment_hex, registered_at) \
-                     VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    "INSERT INTO merkle_leaves (commitment_hex, registered_at, tenant_id) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
                 )
                 .bind(commitment_hex)
                 .bind(registered_at)
+                .bind(tenant_id)
                 .execute(pool)
                 .await
                 .map_err(|e| RepoError::Backend(format!("pg insert merkle leaf: {e}")))?;
@@ -2948,12 +3011,34 @@ mod tests {
     }
 
     #[test]
+    fn test_repo_consent_token_is_tenant_bound() {
+        let repo = build_test_repo("consent_tenant");
+        rt().block_on(async {
+            seed_consent_row(&repo, "req_tenant", "tok_tenant", 0);
+            assert!(matches!(
+                repo.consume_consent_token("attacker", "tok_tenant", 5_000)
+                    .await,
+                Err(RepoError::Replay(_))
+            ));
+            let row = repo
+                .consume_consent_token("default", "tok_tenant", 5_000)
+                .await;
+            assert!(
+                row.is_ok(),
+                "cross-tenant attempt must not consume victim token"
+            );
+        });
+    }
+
+    #[test]
     fn test_repo_consume_consent_token_first_use_returns_row() {
         let repo = build_test_repo("consent_first");
         rt().block_on(async {
             seed_consent_row(&repo, "req_1", "tok_1", 0);
-            let (ki, site, agent, _claims) =
-                repo.consume_consent_token("tok_1", 5_000).await.unwrap();
+            let (ki, site, agent, _claims) = repo
+                .consume_consent_token("default", "tok_1", 5_000)
+                .await
+                .unwrap();
             assert_eq!(ki, "ki-1");
             assert_eq!(site, "site-A");
             assert!(agent.is_none());
@@ -2965,8 +3050,10 @@ mod tests {
         let repo = build_test_repo("consent_replay");
         rt().block_on(async {
             seed_consent_row(&repo, "req_2", "tok_2", 0);
-            repo.consume_consent_token("tok_2", 5_000).await.unwrap();
-            match repo.consume_consent_token("tok_2", 5_000).await {
+            repo.consume_consent_token("default", "tok_2", 5_000)
+                .await
+                .unwrap();
+            match repo.consume_consent_token("default", "tok_2", 5_000).await {
                 Err(RepoError::Replay(s)) => assert!(s.contains("already used")),
                 other => panic!("expected Replay already used, got: {other:?}"),
             }
@@ -2978,7 +3065,7 @@ mod tests {
         let repo = build_test_repo("consent_expired");
         rt().block_on(async {
             seed_consent_row(&repo, "req_3", "tok_3", 100);
-            match repo.consume_consent_token("tok_3", 1_000).await {
+            match repo.consume_consent_token("default", "tok_3", 1_000).await {
                 Err(RepoError::Replay(s)) => assert!(s.contains("expired")),
                 other => panic!("expected Replay expired, got: {other:?}"),
             }
@@ -2992,6 +3079,7 @@ mod tests {
         let repo = build_test_repo("payauth_insert_consume");
         rt().block_on(async {
             repo.insert_payment_authorization(
+                "default",
                 "payauth_1",
                 "agent-1",
                 "jti-1",
@@ -3004,9 +3092,39 @@ mod tests {
             )
             .await
             .expect("insert ok");
-            repo.consume_payment_authorization("payauth_1", 1_001)
+            repo.consume_payment_authorization("default", "payauth_1", 1_001)
                 .await
                 .expect("first consume ok");
+        });
+    }
+
+    #[test]
+    fn test_repo_payment_authorization_is_tenant_bound() {
+        let repo = build_test_repo("payauth_tenant");
+        rt().block_on(async {
+            repo.insert_payment_authorization(
+                "victim",
+                "payauth_tenant",
+                "agent-1",
+                "jti-tenant",
+                1000,
+                "EUR",
+                "M1",
+                "ref_tenant",
+                1_000,
+                9_999_999_999,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                repo.consume_payment_authorization("attacker", "payauth_tenant", 1_001)
+                    .await,
+                Err(RepoError::Replay(_))
+            ));
+            assert!(repo
+                .consume_payment_authorization("victim", "payauth_tenant", 1_001)
+                .await
+                .is_ok());
         });
     }
 
@@ -3015,6 +3133,7 @@ mod tests {
         let repo = build_test_repo("payauth_double");
         rt().block_on(async {
             repo.insert_payment_authorization(
+                "default",
                 "payauth_2",
                 "agent-1",
                 "jti-2",
@@ -3027,10 +3146,13 @@ mod tests {
             )
             .await
             .unwrap();
-            repo.consume_payment_authorization("payauth_2", 1_001)
+            repo.consume_payment_authorization("default", "payauth_2", 1_001)
                 .await
                 .unwrap();
-            match repo.consume_payment_authorization("payauth_2", 1_001).await {
+            match repo
+                .consume_payment_authorization("default", "payauth_2", 1_001)
+                .await
+            {
                 Err(RepoError::Replay(_)) => {}
                 other => panic!("expected Replay, got: {other:?}"),
             }
@@ -3042,6 +3164,7 @@ mod tests {
         let repo = build_test_repo("payauth_dup_insert");
         rt().block_on(async {
             repo.insert_payment_authorization(
+                "default",
                 "payauth_3",
                 "agent-1",
                 "jti-3",
@@ -3056,6 +3179,7 @@ mod tests {
             .unwrap();
             match repo
                 .insert_payment_authorization(
+                    "default",
                     "payauth_3",
                     "agent-2",
                     "jti-3b",
@@ -3093,9 +3217,9 @@ mod tests {
         let repo = build_test_repo("cred_first_claim");
         rt().block_on(async {
             seed_credential_code(&repo, "ki-A");
-            assert!(repo.claim_credential_code("ki-A").await.unwrap());
+            assert!(repo.claim_credential_code("default", "ki-A").await.unwrap());
             assert!(
-                !repo.claim_credential_code("ki-A").await.unwrap(),
+                !repo.claim_credential_code("default", "ki-A").await.unwrap(),
                 "second claim must lose the race"
             );
         });
@@ -3106,10 +3230,12 @@ mod tests {
         let repo = build_test_repo("cred_release_retry");
         rt().block_on(async {
             seed_credential_code(&repo, "ki-B");
-            assert!(repo.claim_credential_code("ki-B").await.unwrap());
-            repo.release_credential_code("ki-B").await.unwrap();
+            assert!(repo.claim_credential_code("default", "ki-B").await.unwrap());
+            repo.release_credential_code("default", "ki-B")
+                .await
+                .unwrap();
             assert!(
-                repo.claim_credential_code("ki-B").await.unwrap(),
+                repo.claim_credential_code("default", "ki-B").await.unwrap(),
                 "after release, claim should succeed again"
             );
         });
@@ -3120,12 +3246,15 @@ mod tests {
         let repo = build_test_repo("cred_select_pair");
         rt().block_on(async {
             seed_credential_code(&repo, "ki-C");
-            let row = repo.select_credential_code("ki-C").await.unwrap();
+            let row = repo
+                .select_credential_code("default", "ki-C")
+                .await
+                .unwrap();
             let (pac, did) = row.expect("row present");
             assert_eq!(pac, "pac_1");
             assert_eq!(did, "did:test:1");
             assert!(repo
-                .select_credential_code("ki-missing")
+                .select_credential_code("default", "ki-missing")
                 .await
                 .unwrap()
                 .is_none());
@@ -3155,13 +3284,44 @@ mod tests {
     fn test_repo_user_credential_upsert_and_select() {
         let repo = build_test_repo("ucred_upsert_sel");
         rt().block_on(async {
-            assert!(repo.select_user_credential("ki-2").await.unwrap().is_none());
-            repo.upsert_user_credential("ki-2", "{\"v\":1}", 1_000)
+            assert!(repo
+                .select_user_credential("default", "ki-2")
+                .await
+                .unwrap()
+                .is_none());
+            repo.upsert_user_credential("default", "ki-2", "{\"v\":1}", 1_000)
                 .await
                 .unwrap();
             assert_eq!(
-                repo.select_user_credential("ki-2").await.unwrap(),
+                repo.select_user_credential("default", "ki-2")
+                    .await
+                    .unwrap(),
                 Some("{\"v\":1}".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn test_repo_user_credential_is_tenant_bound() {
+        let repo = build_test_repo("user_cred_tenant");
+        rt().block_on(async {
+            repo.upsert_user_credential("victim", "ki-shared", "{\"v\":1}", 1_000)
+                .await
+                .unwrap();
+            assert!(repo
+                .select_user_credential("attacker", "ki-shared")
+                .await
+                .unwrap()
+                .is_none());
+            assert!(repo
+                .upsert_user_credential("attacker", "ki-shared", "{\"v\":2}", 2_000)
+                .await
+                .is_err());
+            assert_eq!(
+                repo.select_user_credential("victim", "ki-shared")
+                    .await
+                    .unwrap(),
+                Some("{\"v\":1}".into())
             );
         });
     }
@@ -3170,11 +3330,11 @@ mod tests {
     fn test_repo_user_registration_insert_idempotent() {
         let repo = build_test_repo("ureg_idem");
         rt().block_on(async {
-            repo.insert_user_registration("bank-A", "ki-3", "bank_webhook", 1_000)
+            repo.insert_user_registration("default", "bank-A", "ki-3", "bank_webhook", 1_000)
                 .await
                 .unwrap();
             // Same triple must be silently ignored, not error.
-            repo.insert_user_registration("bank-A", "ki-3", "bank_webhook", 2_000)
+            repo.insert_user_registration("default", "bank-A", "ki-3", "bank_webhook", 2_000)
                 .await
                 .unwrap();
         });
@@ -3186,9 +3346,13 @@ mod tests {
     fn test_repo_merkle_leaf_insert_idempotent() {
         let repo = build_test_repo("merkle_insert_idem");
         rt().block_on(async {
-            repo.insert_merkle_leaf("c0ffee", 1_000).await.unwrap();
+            repo.insert_merkle_leaf("default", "c0ffee", 1_000)
+                .await
+                .unwrap();
             // Duplicate commitment is silently ignored.
-            repo.insert_merkle_leaf("c0ffee", 2_000).await.unwrap();
+            repo.insert_merkle_leaf("default", "c0ffee", 2_000)
+                .await
+                .unwrap();
         });
     }
 

@@ -176,7 +176,9 @@ python3 scripts/demo_real_agent.py --core https://core.<domain> --admin-key ... 
   sits behind Caddy HTTP basic-auth here — fine for a controlled demo, not a
   substitute for real RBAC. Do not remove the basic-auth gate.
 - **Data tier**: single-node SQLite (`SAURON_ACCEPT_SINGLE_NODE_SQLITE=1`). No
-  HA. For a real deployment switch to Postgres (`SAURON_DB_BACKEND=postgres`).
+  HA. The Postgres port is incomplete and must not be presented as an HA
+  upgrade path; production pilots need a dedicated node, monitored backups,
+  and a rehearsed restore until the port and failover tests are complete.
 - **Anchoring**: Solana **devnet** + free OTS calendars. Devnet is not a
   durability guarantee; for a real anchor, fund a mainnet keypair and set
   `SAURON_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com` +

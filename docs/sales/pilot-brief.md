@@ -18,7 +18,7 @@ Write intent and egress policies for one real flow (host/method/path constraints
 Run the 16-attack empirical suite ([redteam/](../../redteam/)) pointed at your instance: replay, body tampering, cross-endpoint reuse, revoked-agent, delegation scope creep, config drift, and the rest. Then improvise — your team tries to get the agent to misbehave through prompt injection while the gateway is in the way. Exit: your own attack log, with each attempt's rejection receipt.
 
 **Week 4 — receipts, audit review, go/no-go.**
-Walk the audit trail with your security team: hash-chain verification, anchored batches checked externally with `ots verify`, STARK statement verification against published image IDs. Joint go/no-go: expand to more agents, or a written list of what would have to change first. Exit: decision memo, both sides keep a copy.
+Walk the audit trail with your security team: hash-chain verification, an OpenTimestamps proof upgraded and verified with its committed preimage (or a Solana transaction checked independently), and STARK statement verification against pinned image IDs. Joint go/no-go: expand to more agents, or a written list of what would have to change first. Exit: decision memo, both sides keep a copy.
 
 ## What we ask from you
 
@@ -36,12 +36,12 @@ Walk the audit trail with your security team: hash-chain verification, anchored 
 ## Success criteria (agreed in week 1, checked in week 4)
 
 - [ ] One real agent flow running fail-closed in a production-like environment.
-- [ ] 16/16 attack suite blocked against the partner's own deployment.
+- [ ] All 16 fail-closed scenarios execute dynamically against the partner deployment, pass, and report zero skips.
 - [ ] At least one improvised injection attempt rejected with a receipt.
 - [ ] Audit trail flowing into the partner's SIEM; chain-head verification passes.
-- [ ] At least one anchored batch externally verified (`ots verify` or Solana explorer).
+- [ ] At least one anchored batch independently verified: upgraded OTS proof plus committed preimage, or confirmed Solana transaction.
 - [ ] False-positive count on the enforced flow at an agreed threshold (target: zero after policy tuning).
-- [ ] Latency overhead on the enforced flow measured and within the agreed budget (single-node reference: p50 2 ms, p99 8 ms at concurrency 1 — [benchmarks](../empirical-comparison.md)).
+- [ ] Latency overhead is measured on the partner's enforced flow and meets a budget agreed before testing. Historical SQLite measurements are context, not an SLA; see [load test](../load-test.md).
 - [ ] Security team has read the [threat model](../threat-model.md) and agrees the documented limits are acceptable for the pilot scope.
 
 Contact: open an issue on the repository or use the contact route in [SECURITY.md](../../SECURITY.md) for anything sensitive.

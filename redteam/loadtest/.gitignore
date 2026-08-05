@@ -1,3 +1,4 @@
 node_modules/
-results/
-package-lock.json
+results/*
+!results/*.json
+!package-lock.json

@@ -16,7 +16,7 @@
 use std::sync::{Arc, RwLock};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     Json,
 };
@@ -338,29 +338,19 @@ pub fn revoke(
 // ─── Admin HTTP handlers (behind SAURON_ANON_RINGS) ────────────────────────
 //
 // Operator-only surface. Registered under `/admin/rings*` with the admin auth
-// middleware. Tenant is taken from the request (operator is global/trusted);
-// the stored `ring_members` rows hold pseudonym points only — no agent_id.
-
-fn default_tenant() -> String {
-    "default".to_string()
-}
+// and tenant middleware. The authenticated request extension is the sole
+// tenant authority; request bodies and query strings cannot select a tenant.
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateRingRequest {
     pub ring_id: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
     #[serde(default)]
     pub rule: RingRule,
 }
 
 #[derive(Deserialize)]
-pub struct TenantQuery {
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
-}
-
-#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MembershipRequest {
     /// Resolve the master public key from a registered agent…
     #[serde(default)]
@@ -368,8 +358,6 @@ pub struct MembershipRequest {
     /// …or supply it directly (hex compressed ristretto).
     #[serde(default)]
     pub agent_public_hex: Option<String>,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
 }
 
 type HandlerResult = Result<Json<Value>, (StatusCode, String)>;
@@ -417,33 +405,34 @@ fn resolve_master_pub(
 /// POST /admin/rings — create or update a ring rule.
 pub async fn create_ring_handler(
     State(state): State<Arc<RwLock<ServerState>>>,
+    Extension(tenant): Extension<crate::tenancy::TenantId>,
     Json(req): Json<CreateRingRequest>,
 ) -> HandlerResult {
     require_enabled()?;
     let now = crate::ajwt_support::now_secs();
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    upsert_ring(&db, &req.tenant_id, &req.ring_id, &req.rule, now)
+    upsert_ring(&db, tenant.as_str(), &req.ring_id, &req.rule, now)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(
-        json!({ "ok": true, "ring_id": req.ring_id, "tenant_id": req.tenant_id }),
+        json!({ "ok": true, "ring_id": req.ring_id, "tenant_id": tenant.as_str() }),
     ))
 }
 
-/// GET /admin/rings?tenant_id= — list rings with member counts.
+/// GET /admin/rings — list rings for the authenticated tenant.
 pub async fn list_rings_handler(
     State(state): State<Arc<RwLock<ServerState>>>,
-    Query(q): Query<TenantQuery>,
+    Extension(tenant): Extension<crate::tenancy::TenantId>,
 ) -> HandlerResult {
     require_enabled()?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let rings =
-        list_rings(&db, &q.tenant_id).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        list_rings(&db, tenant.as_str()).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let out: Vec<Value> = rings
         .into_iter()
         .map(|(ring_id, rule, version)| {
-            let count = member_count(&db, &q.tenant_id, &ring_id).unwrap_or(0);
+            let count = member_count(&db, tenant.as_str(), &ring_id).unwrap_or(0);
             json!({ "ring_id": ring_id, "rule": rule, "version": version, "member_count": count })
         })
         .collect();
@@ -454,6 +443,7 @@ pub async fn list_rings_handler(
 pub async fn subscribe_handler(
     State(state): State<Arc<RwLock<ServerState>>>,
     Path(ring_id): Path<String>,
+    Extension(tenant): Extension<crate::tenancy::TenantId>,
     Json(req): Json<MembershipRequest>,
 ) -> HandlerResult {
     require_enabled()?;
@@ -461,14 +451,14 @@ pub async fn subscribe_handler(
     let now = crate::ajwt_support::now_secs();
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    if get_ring(&db, &req.tenant_id, &ring_id)
+    if get_ring(&db, tenant.as_str(), &ring_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .is_none()
     {
         return Err((StatusCode::NOT_FOUND, "ring not found".into()));
     }
-    let master = resolve_master_pub(&db, &req.tenant_id, &req)?;
-    let point = subscribe(&db, &req.tenant_id, &trapdoor, &master, &ring_id, now)
+    let master = resolve_master_pub(&db, tenant.as_str(), &req)?;
+    let point = subscribe(&db, tenant.as_str(), &trapdoor, &master, &ring_id, now)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     {
         let st = state.read().unwrap();
@@ -483,14 +473,15 @@ pub async fn subscribe_handler(
 pub async fn revoke_handler(
     State(state): State<Arc<RwLock<ServerState>>>,
     Path(ring_id): Path<String>,
+    Extension(tenant): Extension<crate::tenancy::TenantId>,
     Json(req): Json<MembershipRequest>,
 ) -> HandlerResult {
     require_enabled()?;
     let trapdoor = operator_trapdoor().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let master = resolve_master_pub(&db, &req.tenant_id, &req)?;
-    let removed = revoke(&db, &req.tenant_id, &trapdoor, &master, &ring_id)
+    let master = resolve_master_pub(&db, tenant.as_str(), &req)?;
+    let removed = revoke(&db, tenant.as_str(), &trapdoor, &master, &ring_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     {
         let st = state.read().unwrap();
@@ -499,16 +490,16 @@ pub async fn revoke_handler(
     Ok(Json(json!({ "ring_id": ring_id, "revoked": removed })))
 }
 
-/// GET /admin/rings/{ring_id}/members?tenant_id= — member pseudonym points.
+/// GET /admin/rings/{ring_id}/members — authenticated-tenant member points.
 pub async fn members_handler(
     State(state): State<Arc<RwLock<ServerState>>>,
     Path(ring_id): Path<String>,
-    Query(q): Query<TenantQuery>,
+    Extension(tenant): Extension<crate::tenancy::TenantId>,
 ) -> HandlerResult {
     require_enabled()?;
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let points = list_member_points(&db, &q.tenant_id, &ring_id)
+    let points = list_member_points(&db, tenant.as_str(), &ring_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let hexes: Vec<String> = points
         .iter()
@@ -660,6 +651,27 @@ mod tests {
         assert_ne!(
             pa, pb,
             "same agent must have unlinkable points across rings"
+        );
+    }
+
+    #[test]
+    fn admin_payloads_cannot_select_a_tenant() {
+        let create = serde_json::from_value::<CreateRingRequest>(serde_json::json!({
+            "ring_id": "ring:x",
+            "tenant_id": "victim"
+        }));
+        assert!(
+            create.is_err(),
+            "tenant_id must come from authenticated context"
+        );
+
+        let membership = serde_json::from_value::<MembershipRequest>(serde_json::json!({
+            "agent_id": "agent:x",
+            "tenant_id": "victim"
+        }));
+        assert!(
+            membership.is_err(),
+            "tenant_id must come from authenticated context"
         );
     }
 }

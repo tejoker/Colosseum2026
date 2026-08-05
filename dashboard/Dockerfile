@@ -1,9 +1,9 @@
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM node:20-bookworm-slim AS builder
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 WORKDIR /app
 
 # Install deps against the lockfile for reproducible builds.
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 RUN npm ci
 
 # Build the Next.js app with `output: "standalone"` (see next.config.ts).
@@ -11,7 +11,7 @@ COPY . .
 RUN npm run build
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM node:20-bookworm-slim AS runner
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production

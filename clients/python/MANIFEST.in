@@ -1,0 +1,5 @@
+# Platform wheels receive a freshly built, target-specific binary in release
+# CI. The source distribution must remain architecture-neutral and must not
+# accidentally ship a developer workstation binary.
+exclude sauronid_client/_bin/agent-action-tool
+exclude sauronid_client/_bin/agent-action-tool.exe

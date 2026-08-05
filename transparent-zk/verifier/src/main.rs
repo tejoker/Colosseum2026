@@ -23,6 +23,16 @@ fn pinned_image_id(program_id: &str) -> Result<Digest, Box<dyn std::error::Error
     Ok(Digest::try_from(bytes.as_slice())?)
 }
 
+fn require_native_stark(receipt: &Receipt) -> Result<(), Box<dyn std::error::Error>> {
+    match &receipt.inner {
+        InnerReceipt::Succinct(_) => Ok(()),
+        InnerReceipt::Composite(_) => Err("Composite receipt rejected".into()),
+        InnerReceipt::Groth16(_) => Err("Groth16 receipt rejected".into()),
+        InnerReceipt::Fake(_) => Err("fake receipt rejected".into()),
+        _ => Err("unknown receipt type rejected pending review".into()),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args_os()
         .nth(1)
@@ -46,13 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("decoded receipt exceeds verifier size limit".into());
     }
     let receipt: Receipt = serde_json::from_slice(&receipt_json)?;
-    match &receipt.inner {
-        InnerReceipt::Succinct(_) => {}
-        InnerReceipt::Composite(_) => return Err("Composite receipt rejected".into()),
-        InnerReceipt::Groth16(_) => return Err("Groth16 receipt rejected".into()),
-        InnerReceipt::Fake(_) => return Err("fake receipt rejected".into()),
-        _ => return Err("unknown receipt type rejected pending review".into()),
-    }
+    require_native_stark(&receipt)?;
     receipt
         .verify(image_id)
         .map_err(|e| std::io::Error::other(format!("receipt verification failed: {e:?}")))?;
@@ -88,5 +92,23 @@ mod tests {
             manifest["programs"][ACTION_POLICY_PROGRAM_ID],
             serde_json::Value::String(ACTION_POLICY_IMAGE_ID_HEX.into())
         );
+    }
+
+    #[test]
+    fn fake_and_groth16_receipts_fail_closed() {
+        use risc0_zkvm::{FakeReceipt, Groth16Receipt, MaybePruned, ReceiptClaim};
+
+        let claim: MaybePruned<ReceiptClaim> = MaybePruned::Pruned(Digest::ZERO);
+        let fake = Receipt::new(
+            InnerReceipt::Fake(FakeReceipt::new(claim.clone())),
+            Vec::new(),
+        );
+        assert!(require_native_stark(&fake).is_err());
+
+        let groth16 = Receipt::new(
+            InnerReceipt::Groth16(Groth16Receipt::new(Vec::new(), claim, Digest::ZERO)),
+            Vec::new(),
+        );
+        assert!(require_native_stark(&groth16).is_err());
     }
 }

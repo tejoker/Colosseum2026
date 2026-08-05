@@ -4,6 +4,13 @@ Operator-facing guide for the four root secrets that bootstrap a SauronID
 deployment. Companion to `docs/operations.md` (deployment knobs) and
 `docs/key-rotation.md` (in-flight rotation).
 
+For a fresh local production-shaped set, run
+`scripts/ops/rotate-local-secrets.sh`. It atomically replaces the ignored
+`prod.secrets.env` with mode `0600` and never prints values. That only rotates
+the local file: production rotation remains incomplete until the deployment
+secret manager is updated, prior values are revoked, and outstanding sessions
+and tokens are invalidated.
+
 ## What needs to be a secret
 
 | Env var | Role | Rotation cost |

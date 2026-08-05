@@ -804,7 +804,19 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
     // and the preflight (OPTIONS) path.
     {
         const evilOrigin = "http://attacker.example.com";
+        const allowedOrigin = process.env.A13_ALLOWED_ORIGIN || "http://localhost:3000";
         const t0 = Date.now();
+        // Positive control: the configured development origin must receive ACAO.
+        // Otherwise an entirely absent/broken CORS layer could masquerade as a pass.
+        const allowed = await fetch(`${baseUrl}/admin/stats`, {
+            method: "OPTIONS",
+            headers: {
+                origin: allowedOrigin,
+                "access-control-request-method": "GET",
+                "access-control-request-headers": "x-admin-key",
+            },
+        });
+        const acaoAllowed = allowed.headers.get("access-control-allow-origin") || "";
         // 1) Preflight (OPTIONS) — disallowed origin must not be reflected.
         const preflight = await fetch(`${baseUrl}/admin/stats`, {
             method: "OPTIONS",
@@ -823,7 +835,8 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
         const acaoActual = actual.headers.get("access-control-allow-origin") || "";
         const ms = Date.now() - t0;
         const reflected = acaoPre === evilOrigin || acaoActual === evilOrigin || acaoPre === "*" || acaoActual === "*";
-        const observed = reflected ? "allowed" : "blocked";
+        const positiveControl = acaoAllowed === allowedOrigin;
+        const observed = !reflected && positiveControl ? "blocked" : "allowed";
         record(
             out,
             "A13",
@@ -831,10 +844,10 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
             "blocked",
             observed,
             ms,
-            `preflight_status=${preflight.status} preflight_ACAO="${acaoPre}" actual_status=${actual.status} actual_ACAO="${acaoActual}"`,
+            `allowed_ACAO="${acaoAllowed}" preflight_status=${preflight.status} evil_preflight_ACAO="${acaoPre}" actual_status=${actual.status} evil_actual_ACAO="${acaoActual}"`,
             {
                 dynamic: true,
-                evidence: `Origin: ${evilOrigin} → ACAO absent / not echoed → browser would block (CorsLayer.allow_origin allowlist)`,
+                evidence: `positive control ${allowedOrigin} → ACAO echoed; evil ${evilOrigin} → ACAO absent / not echoed`,
             }
         );
     }
@@ -1186,10 +1199,20 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
         // Welch t-like denominator: pooled stddev of the two means.
         const seDiff = Math.sqrt(s1.std ** 2 / s1.n + s2.std ** 2 / s2.n);
         const tStat = meanDiff / Math.max(seDiff, 1e-9);
+        // Analysis negative control: the exact statistic must flag a deliberately
+        // separated distribution, or a noisy/buggy detector could always pass.
+        const controlA = trimmedStats(Array.from({ length: 200 }, (_, i) => 100 + (i % 5)));
+        const controlB = trimmedStats(Array.from({ length: 200 }, (_, i) => 300 + (i % 5)));
+        const controlDiff = Math.abs(controlA.mean - controlB.mean);
+        const controlSe = Math.sqrt(
+            controlA.std ** 2 / controlA.n + controlB.std ** 2 / controlB.n
+        );
+        const controlT = controlDiff / Math.max(controlSe, 1e-9);
+        const detectorControlPassed = controlT >= 3 && controlDiff >= 50;
         // Threshold: |t| < 3 → no statistically significant timing gap at ~99.7% CI.
         // We also require the absolute mean-diff to be small in µs terms (< 50µs)
         // to remain meaningful even when both groups have wide network-induced std.
-        const ok = tStat < 3 && meanDiff < 50;
+        const ok = detectorControlPassed && tStat < 3 && meanDiff < 50;
         record(
             out,
             "A15",
@@ -1197,7 +1220,7 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
             "blocked",
             ok ? "blocked" : "allowed",
             ms,
-            `early_mean=${s1.mean.toFixed(2)}µs σ=${s1.std.toFixed(2)} | late_mean=${s2.mean.toFixed(2)}µs σ=${s2.std.toFixed(2)} | Δ=${meanDiff.toFixed(2)}µs t=${tStat.toFixed(2)}`,
+            `early_mean=${s1.mean.toFixed(2)}µs σ=${s1.std.toFixed(2)} | late_mean=${s2.mean.toFixed(2)}µs σ=${s2.std.toFixed(2)} | Δ=${meanDiff.toFixed(2)}µs t=${tStat.toFixed(2)} | detector_control_t=${controlT.toFixed(2)}`,
             {
                 dynamic: true,
                 evidence: `Welch-style |t|=${tStat.toFixed(2)} (<3 ⇒ no oracle); subtle::ConstantTimeEq walks full sig regardless of first mismatch`,
@@ -1271,6 +1294,7 @@ async function main() {
     const passed = results.filter((r) => r.pass).length;
     const total = results.length;
     const skipped = results.filter((r) => r.detail?.startsWith("skipped") || r.detail?.startsWith("not dynamically testable")).length;
+    const dynamic = results.filter((r) => r.dynamic === true).length;
 
     console.log("┌─────┬──────────────────────────────────────────────────────────────────┬──────────┬──────────┬─────┐");
     console.log("│ id  │ attack                                                            │ expected │ observed │ ms  │");
@@ -1289,7 +1313,8 @@ async function main() {
     writeFileSync(reportPath, JSON.stringify({ results, passed, total, skipped, generated_at: new Date().toISOString() }, null, 2));
     console.log(`report → ${reportPath}`);
 
-    if (passed + skipped < total) {
+    // Missing dynamic evidence is a release failure, not a passing skip.
+    if (passed !== total || skipped !== 0 || dynamic !== total) {
         process.exit(1);
     }
 }

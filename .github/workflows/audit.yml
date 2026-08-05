@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.91.1
 
       - name: Cache cargo registry + advisory-db
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -31,7 +33,7 @@ jobs:
             cargo-audit-${{ runner.os }}-
 
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.1
 
       - name: Audit core, customer verifier and prover
         run: bash scripts/ci/audit-rust.sh
@@ -97,7 +99,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.22.10"
           cache: false
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
       - working-directory: clients/go/sauronid

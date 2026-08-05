@@ -1,0 +1,16 @@
+{
+  "status": "pending",
+  "reviewed_commit": "PENDING",
+  "reviewer_organization": "PENDING",
+  "report_sha256": "PENDING",
+  "reviewer_public_key_pem": "PENDING",
+  "statement_signature_b64": "PENDING",
+  "scope": {
+    "crypto_protocols": false,
+    "deployment_penetration_test": false
+  },
+  "open_findings": {
+    "critical": -1,
+    "high": -1
+  }
+}
