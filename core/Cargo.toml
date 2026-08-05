@@ -19,7 +19,7 @@ axum = "0.8.8"
 tokio = { version = "1.49.0", features = ["full"] }
 reqwest = { version = "0.13.2", features = ["json", "blocking"] }
 hex = "0.4.3"
-tower-http = { version = "0.6.8", features = ["cors", "trace"] }
+tower-http = { version = "0.6.8", features = ["catch-panic", "cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 prometheus = { version = "0.13", default-features = false }

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use axum::{
-    extract::{Json, Path, Query, State},
+    extract::{Extension, Json, Path, State},
     http::StatusCode,
 };
 use rusqlite::{params, Connection};
@@ -215,10 +215,6 @@ pub fn list_ring_usage(
 
 // ─── HTTP handlers ───────────────────────────────────────────────────────────
 
-fn default_tenant() -> String {
-    "default".to_string()
-}
-
 #[derive(Deserialize)]
 pub struct RecordUsageRequest {
     pub receipt_id: String,
@@ -228,12 +224,6 @@ pub struct RecordUsageRequest {
     pub input_tokens: i64,
     #[serde(default)]
     pub output_tokens: i64,
-}
-
-#[derive(Deserialize)]
-pub struct TenantQuery {
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
 }
 
 /// POST /agent/usage — report token usage for a prior anon action receipt.
@@ -267,11 +257,11 @@ pub async fn record_usage_handler(
     })))
 }
 
-/// GET /admin/rings/{ring_id}/usage?tenant_id= — per-pseudonym usage totals.
+/// GET /admin/rings/{ring_id}/usage — authenticated-tenant usage totals.
 pub async fn ring_usage_handler(
     State(state): State<Arc<RwLock<ServerState>>>,
     Path(ring_id): Path<String>,
-    Query(q): Query<TenantQuery>,
+    Extension(tenant): Extension<crate::tenancy::TenantId>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     if !crate::rings::anon_rings_enabled() {
         return Err((
@@ -281,7 +271,7 @@ pub async fn ring_usage_handler(
     }
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
-    let rows = list_ring_usage(&db, &q.tenant_id, &ring_id)
+    let rows = list_ring_usage(&db, tenant.as_str(), &ring_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let out: Vec<Value> = rows
         .into_iter()

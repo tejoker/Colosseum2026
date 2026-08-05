@@ -1,0 +1,11 @@
+{
+  "release_tag": "v0.2.0",
+  "components": {
+    "core": "0.2.0",
+    "python": "0.2.0",
+    "agentic_npm": "2.0.0",
+    "agent_action_tool_npm": "0.1.0"
+  },
+  "supported_topology": "single-node-sqlite",
+  "high_availability": false
+}

@@ -282,6 +282,30 @@ mod tests {
     }
 
     #[test]
+    fn fake_and_groth16_receipts_are_rejected_before_verification() {
+        use risc0_zkvm::{sha::Digest, FakeReceipt, Groth16Receipt, MaybePruned, ReceiptClaim};
+
+        let claim: MaybePruned<ReceiptClaim> = MaybePruned::Pruned(Digest::ZERO);
+        let fake = Receipt::new(
+            InnerReceipt::Fake(FakeReceipt::new(claim.clone())),
+            Vec::new(),
+        );
+        assert!(matches!(
+            require_native_stark(&fake),
+            Err(TransparentProofError::Unsupported(_))
+        ));
+
+        let groth16 = Receipt::new(
+            InnerReceipt::Groth16(Groth16Receipt::new(Vec::new(), claim, Digest::ZERO)),
+            Vec::new(),
+        );
+        assert!(matches!(
+            require_native_stark(&groth16),
+            Err(TransparentProofError::Unsupported(_))
+        ));
+    }
+
+    #[test]
     fn route_cap_covers_the_largest_encoded_receipt() {
         // Standard base64 expands by at most 4/3 (rounded to one quartet).
         let decoded_max = std::hint::black_box(MAX_RECEIPT_JSON_BYTES);

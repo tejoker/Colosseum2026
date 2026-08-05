@@ -2,7 +2,7 @@
 
 This document is an honest, evidence-backed comparison. Every SauronID claim has a runnable test; every peer-system claim cites the published spec or vendor documentation.
 
-**The headline claim is precise:** on the 16-attack security correctness benchmark, SauronID has the highest score (16/16) of any system surveyed. **It is not a claim that SauronID "beats" peer systems on every dimension** — peers win on standardisation, ecosystem, compliance certs, and global edge latency. A combined buyer scorecard is at the bottom of this doc.
+This is a project-authored regression matrix, not an independent benchmark or a proof of superiority. Its useful claim is narrow: in the dated checked-in run, the configured SauronID instance rejected all 16 modeled attacks. The release workflow now requires every scenario to execute dynamically with zero skips.
 
 ## Threat model
 
@@ -16,7 +16,9 @@ A deployed AI agent acts on behalf of a human or system. The attacker's goals ar
 ## 16-attack matrix
 
 Run live: `SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh` (or directly `node dist/scenarios/empirical-suite.js`).
-Latest result on commit at the time of writing: **16/16 blocked**.
+The checked-in result is dated evidence only. For a release, regenerate it from
+the tagged commit in fail-closed CI; all 16 scenarios must be dynamic and pass
+with zero skips.
 
 | ID  | Attack | SauronID | Verifier |
 |-----|--------|:--------:|----------|
@@ -33,7 +35,7 @@ Latest result on commit at the time of writing: **16/16 blocked**.
 | A11 | TOCTOU concurrent claim of consent token | ✅ blocked | Atomic `UPDATE WHERE token_used=0` (main.rs:1108-1148); same pattern on payment auth + credential codes + bank nonces. |
 | A12 | Rate limit on /agent/register | ✅ blocked | `risk::check_and_increment` per human_key_image; default prod limit 20/window. |
 | A13 | CORS empty-origins fallback | ✅ blocked | Server hard-panics at startup if `SAURON_ALLOWED_ORIGINS` resolves to no valid origins (main.rs:133-139). |
-| A14 | Audit-log integrity (after-the-fact tampering) | ✅ blocked | Merkle commitments anchored to **Bitcoin** via OpenTimestamps + **Solana** via Memo Program. Externally verifiable via `ots verify` and `solana getTransaction`. |
+| A14 | Audit-log integrity (after-the-fact tampering) | ✅ blocked | Verify the Merkle path and hash chain, then independently check an upgraded OTS proof with its committed preimage or the confirmed Solana transaction. This proves immutability after anchoring, not truth or completeness outside the protected batch. |
 | A15 | Timing oracle on session HMAC | ✅ blocked | `subtle::ConstantTimeEq` on byte slices in `verify_user_session` (main.rs + agent.rs). |
 
 ## Comparison vs peer systems
@@ -95,29 +97,14 @@ To replicate **all nine** with peer systems you assemble: OAuth IdP + DPoP middl
 
 ## Latency
 
-Single-node, in-process, hot cache, on `/agent/payment/authorize` with the **full call-sig stack** (per-call sig verify + body-bound digest + nonce consume + agent lookup + config-digest constant-time compare + payment auth issuance + HMAC session check). Local SQLite, default config. Numbers re-measured after the HMAC + config-digest additions:
-
-```
-conc=1   n=100   rps=413   p50=2ms   p95=5ms   p99=7ms
-conc=5   n=200   rps=687   p50=7ms   p95=11ms  p99=12ms
-conc=10  n=200   rps=707   p50=14ms  p95=20ms  p99=23ms
-conc=20  n=200   rps=669   p50=29ms  p95=34ms  p99=38ms
-```
-
-The per-call config-digest check (constant-time compare against the registered `agents.agent_checksum`) added zero measurable overhead. p99 at higher concurrency is actually *better* than the previous measurement because the SQLite WAL behaviour was tuned during the schema additions.
-
-Reference points (published / observed):
-
-| System | p50 | p99 |
-|---|---|---|
-| **SauronID, conc=1** | **2 ms** | **8 ms** |
-| **SauronID, conc=10** | **13 ms** | **25 ms** |
-| Auth0 OAuth introspection (single region) | ~5-10 ms | ~50 ms |
-| AWS IAM AssumeRole | ~30 ms | ~100 ms |
-| Cloudflare Access | <10 ms | <50 ms (global edge) |
-| Ory Hydra (single node, Postgres) | ~3-5 ms | ~30 ms |
-
-Honest read: SauronID matches Ory Hydra single-node and beats AWS IAM round-trip latency. It's **slower than Cloudflare Access globally** because we don't have a global edge network. SQLite write contention shows up at conc=20+ (p99 climbs from 25 → 70 ms). Postgres swap (Phase 3) lifts the write-lock ceiling.
+The authoritative measurements are the raw JSON under
+`redteam/loadtest/results/` and [the load-test report](load-test.md). On the
+recorded machine, signed egress at concurrency 4 measured p50 4.33 ms / p99
+39.16 ms. At concurrency 16 over 15 minutes it measured p50 16.5 ms / p99
+145.5 ms, while minute-bucket p99 degraded from 105.7 ms to 301.5 ms as the
+SQLite write set grew. These results are historical engineering evidence, not
+an SLA and not a valid cross-vendor comparison. Buyers must reproduce the test
+on their target hardware, policy set, database, and network.
 
 ## What this means for adoption
 
@@ -157,8 +144,10 @@ SAURON_REQUIRE_CALL_SIG=1 \
 SAURON_CORE_URL=http://127.0.0.1:3001 \
 node dist/scenarios/empirical-suite.js
 
-# Latency benchmark
-node /tmp/bench-callsig.mjs    # script in this commit's /tmp directory
+# Load benchmark (configuration and reproducible runner)
+cd loadtest
+npm ci
+npm start
 ```
 
 Result file: `redteam/empirical-results.json`. Re-run after any security-sensitive change.
@@ -169,32 +158,32 @@ This is the table to use in pitches and procurement reviews. Each row is a dimen
 
 | Dimension | SauronID | Best-in-class peer | Verdict |
 |---|---|---|---|
-| **Security-correctness score (16-attack suite)** | **16/16** | DPoP+OAuth: ~10/16 (no body sig, no intent leash, no on-chain audit) | **SauronID wins.** Defensible. |
+| **Project regression suite** | Release requires 16/16 dynamic, zero skips | Peer systems were not executed by this harness | **No cross-vendor score claim.** |
 | **Headline differentiator** | A-JWT + DPoP body sig + JTI + per-call nonce + intent leash + delegation subset + atomic TOCTOU + on-chain anchor in **one binary, fail-closed** | Closest stack equivalent: Auth0 + custom DPoP middleware + custom anchor + custom replay store (does not exist as a single product) | **SauronID wins on combination.** |
 | **Standardisation / interop** | Custom protocol; one Rust binary; one TS / Python client | DPoP is RFC 9449, dozens of vetted libraries, every OAuth IdP supports it | **DPoP wins.** SauronID has no IETF presence yet. |
 | **Ecosystem (libraries, IDE, docs)** | 1 Python client, 1 TS client, 0 Java/Go/Swift/Kotlin | Auth0 / AWS: 30+ official SDKs, IDE plugins, vast Stack Overflow corpus | **Vendors win.** |
 | **Compliance certs (SOC2, ISO, HIPAA)** | None yet | Auth0 / AWS / Okta: SOC2 + ISO 27001 + HIPAA BAA + PCI DSS, Big Four–audited | **Vendors win.** Procurement blocker. |
 | **Global edge latency (Sydney → Frankfurt)** | ~280 ms RTT to single VM | Cloudflare Access: ~5 ms RTT (300+ POPs) | **Cloudflare wins.** |
-| **Single-region p50 latency** | 2-13 ms (full call-sig stack) | Auth0 OAuth introspection: 5-10 ms; AWS AssumeRole: ~30 ms | **SauronID ties / wins.** |
+| **Single-region latency** | Historical local results documented with raw JSON; no SLA | Vendor measurements use different workloads and topology | **Measure in the buyer environment.** |
 | **Multi-region failover** | Operator builds it | AWS / Auth0 ship it | **Vendors win.** |
 | **DDoS protection** | Whatever your edge proxy provides | Cloudflare: terabit-scale | **Cloudflare wins.** |
 | **Self-hostable** | ✅ one binary | ❌ Auth0 / AWS / Okta are SaaS-only (or hideously expensive on-prem editions) | **SauronID wins.** |
 | **Vendor lock-in** | None | Total | **SauronID wins.** |
-| **Audit log integrity (tamper-evident)** | Bitcoin OTS + Solana Memo, externally verifiable via `ots verify` and Solana Explorer | Vendor-internal logs; trust the vendor | **SauronID wins.** |
+| **Audit log integrity (tamper-evident)** | Merkle/hash-chain verification plus upgraded OTS proof with preimage or confirmed Solana transaction | Varies by vendor | **Feature comparison only; not evidence of source truth/completeness.** |
 | **Per-agent body-bound replay protection** | ✅ enforced on every protected route | DPoP: yes; OAuth/Auth0/AWS: typically no | **SauronID wins.** |
 | **Intent leash (server-evaluated scope subset on delegation)** | ✅ enforced | GNAP: yes (no production impl); others: no | **SauronID wins (vs deployed peers).** |
 | **Hardware attestation chain validation** | Attestation slot exists; AWS Nitro chain validation only | AWS Nitro Enclaves: native | **AWS wins for AWS-only deployments.** |
 | **Ease of integrating Anthropic Computer Use / OpenAI Assistants / LangChain** | Drop-in adapters in `clients/python/sauronid_client/adapters.py` | None of the vendors ship adapters; you write them | **SauronID wins.** |
-| **Quickstart cold-clone-to-passing** | `./quickstart.sh` — ~60 seconds, prints GREEN | Auth0: ~5 minutes (signup, paste client ID, dashboard) | **Auth0 wins on dev experience for first hello-world**, SauronID wins on "no signup, no vendor account". |
+| **Quickstart cold-clone-to-passing** | `./quickstart.sh` — typically 15–45 minutes for a cold source build, then prints GREEN | Auth0: ~5 minutes (signup, paste client ID, dashboard) | **Auth0 wins on dev experience for first hello-world**, SauronID wins on "no signup, no vendor account". |
 | **Production maturity (operator-week-to-deploy)** | ~1 senior week (vault, Postgres, TLS, monitoring, integration glue) | Auth0 / AWS: minutes for a hosted tenant | **Vendors win.** |
 
 ### Three honest claims a SauronID seller can make
 
-1. **"SauronID has the highest score on the 16-attack security correctness benchmark of any AI-agent binding system surveyed (16/16). DPoP+OAuth is closest at ~10/16."** ✅ Defensible with a re-runnable suite.
+1. **"Our fail-closed release gate executes 16 modeled attacks dynamically and permits zero skips; you can rerun it on the exact release."** This is defensible when the tagged gate is green.
 
 2. **"SauronID is the only stack that ships per-call body-bound signing, intent-leashed delegation, atomic single-use replay protection, and on-chain audit anchoring in one self-hostable binary."** ✅ Defensible with a feature inventory.
 
-3. **"SauronID is the only of these systems that gives you tamper-evident audit anchored on Bitcoin and Solana — externally verifiable without trusting SauronID."** ✅ Defensible by reproducing the proof endpoint.
+3. **"A verifier can check a finalized protected batch against pinned STARK image IDs and independently inspect upgraded OTS or confirmed Solana anchoring."** This does not prove source truth or events that bypassed the protected path.
 
 ### Three claims a SauronID seller should NOT make
 

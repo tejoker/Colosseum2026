@@ -11,7 +11,7 @@ Your LLM agents call real APIs with real credentials. Prompt injection, hostile 
 
 - **Signed calls.** Every agent request is Ed25519-signed over tenant, method, path, canonical query, body digest, timestamp, one-use nonce, and the agent's registered config digest. A replayed nonce, tampered body, cross-endpoint reuse, or drifted system prompt/tool list is rejected server-side with a machine-readable error.
 - **Server-side policy.** Intent leashes, delegation scope-subset checks, per-agent and per-human rate limits, byte and amount caps, and an egress capability gateway with exact host/method/path constraints, one-use capabilities, and SSRF/redirect refusal — evaluated by an independent gateway, never trusted to the agent process.
-- **Verifiable receipts.** Actions land in a hash-chained audit log; Merkle commitments are anchored to Bitcoin (OpenTimestamps) and Solana, and transparent RISC Zero STARK statements verify locally against published image IDs. Your auditor checks the trail without trusting us — `ots verify` is enough.
+- **Verifiable receipts.** Actions land in a hash-chained audit log; Merkle commitments can be anchored to Bitcoin (OpenTimestamps) and Solana, and transparent RISC Zero STARK statements verify locally against pinned image IDs. The exported OTS material must be paired with its committed preimage and upgraded before independent Bitcoin verification; a receipt export alone is not proof of completeness or truth.
 
 ## Why not just X
 
@@ -28,15 +28,15 @@ Where peers win outright: standardisation, ecosystem size, compliance certificat
 
 ## Proof points
 
-- **16-attack suite, 16/16 blocked in fail-closed mode** — forged signatures, JTI and nonce replay, body tampering, cross-endpoint replay, timestamp skew, wrong-key, revoked-agent, delegation scope creep, TOCTOU double-spend, timing oracles, audit tampering, config drift. 10 attacks verified by live dynamic execution, 6 by source-code review against canonical patterns (dynamic harness for those is on the red-team roadmap).
+- **Fail-closed regression suite:** the release gate requires all 16 scenarios to execute dynamically, pass, and report zero skips. Treat the checked-in result as a dated regression artifact—not an independent benchmark or a guarantee against attacks outside those scenarios.
 - **You run it yourself, one command:**
 
   ```bash
   SAURON_REQUIRE_CALL_SIG=1 ./scripts/dev/quickstart.sh
   ```
 
-- **Latency, full signature stack:** p50 2 ms / p99 8 ms at concurrency 1; p50 13 ms / p99 25 ms at concurrency 10 (single node, local SQLite). Comparable to a single-node Ory Hydra; slower than a global edge network, because it is not one.
-- Nearest comparable stack (DPoP + OAuth) scores ~10/16 on the same suite; methodology and per-attack verifiers in [docs/empirical-comparison.md](../empirical-comparison.md).
+- **Measured single-node SQLite reference:** at concurrency 4, signed egress calls measured p50 4.33 ms / p99 39.16 ms; at concurrency 16 over 15 minutes, p50 16.5 ms / p99 145.5 ms, with minute-bucket p99 degrading from 105.7 ms to 301.5 ms. These are historical local measurements, not an SLA; reproduce them on the target deployment.
+- The scenario comparison is a project-authored test matrix, not an independent ranking of competing products.
 
 ## Deployment
 

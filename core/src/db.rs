@@ -32,7 +32,10 @@ pub fn open_db_at(path: &str, pool_size: u32) -> DbHandle {
             PRAGMA journal_mode = WAL;
             PRAGMA foreign_keys = ON;
             PRAGMA busy_timeout = 5000;
-            PRAGMA synchronous = NORMAL;
+            -- FULL makes a committed transaction durable across an OS crash
+            -- or power loss. This costs latency but the audit/nonce ledgers
+            -- are security state and must not acknowledge a losable commit.
+            PRAGMA synchronous = FULL;
             ",
         )
     });
@@ -738,7 +741,10 @@ pub fn init_schema(conn: &Connection) {
             tenant_id   TEXT NOT NULL DEFAULT 'default',
             event_type  TEXT NOT NULL,
             event_json  TEXT NOT NULL,
-            timestamp   INTEGER NOT NULL
+            timestamp   INTEGER NOT NULL,
+            seq         INTEGER,
+            prev_hash   TEXT NOT NULL DEFAULT '',
+            entry_hash  TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_security_audit_tenant_ts
             ON security_audit_log(tenant_id, timestamp);
@@ -892,6 +898,15 @@ pub fn init_schema(conn: &Connection) {
         "ALTER TABLE agent_action_anchors ADD COLUMN leaf_version INTEGER NOT NULL DEFAULT 1",
         [],
     );
+    let _ = conn.execute("ALTER TABLE security_audit_log ADD COLUMN seq INTEGER", []);
+    let _ = conn.execute(
+        "ALTER TABLE security_audit_log ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE security_audit_log ADD COLUMN entry_hash TEXT NOT NULL DEFAULT ''",
+        [],
+    );
 
     let run_revoke_migration = std::env::var("SAURON_REVOKE_LEGACY_DELEGATED_NONBANK")
         .map(|v| {
@@ -1012,6 +1027,88 @@ pub fn init_schema(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_spend_log_tenant ON spend_log(tenant_id, policy_id, agent_id, recorded_at)",
     ];
     for sql in tenant_indexes {
-        let _ = conn.execute(sql, []);
+        conn.execute(sql, [])
+            .expect("tenant index migration failed");
+    }
+
+    // Earlier releases made idempotent ALTERs by ignoring duplicate-column
+    // errors. Never let that also hide a real migration failure: validate the
+    // complete security-critical shape before recording the schema version.
+    for (table, columns) in [
+        (
+            "agents",
+            &["tenant_id", "pop_public_key_b64u", "ring_key_image_hex"] as &[&str],
+        ),
+        (
+            "consent_log",
+            &["tenant_id", "consent_token", "consent_expires_at"] as &[&str],
+        ),
+        (
+            "agent_payment_authorizations",
+            &["tenant_id", "consumed"] as &[&str],
+        ),
+        ("credential_codes", &["tenant_id", "claimed"] as &[&str]),
+        (
+            "user_credentials",
+            &["tenant_id", "credential_json"] as &[&str],
+        ),
+        (
+            "user_registrations",
+            &["tenant_id", "user_key_image_hex"] as &[&str],
+        ),
+        ("merkle_leaves", &["tenant_id", "commitment_hex"] as &[&str]),
+        (
+            "security_audit_log",
+            &["seq", "prev_hash", "entry_hash"] as &[&str],
+        ),
+    ] {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+            .unwrap_or_else(|e| panic!("cannot inspect migrated table {table}: {e}"));
+        let present: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap_or_else(|e| panic!("cannot read migrated table {table}: {e}"))
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| panic!("cannot decode migrated table {table}: {e}"));
+        for column in columns {
+            assert!(
+                present.contains(*column),
+                "database migration incomplete: {table}.{column} is missing"
+            );
+        }
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             version INTEGER PRIMARY KEY,
+             applied_at INTEGER NOT NULL
+         );
+         INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+         VALUES (1, CAST(strftime('%s','now') AS INTEGER));",
+    )
+    .expect("schema version migration failed");
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    #[test]
+    fn persistent_connections_use_full_synchronous_durability() {
+        let path = std::env::temp_dir().join(format!(
+            "sauron-durability-{}-{}.sqlite",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let db = open_db_at(path.to_str().unwrap(), 1);
+        let conn = db.lock().expect("connection");
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous pragma");
+        assert_eq!(synchronous, 2, "SQLite synchronous must be FULL");
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 }

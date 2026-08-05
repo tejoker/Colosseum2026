@@ -7,15 +7,15 @@ Register an agent and make a signed call from Node 18+.
 - A running core. From the repo root: `docker compose up`
   (core on `http://localhost:3001`, dashboard on `http://localhost:3000`,
   dev login `dev`/`dev`, seeded demo users like `alice@sauron.dev`).
-- Ring-key generation uses the `agent-action-tool` binary — install the
-  prebuilt `@sauronid/agent-action-tool` package, or from a source checkout
-  `cd core && cargo build --release`, or point
+- Ring-key generation uses the `agent-action-tool` binary. Until the first
+  approved package release, build it with `cd core && cargo build --release`, or point
   `SAURONID_AGENT_ACTION_TOOL` at an existing binary.
 
 ## Install
 
 ```bash
-npm install @sauronid/agentic
+npm ci --prefix agentic
+npm run build --prefix agentic
 ```
 
 ## Register and call

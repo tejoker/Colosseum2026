@@ -370,7 +370,8 @@ contained** (Acts 3–4 — every attack blocked in <5 ms), **provably audited**
   revocation) is exercised for real.
 - **Dashboard has no built-in auth.** If you enable it, it sits behind Caddy
   HTTP basic-auth only — fine for a controlled demo, not real RBAC.
-- **Single-node SQLite**, no HA. For production, switch to Postgres.
+- **Single-node SQLite**, no HA. The partial Postgres backend is not a
+  production or failover path; keep pilots off revenue-critical traffic.
 - **PoP keys are server-derived**, so the core operator is trusted.
   Hardware-rooted keys (AWS Nitro / TPM2) are roadmap, not in this demo.
 - **Solana is devnet** (if enabled) — not a durability guarantee.

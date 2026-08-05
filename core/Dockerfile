@@ -1,21 +1,19 @@
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 AS builder
 
 WORKDIR /app
 
-# Cache dependencies first
-COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    mkdir -p src/bin && echo "fn main() {}" > src/bin/client.rs && \
-    cargo build --release 2>/dev/null || true && \
-    rm -rf src
+# Fetch exactly the dependency graph committed for this release. A missing or
+# stale lockfile is a hard build failure.
+COPY Cargo.toml Cargo.lock ./
+RUN cargo fetch --locked
 
 # Build the actual project
 COPY src/ src/
-RUN cargo build --release
+RUN cargo build --locked --release
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl python3 && \

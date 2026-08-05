@@ -10,6 +10,7 @@
 //!   measurement      compute the canonical measurement hash for a config bundle
 //!   health           pretty-print the /health endpoint
 //!   policy           policy DSL helpers (subcommand: `validate <file>`)
+//!   verify-audit     verify the keyed SQLite security-audit chain
 //!
 //! Usage:
 //!   sauronid-cli keypair                            # writes ./agent.priv + agent.pub
@@ -46,6 +47,7 @@ fn main() -> ExitCode {
         "measurement" => cmd_measurement(&args[2..]),
         "health" => cmd_health(),
         "policy" => cmd_policy(&args[2..]),
+        "verify-audit" => cmd_verify_audit(&args[2..]),
         "help" | "-h" | "--help" => {
             print_usage();
             Ok(())
@@ -81,11 +83,33 @@ SUBCOMMANDS:
     measurement       compute canonical measurement hash for a config bundle
     health            GET $SAURON_CORE_URL/health and pretty-print
     policy validate <file>   parse a policy YAML/JSON file and report errors
+    verify-audit --database <path>  verify audit sequence, linkage, and HMACs
 
 ENV:
     SAURON_CORE_URL   default http://127.0.0.1:3001
-    SAURON_ADMIN_KEY  for endpoints that need admin auth"
+    SAURON_ADMIN_KEY  for endpoints that need admin auth
+    SAURON_AUDIT_HMAC_KEY  required to verify the audit chain"
     );
+}
+
+fn cmd_verify_audit(args: &[String]) -> Result<(), String> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let path = require_arg(args, "database")?;
+    if env::var("SAURON_AUDIT_HMAC_KEY")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return Err(
+            "SAURON_AUDIT_HMAC_KEY is required; verification cannot use the development fallback"
+                .into(),
+        );
+    }
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open audit database {path}: {e}"))?;
+    let count = sauron_core::middleware::audit_log::verify_audit_chain(&conn)?;
+    println!("audit chain OK: {count} records");
+    Ok(())
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {

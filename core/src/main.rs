@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
@@ -473,6 +474,10 @@ async fn main() {
         // DefaultBodyLimit on only those routes. The body limit short-circuits
         // before the route handler reads the body.
         .layer(DefaultBodyLimit::max(64 * 1024))
+        // Last-resort request isolation. Request paths must still avoid
+        // panicking while holding shared locks because poisoning can outlive
+        // the recovered HTTP response.
+        .layer(CatchPanicLayer::new())
         .layer({
             let allowed_origins: Vec<axum::http::HeaderValue> =
                 std::env::var("SAURON_ALLOWED_ORIGINS")
@@ -991,6 +996,7 @@ async fn bank_register_user(
         }
 
         repo.insert_user_registration(
+            &tenant_id,
             &payload.bank_client_name,
             &payload.key_image_hex,
             "bank_webhook",
@@ -1200,7 +1206,10 @@ async fn handle_register(
     // ledger reconstruction on restart, so a failure is non-fatal.
     if let Some((commitment_hex, ts)) = merkle_leaf_to_persist {
         let repo = state.read().unwrap().repo.clone();
-        if let Err(e) = repo.insert_merkle_leaf(&commitment_hex, ts).await {
+        if let Err(e) = repo
+            .insert_merkle_leaf(&tenant_id, &commitment_hex, ts)
+            .await
+        {
             tracing::warn!(target: "sauron::merkle", error = %e, "merkle leaf persist failed (non-fatal)");
         }
     }
@@ -1347,6 +1356,7 @@ async fn dev_register_user(
             .unwrap()
             .as_secs() as i64;
         repo.insert_user_registration(
+            "default",
             &payload.site_name,
             &identity.key_image_hex(),
             "register",
@@ -1953,6 +1963,7 @@ fn dev_estimated_age_years(date_of_birth: &str, now_secs: i64) -> Option<i64> {
 }
 
 async fn dev_consent_profile(
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<DevConsentProfileBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1960,6 +1971,7 @@ async fn dev_consent_profile(
         return Err((StatusCode::FORBIDDEN, "dev routes are disabled".into()));
     }
 
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -1969,7 +1981,7 @@ async fn dev_consent_profile(
     // lock so it drops before the async users read.
     let user_key_image: String = {
         let repo = state.read().unwrap().repo.clone();
-        repo.resolve_consent_user(&payload.consent_token, &payload.site_name, now)
+        repo.resolve_consent_user(&tenant_id, &payload.consent_token, &payload.site_name, now)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .ok_or((
@@ -2134,7 +2146,7 @@ async fn delegated_agent_binding_middleware(
 
     let (user_key_image, issuing_agent_id) = {
         let repo = state.read().unwrap().repo.clone();
-        repo.get_consent_by_token(&consent_token)
+        repo.get_consent_by_token(&tenant_id, &consent_token)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .ok_or((
@@ -2213,8 +2225,8 @@ async fn delegated_agent_binding_middleware(
             let st = state.read().unwrap();
             let db = st.db.lock().unwrap();
             db.query_row(
-                "SELECT human_key_image, revoked, expires_at, public_key_hex, IFNULL(pop_jkt, '') FROM agents WHERE agent_id = ?1",
-                params![claim_agent_id],
+                "SELECT human_key_image, revoked, expires_at, public_key_hex, IFNULL(pop_jkt, '') FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
+                params![tenant_id, claim_agent_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Agent not found".to_string()))?
@@ -2325,9 +2337,11 @@ fn normalize_requested_claims(mut claims: Vec<String>) -> Result<Vec<String>, Ve
 }
 
 async fn kyc_request(
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<KycRequestBody>,
 ) -> Result<Json<KycRequestResponse>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if !sauron_core::feature_flags::user_kyc_enabled() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2398,7 +2412,7 @@ async fn kyc_request(
             let st = state.read().unwrap();
             st.repo.clone()
         };
-        repo.insert_pending_consent(&request_id, &payload.site_name, &claims_json)
+        repo.insert_pending_consent(&tenant_id, &request_id, &payload.site_name, &claims_json)
             .await
             .map_err(|e| {
                 (
@@ -2450,12 +2464,14 @@ struct KycConsentInfo {
 }
 
 async fn kyc_consent_info(
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
     axum::extract::Path(request_id): axum::extract::Path<String>,
 ) -> Result<Json<KycConsentInfo>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     let repo = state.read().unwrap().repo.clone();
     let (site_name, claims_json, consent_token): (String, String, Option<String>) = repo
-        .get_consent_info(&request_id)
+        .get_consent_info(&tenant_id, &request_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((
@@ -2492,9 +2508,11 @@ struct KycConsentResponse {
 }
 
 async fn kyc_consent(
+    tenant: Option<axum::Extension<sauron_tenancy::TenantId>>,
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<KycConsentBody>,
 ) -> Result<Json<KycConsentResponse>, (StatusCode, String)> {
+    let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     if !sauron_core::feature_flags::user_kyc_enabled() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2504,7 +2522,7 @@ async fn kyc_consent(
     // Validate the consent request exists and is pending
     let site_name = {
         let repo = state.read().unwrap().repo.clone();
-        repo.pending_consent_site(&payload.request_id, false)
+        repo.pending_consent_site(&tenant_id, &payload.request_id, false)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .ok_or((
@@ -2548,6 +2566,7 @@ async fn kyc_consent(
         let repo = state.read().unwrap().repo.clone();
         let rows = repo
             .grant_consent_token(
+                &tenant_id,
                 &payload.request_id,
                 &hex_ki,
                 ts,
@@ -2650,7 +2669,7 @@ async fn kyc_retrieve(
         st.repo.clone()
     };
     let (user_ki, stored_site, issuing_agent_id, requested_claims_json) = repo
-        .consume_consent_token(&payload.consent_token, now)
+        .consume_consent_token(&tenant_id, &payload.consent_token, now)
         .await
         .map_err(|e| match e {
             sauron_core::repository::RepoError::Replay(s) => {
@@ -2892,7 +2911,13 @@ async fn kyc_retrieve(
             .unwrap()
             .as_secs() as i64;
         let _ = repo
-            .insert_user_registration(&payload.site_name, &user_ki, "kyc_retrieval", ts)
+            .insert_user_registration(
+                &tenant_id,
+                &payload.site_name,
+                &user_ki,
+                "kyc_retrieval",
+                ts,
+            )
             .await;
     }
 
@@ -2935,8 +2960,8 @@ async fn kyc_retrieve(
         // If agent-issued consent, verify agent ring membership
         let (agent_in_ring, agent_hex, agent_assurance) = if let Some(ref aid) = issuing_agent_id {
             let agent_row: Option<(String, String)> = db.query_row(
-                "SELECT public_key_hex, assurance_level FROM agents WHERE agent_id = ?1 AND revoked = 0",
-                params![aid],
+                "SELECT public_key_hex, assurance_level FROM agents WHERE tenant_id = ?1 AND agent_id = ?2 AND revoked = 0",
+                params![tenant_id, aid],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             ).ok();
             let in_ring = if let Some((ref hex, _)) = agent_row {
@@ -3377,6 +3402,34 @@ fn select_disclosed_claims(
 mod tests {
     use super::{build_zkp_assertions, select_disclosed_claims};
 
+    #[tokio::test]
+    async fn request_panic_is_contained_as_internal_server_error() {
+        use axum::{body::Body, http::Request, routing::get, Router};
+        use tower::ServiceExt;
+        use tower_http::catch_panic::CatchPanicLayer;
+
+        async fn panic_handler() -> axum::http::StatusCode {
+            panic!("deliberate request-path panic")
+        }
+
+        let app = Router::new()
+            .route("/panic", get(panic_handler))
+            .layer(CatchPanicLayer::new());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/panic")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("panic containment must return an HTTP response");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
     #[test]
     fn age_verification_assertions_are_parsed() {
         let signals = vec!["1".to_string(), "21".to_string()];
@@ -3504,8 +3557,8 @@ async fn policy_authorize(
         let st = state.read().unwrap();
         let db = st.db.lock().unwrap();
         db.query_row(
-            "SELECT assurance_level, revoked, expires_at, human_key_image, IFNULL(pop_jkt, '') FROM agents WHERE agent_id = ?1",
-            params![payload.agent_id],
+            "SELECT assurance_level, revoked, expires_at, human_key_image, IFNULL(pop_jkt, '') FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
+            params![tenant_id, payload.agent_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|_| (StatusCode::NOT_FOUND, "Agent not found".into()))?
@@ -3840,8 +3893,8 @@ async fn agent_payment_authorize(
         let db = st.db.lock().unwrap();
         let (revoked, expires_at, db_human, assurance, pop_jkt, pop_pk_b64u): (i64, i64, String, String, String, String) = db
             .query_row(
-                "SELECT revoked, expires_at, human_key_image, assurance_level, IFNULL(pop_jkt, ''), IFNULL(pop_public_key_b64u, '') FROM agents WHERE agent_id = ?1",
-                params![agent_id],
+                "SELECT revoked, expires_at, human_key_image, assurance_level, IFNULL(pop_jkt, ''), IFNULL(pop_public_key_b64u, '') FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
+                params![tenant_id, agent_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .map_err(|_| (StatusCode::NOT_FOUND, "Agent not found".into()))?;
@@ -4082,6 +4135,7 @@ async fn agent_payment_authorize(
             st.repo.clone()
         };
         repo.insert_payment_authorization(
+            &tenant_id,
             &auth_id,
             &agent_id,
             &jti,
@@ -4564,7 +4618,7 @@ async fn user_get_credential(
 
     // Look up pre-auth code (no claimed flag yet — we claim atomically below).
     let (pre_auth_code, subject_did) = repo
-        .select_credential_code(&key_image)
+        .select_credential_code(&tenant_id, &key_image)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((
@@ -4574,7 +4628,7 @@ async fn user_get_credential(
 
     // Fast path: return cached VC if already issued.
     if let Some(vc_json) = repo
-        .select_user_credential(&key_image)
+        .select_user_credential(&tenant_id, &key_image)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
@@ -4589,14 +4643,14 @@ async fn user_get_credential(
     // Same TOCTOU pattern as payment_auth: conditional UPDATE under
     // serialisable isolation, RETURNING confirms the flip.
     let claimed_now = repo
-        .claim_credential_code(&key_image)
+        .claim_credential_code(&tenant_id, &key_image)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !claimed_now {
         // Lost the race — another request is mid-flight or just finished. Re-check cache.
         if let Some(vc_json) = repo
-            .select_user_credential(&key_image)
+            .select_user_credential(&tenant_id, &key_image)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         {
@@ -4634,13 +4688,13 @@ async fn user_get_credential(
     let resp = match request.send().await {
         Ok(r) => r,
         Err(e) => {
-            let _ = repo.release_credential_code(&key_image).await;
+            let _ = repo.release_credential_code(&tenant_id, &key_image).await;
             return Err((StatusCode::BAD_GATEWAY, format!("Issuer unreachable: {e}")));
         }
     };
 
     if !resp.status().is_success() {
-        let _ = repo.release_credential_code(&key_image).await;
+        let _ = repo.release_credential_code(&tenant_id, &key_image).await;
         return Err((
             StatusCode::BAD_GATEWAY,
             "Issuer returned error during credential claim".into(),
@@ -4650,7 +4704,7 @@ async fn user_get_credential(
     let vc: serde_json::Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
-            let _ = repo.release_credential_code(&key_image).await;
+            let _ = repo.release_credential_code(&tenant_id, &key_image).await;
             return Err((
                 StatusCode::BAD_GATEWAY,
                 format!("Issuer response parse error: {e}"),
@@ -4666,7 +4720,7 @@ async fn user_get_credential(
             .unwrap()
             .as_secs() as i64;
         let _ = repo
-            .upsert_user_credential(&key_image, &vc.to_string(), ts)
+            .upsert_user_credential(&tenant_id, &key_image, &vc.to_string(), ts)
             .await;
     }
 
@@ -4878,8 +4932,8 @@ async fn agent_kyc_consent(
             String,
         ) = db
             .query_row(
-                "SELECT revoked, expires_at, human_key_image, public_key_hex, assurance_level, IFNULL(pop_jkt, ''), IFNULL(pop_public_key_b64u, '') FROM agents WHERE agent_id = ?1",
-                params![agent_id],
+                "SELECT revoked, expires_at, human_key_image, public_key_hex, assurance_level, IFNULL(pop_jkt, ''), IFNULL(pop_public_key_b64u, '') FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
+                params![tenant_id, agent_id],
                 |r| {
                     Ok((
                         r.get(0)?,
@@ -4986,7 +5040,7 @@ async fn agent_kyc_consent(
     // 3. Verify consent request exists + is for this site + not yet claimed
     let stored_site: String = {
         let repo = state.read().unwrap().repo.clone();
-        repo.pending_consent_site(&payload.request_id, true)
+        repo.pending_consent_site(&tenant_id, &payload.request_id, true)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .ok_or((
@@ -5058,6 +5112,7 @@ async fn agent_kyc_consent(
         // Atomic: only update if consent_token is still NULL (race-safe)
         let rows = repo
             .grant_consent_token(
+                &tenant_id,
                 &payload.request_id,
                 &human_key_image,
                 now,
@@ -5424,9 +5479,9 @@ async fn agent_vc_issue(
         let active_count: i64 = db
             .query_row(
                 "SELECT COUNT(*) FROM agent_vcs
-             WHERE agent_id IN (SELECT agent_id FROM agents WHERE human_key_image = ?1)
-             AND revoked = 0 AND expires_at > ?2",
-                params![human_key_image, now],
+             WHERE agent_id IN (SELECT agent_id FROM agents WHERE tenant_id = ?1 AND human_key_image = ?2)
+             AND revoked = 0 AND expires_at > ?3",
+                params![tenant_id, human_key_image, now],
                 |r| r.get(0),
             )
             .unwrap_or(0);
@@ -5437,8 +5492,8 @@ async fn agent_vc_issue(
             ));
         }
         let pub_in_use: bool = db.query_row(
-            "SELECT COUNT(*) FROM agents WHERE public_key_hex = ?1 AND revoked = 0 AND expires_at > ?2",
-            params![payload.public_key_hex, now],
+            "SELECT COUNT(*) FROM agents WHERE tenant_id = ?1 AND public_key_hex = ?2 AND revoked = 0 AND expires_at > ?3",
+            params![tenant_id, payload.public_key_hex, now],
             |r| r.get::<_, i64>(0),
         ).unwrap_or(0) > 0;
         if pub_in_use {
@@ -5448,8 +5503,8 @@ async fn agent_vc_issue(
             ));
         }
         let key_image_in_use: bool = db.query_row(
-            "SELECT COUNT(*) FROM agents WHERE ring_key_image_hex = ?1 AND revoked = 0 AND expires_at > ?2",
-            params![payload.ring_key_image_hex, now],
+            "SELECT COUNT(*) FROM agents WHERE tenant_id = ?1 AND ring_key_image_hex = ?2 AND revoked = 0 AND expires_at > ?3",
+            params![tenant_id, payload.ring_key_image_hex, now],
             |r| r.get::<_, i64>(0),
         ).unwrap_or(0) > 0;
         if key_image_in_use {
@@ -5522,8 +5577,8 @@ async fn agent_vc_issue(
         // Register in agents table (so A-JWT flow works normally)
         db.execute(
             "INSERT OR REPLACE INTO agents
-             (agent_id, human_key_image, agent_checksum, intent_json, assurance_level, public_key_hex, ring_key_image_hex, issued_at, expires_at, revoked, parent_agent_id, delegation_depth, pop_jkt, pop_public_key_b64u)
-             VALUES (?1,?2,?3,?4,'autonomous_web3',?5,?6,?7,?8,0,NULL,0,?9,?10)",
+             (agent_id, human_key_image, agent_checksum, intent_json, assurance_level, public_key_hex, ring_key_image_hex, issued_at, expires_at, revoked, parent_agent_id, delegation_depth, pop_jkt, pop_public_key_b64u, tenant_id)
+             VALUES (?1,?2,?3,?4,'autonomous_web3',?5,?6,?7,?8,0,NULL,0,?9,?10,?11)",
             params![
                 agent_id.clone(),
                 human_key_image.clone(),
@@ -5535,6 +5590,7 @@ async fn agent_vc_issue(
                 expires_at,
                 payload.pop_jkt.clone(),
                 payload.pop_public_key_b64u.clone(),
+                tenant_id.clone(),
             ],
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

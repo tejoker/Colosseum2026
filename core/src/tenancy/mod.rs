@@ -7,10 +7,10 @@
 //!
 //! ## Resolution order
 //!
-//! 1. HTTP header `x-sauron-tenant-id`
-//! 2. Admin JWT claim `tnt` (when the request carries a Bearer JWT)
-//! 3. URL path param `:tenant_id` — NOT in scope for S11 (header-only)
-//! 4. Fallback to `DEFAULT_TENANT`
+//! 1. A validated admin JWT `tnt` claim is authoritative.
+//! 2. The `x-sauron-tenant-id` header may restate that claim but cannot
+//!    override it; without a JWT it is only a routing signal.
+//! 3. Fallback to `DEFAULT_TENANT` when neither signal exists.
 //!
 //! The resolved `TenantId` is inserted into the request `Extensions` so
 //! downstream handlers can extract it via `Extension<TenantId>`.

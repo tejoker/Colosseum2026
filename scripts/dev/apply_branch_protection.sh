@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OWNER="${OWNER:-killianprovin}"
-REPO="${REPO:-hackeurope-24}"
-CHECKS="${CHECKS:-kya-e2e,confidence-gate}"
+OWNER="${OWNER:-tejoker}"
+REPO="${REPO:-HackNation2026}"
+CHECKS="${CHECKS:-release-gate,test-sqlite,test-postgres,kya-e2e,confidence-gate}"
 TARGET_BRANCHES=("$@")
 if [[ ${#TARGET_BRANCHES[@]} -eq 0 ]]; then
   TARGET_BRANCHES=(main pocv1)

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-05
+
+### Security
+
+- Release security evidence fails on any skipped or non-dynamic adversarial scenario.
+- Anonymous-ring administration derives tenant identity only from authenticated request context.
+- Production publication is gated on an independent cryptographic review and deployed-system penetration test covering the exact release commit.
+- Unexpected request panics are contained at the HTTP boundary; production fail-closed controls remain mandatory.
+
+### Packaging
+
+- Python and npm SDK artifacts are built and install-tested in the release gate.
+- Transparent RISC Zero guest image IDs and native receipts are reproduced and independently verified for release tags without a per-project trusted setup.
+- Load-test raw JSON artifacts and dependency locks are retained with the release evidence.
+
 ### Added (accessibility and adoption pass)
 
 - 15-line quickstart flow in all three SDKs: `register_llm_agent` / `registerLlmAgent` / `RegisterLLMAgent` returning a `SignedAgent` with `.call()` in TypeScript and Go (previously Python-only)
