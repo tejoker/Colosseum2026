@@ -9,9 +9,12 @@
 //! `agent_id ↔ ring` link is persisted — revoke re-derives `P_R` from the
 //! agent's master key, so a DB-reader never sees which agent joined which ring.
 //!
-//! This module is gated by `SAURON_ANON_RINGS` and does NOT touch the live
-//! action path (that is phase 3). The rule evaluator + derivation here are the
-//! pieces phase 3 will wire into `/agent/action/*`.
+//! This module is gated by `SAURON_ANON_RINGS`. The rule evaluator + derivation
+//! here are wired into the live action path by
+//! `agent_action::validate_anon_action` (`POST /agent/action/anon`, phase 3) and
+//! into the usage ledger by `usage` (phase 4). An action may name several rings;
+//! every named ring must admit it and be proven by its own signature, so
+//! authority is the intersection of the named rings.
 
 use std::sync::{Arc, RwLock};
 

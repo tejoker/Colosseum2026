@@ -224,6 +224,117 @@ pub struct RecordUsageRequest {
     pub input_tokens: i64,
     #[serde(default)]
     pub output_tokens: i64,
+    /// Single-use nonce, covered by the signature.
+    pub nonce: String,
+    /// LSAG signature over [`canonical_usage_report_json`] against the ring's
+    /// member set. Proves the reporter holds the same per-ring key that produced
+    /// the receipt — without it this endpoint is an unauthenticated write into
+    /// the budget ledger.
+    pub ring_signature: crate::ring::RingSignature,
+}
+
+/// Fixed-field canonical JSON for signed usage reports (byte parity across
+/// implementations — do not replace with `Value::to_string()`).
+pub fn canonical_usage_report_json(
+    receipt_id: &str,
+    model_id: &str,
+    input_tokens: i64,
+    output_tokens: i64,
+    nonce: &str,
+) -> String {
+    use crate::agent_action::json_str;
+    format!(
+        "{{\"receipt_id\":{},\"model_id\":{},\"input_tokens\":{},\"output_tokens\":{},\"nonce\":{}}}",
+        json_str(receipt_id),
+        json_str(model_id),
+        input_tokens,
+        output_tokens,
+        json_str(nonce),
+    )
+}
+
+/// Authorise a usage report: the reporter must prove membership of the ring that
+/// owns the receipt, with the *same* key image the receipt was issued to, and
+/// each report is single-use.
+///
+/// Token counts stay host-reported (see the module honesty boundary) — this
+/// closes forgery and third-party ledger poisoning, not under-reporting.
+pub fn verify_usage_report(
+    db: &Connection,
+    req: &RecordUsageRequest,
+    now: i64,
+) -> Result<(), (StatusCode, String)> {
+    if req.nonce.trim().len() < 16 || req.nonce.len() > 128 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "nonce must be 16..128 chars".into(),
+        ));
+    }
+    let (tenant_id, ring_id, receipt_key_image): (String, Option<String>, String) = db
+        .query_row(
+            "SELECT tenant_id, ring_id, ring_key_image_hex FROM agent_action_receipts
+             WHERE receipt_id = ?1",
+            params![req.receipt_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| (StatusCode::NOT_FOUND, "receipt not found".to_string()))?;
+    let ring_id = ring_id.filter(|s| !s.is_empty()).ok_or((
+        StatusCode::BAD_REQUEST,
+        "usage recording requires an anon-ring receipt (ring_id missing)".to_string(),
+    ))?;
+
+    // The signature must come from the pseudonym the receipt was issued to, not
+    // merely from some member of the ring — otherwise any member could bill
+    // another member's budget.
+    let key_image_hex = hex::encode(req.ring_signature.key_image.compress().as_bytes());
+    if key_image_hex != receipt_key_image {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "usage report signed by a different ring pseudonym than the receipt".into(),
+        ));
+    }
+
+    let members = crate::rings::list_member_points(db, &tenant_id, &ring_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if members.is_empty() {
+        return Err((StatusCode::UNAUTHORIZED, "ring has no members".into()));
+    }
+    let canonical = canonical_usage_report_json(
+        &req.receipt_id,
+        &req.model_id,
+        req.input_tokens,
+        req.output_tokens,
+        &req.nonce,
+    );
+    if !crate::ring::verify(canonical.as_bytes(), &members, &req.ring_signature) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "usage report signature verification failed".into(),
+        ));
+    }
+
+    // Single-use, in the same table and idiom as action nonces: the UNIQUE
+    // violation IS the check. Consumed only after the signature verifies.
+    // ponytail: a 30-day window, not forever — long enough that a captured
+    // report cannot be replayed once the row ages out of any realistic session.
+    db.execute(
+        "INSERT INTO agent_action_nonces (nonce, agent_id, action_hash, expires_at, used_at)
+         VALUES (?1, '', ?2, ?3, ?4)",
+        params![
+            format!("usage|{key_image_hex}|{}", req.nonce),
+            req.receipt_id,
+            now + 30 * 24 * 3600,
+            now
+        ],
+    )
+    .map_err(|e| {
+        if e.to_string().contains("UNIQUE") {
+            (StatusCode::UNAUTHORIZED, "usage report replay".to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    })?;
+    Ok(())
 }
 
 /// POST /agent/usage — report token usage for a prior anon action receipt.
@@ -240,6 +351,7 @@ pub async fn record_usage_handler(
     let now = crate::agent_action::now_secs();
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
+    verify_usage_report(&db, &req, now)?;
     let (ring_id, key_image, totals) = record_usage(
         &db,
         &req.receipt_id,
@@ -305,6 +417,90 @@ mod tests {
             params![receipt_id, key_image, ring_id, "default"],
         )
         .unwrap();
+    }
+
+    /// Build ring "r" with `a` + a decoy, and return the request-signing pieces.
+    fn ring_fixture(db: &Connection) -> (curve25519_dalek::scalar::Scalar, String) {
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+        use curve25519_dalek::scalar::Scalar;
+        use sha2::Digest;
+        let scalar = |seed: &[u8]| {
+            let mut h = sha2::Sha512::new();
+            h.update(seed);
+            Scalar::from_hash(h)
+        };
+        let pub_hex =
+            |s: &Scalar| hex::encode((s * RISTRETTO_BASEPOINT_TABLE).compress().as_bytes());
+        let (t, a) = (scalar(b"usage-trapdoor"), scalar(b"usage-agent"));
+        crate::rings::upsert_ring(db, "default", "r", &crate::rings::RingRule::default(), 1)
+            .unwrap();
+        crate::rings::subscribe(db, "default", &t, &pub_hex(&a), "r", 1).unwrap();
+        crate::rings::subscribe(db, "default", &t, &pub_hex(&scalar(b"usage-decoy")), "r", 1)
+            .unwrap();
+        let big_t = &t * RISTRETTO_BASEPOINT_TABLE;
+        let shared = crate::ring_pseudonym::shared_secret_agent(&a, &big_t);
+        let id = crate::ring_pseudonym::agent_ring_identity(&a, &shared, "r");
+        let key_image = hex::encode(id.key_image().compress().as_bytes());
+        (a, key_image)
+    }
+
+    fn signed_report(
+        db: &Connection,
+        a: &curve25519_dalek::scalar::Scalar,
+        receipt_id: &str,
+        nonce: &str,
+        in_tokens: i64,
+    ) -> RecordUsageRequest {
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+        use sha2::Digest;
+        let mut h = sha2::Sha512::new();
+        h.update(b"usage-trapdoor");
+        let t = curve25519_dalek::scalar::Scalar::from_hash(h);
+        let big_t = &t * RISTRETTO_BASEPOINT_TABLE;
+        let shared = crate::ring_pseudonym::shared_secret_agent(a, &big_t);
+        let id = crate::ring_pseudonym::agent_ring_identity(a, &shared, "r");
+        let members = crate::rings::list_member_points(db, "default", "r").unwrap();
+        let idx = members.iter().position(|p| *p == id.public).unwrap();
+        let canonical = canonical_usage_report_json(receipt_id, "local-model", in_tokens, 0, nonce);
+        RecordUsageRequest {
+            receipt_id: receipt_id.into(),
+            model_id: "local-model".into(),
+            input_tokens: in_tokens,
+            output_tokens: 0,
+            nonce: nonce.into(),
+            ring_signature: crate::ring::sign(canonical.as_bytes(), &members, &id, idx),
+        }
+    }
+
+    #[test]
+    fn usage_report_requires_the_receipt_pseudonym_and_is_single_use() {
+        let db = mem_db();
+        let (a, key_image) = ring_fixture(&db);
+        insert_anon_receipt(&db, "ar_signed", Some("r"), &key_image);
+
+        // Genuine holder of the receipt's per-ring key.
+        let req = signed_report(&db, &a, "ar_signed", "nonce-usage-0000001", 100);
+        verify_usage_report(&db, &req, 1).expect("receipt pseudonym accepted");
+
+        // Same report again — replay refused.
+        let err = verify_usage_report(&db, &req, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(err.1.contains("replay"), "got: {}", err.1);
+
+        // Tampering with the counts after signing invalidates the report.
+        let mut tampered = signed_report(&db, &a, "ar_signed", "nonce-usage-0000002", 100);
+        tampered.input_tokens = 0;
+        let err = verify_usage_report(&db, &tampered, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+        // A third party who knows the receipt id cannot bill it: no signature.
+        let stranger = signed_report(&db, &a, "ar_signed", "nonce-usage-0000003", 5);
+        insert_anon_receipt(&db, "ar_other", Some("r"), "kimg_someone_else");
+        let mut wrong_receipt = stranger;
+        wrong_receipt.receipt_id = "ar_other".into();
+        let err = verify_usage_report(&db, &wrong_receipt, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(err.1.contains("different ring pseudonym"), "got: {}", err.1);
     }
 
     #[test]

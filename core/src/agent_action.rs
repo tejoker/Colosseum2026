@@ -142,7 +142,7 @@ fn active_tenant_ring(
         .collect())
 }
 
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
@@ -500,7 +500,15 @@ fn default_tenant_id() -> String {
 pub struct AnonActionEnvelope {
     #[serde(default = "default_tenant_id")]
     pub tenant_id: String,
+    /// Primary ring: owns the key image used for replay protection and budgets.
     pub ring_id: String,
+    /// Additional rings that must ALSO admit this action. Every listed ring's
+    /// rule is evaluated and every ring needs its own signature over the same
+    /// envelope in `AnonActionProof::also_ring_signatures`, so authority is the
+    /// INTERSECTION of the named rings, not the union. Signed, so it cannot be
+    /// dropped in transit.
+    #[serde(default)]
+    pub also_ring_ids: Vec<String>,
     pub action: String,
     #[serde(default)]
     pub resource: String,
@@ -522,15 +530,26 @@ pub struct AnonActionProof {
     pub envelope: AnonActionEnvelope,
     #[serde(alias = "agent_ring_signature")]
     pub ring_signature: ring::RingSignature,
+    /// One signature per `envelope.also_ring_ids`, same order, over the same
+    /// canonical envelope bytes.
+    #[serde(default)]
+    pub also_ring_signatures: Vec<ring::RingSignature>,
 }
 
 /// Fixed-field canonical JSON for anon action signatures (byte parity across
 /// implementations — do not replace with `Value::to_string()`).
 pub fn canonical_anon_envelope_json(e: &AnonActionEnvelope) -> String {
+    let also = e
+        .also_ring_ids
+        .iter()
+        .map(|r| json_str(r))
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"tenant_id\":{},\"ring_id\":{},\"action\":{},\"resource\":{},\"merchant_id\":{},\"amount_minor\":{},\"currency\":{},\"config_digest\":{},\"nonce\":{},\"expires_at\":{}}}",
+        "{{\"tenant_id\":{},\"ring_id\":{},\"also_ring_ids\":[{}],\"action\":{},\"resource\":{},\"merchant_id\":{},\"amount_minor\":{},\"currency\":{},\"config_digest\":{},\"nonce\":{},\"expires_at\":{}}}",
         json_str(&e.tenant_id),
         json_str(&e.ring_id),
+        also,
         json_str(&e.action),
         json_str(&e.resource),
         json_str(&e.merchant_id),
@@ -577,6 +596,23 @@ pub fn validate_anon_action(
             "anon action envelope expired".into(),
         ));
     }
+    if proof.also_ring_signatures.len() != env.also_ring_ids.len() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "also_ring_signatures must have one signature per also_ring_ids entry".into(),
+        ));
+    }
+    for (i, r) in env.also_ring_ids.iter().enumerate() {
+        if r.trim().is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "empty also_ring_ids entry".into()));
+        }
+        if r == &env.ring_id || env.also_ring_ids[..i].contains(r) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("duplicate ring '{r}' in also_ring_ids"),
+            ));
+        }
+    }
 
     let canonical = canonical_anon_envelope_bytes(env);
     let action_hash = anon_action_hash(env);
@@ -607,10 +643,55 @@ pub fn validate_anon_action(
         ));
     }
 
+    // 3a. Every additional ring must independently admit this action AND be
+    //     proven by its own signature over the same envelope. Rules intersect,
+    //     so naming a second ring can only narrow authority, never widen it.
+    //     Property proven: a member of each named ring signed THIS envelope.
+    //     It does not prove one agent is in all of them — distinguishing that
+    //     from two co-signing members would require linking two LSAG key images
+    //     to one master key, which is exactly the cross-ring correlation the
+    //     pseudonym design prevents. See `docs/design/anonymous-ring-policy.md`.
+    let mut ring_versions = vec![format!("ring:{}:v{}", env.ring_id, version)];
+    for (ring_id, sig) in env.also_ring_ids.iter().zip(&proof.also_ring_signatures) {
+        let (also_rule, also_version) = crate::rings::get_ring(db, &env.tenant_id, ring_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                format!("ring '{ring_id}' not found"),
+            ))?;
+        if let crate::rings::RuleDecision::Deny(why) =
+            crate::rings::evaluate_rule(&also_rule, &env.action, &env.config_digest)
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("ring '{ring_id}' rule denied: {why}"),
+            ));
+        }
+        let also_members = crate::rings::list_member_points(db, &env.tenant_id, ring_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if also_members.is_empty() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("ring '{ring_id}' has no members"),
+            ));
+        }
+        if !ring::verify(&canonical, &also_members, sig) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                format!("ring '{ring_id}' signature verification failed"),
+            ));
+        }
+        ring_versions.push(format!("ring:{ring_id}:v{also_version}"));
+    }
+
     // 3b. Per-ring budget (phase 4): refuse a new action once this pseudonym has
     //     already exceeded any budget the ring caps. Keyed on the key image, not
     //     an agent identity. Checked after ring verify so it can't be probed
     //     without a valid membership proof, and before the nonce is consumed.
+    //     Only the primary ring's budget applies: usage is reported against this
+    //     receipt's key image, so an also-ring ledger would never accumulate and
+    //     its cap would be a check that can never fire. Put the budget on the
+    //     ring you name primary.
     let totals = crate::usage::get_usage(db, &env.tenant_id, &env.ring_id, &key_image_hex)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if let Some(why) = crate::usage::budget_exceeded(&totals, &rule.budgets) {
@@ -652,7 +733,7 @@ pub fn validate_anon_action(
         action_hash: action_hash.clone(),
         agent_id: String::new(),
         ring_key_image_hex: key_image_hex,
-        policy_version: format!("ring:{}:v{}", env.ring_id, version),
+        policy_version: ring_versions.join("+"),
         ajwt_jti: String::new(),
         pop_jkt: String::new(),
         timestamp: now,
@@ -1029,6 +1110,7 @@ mod tests {
         AnonActionEnvelope {
             tenant_id: "default".into(),
             ring_id: ring_id.into(),
+            also_ring_ids: Vec::new(),
             action: action.into(),
             resource: String::new(),
             merchant_id: String::new(),
@@ -1064,26 +1146,146 @@ mod tests {
         AnonActionProof {
             envelope: env.clone(),
             ring_signature: sig,
+            also_ring_signatures: env
+                .also_ring_ids
+                .iter()
+                .map(|r| sign_anon_for_ring(db, a, t, env, r))
+                .collect(),
         }
+    }
+    /// Sign the same envelope under a different ring the agent also belongs to.
+    fn sign_anon_for_ring(
+        db: &Connection,
+        a: &Scalar,
+        t: &Scalar,
+        env: &AnonActionEnvelope,
+        ring_id: &str,
+    ) -> ring::RingSignature {
+        let big_t = t * RISTRETTO_BASEPOINT_TABLE;
+        let shared = crate::ring_pseudonym::shared_secret_agent(a, &big_t);
+        let signer_id = crate::ring_pseudonym::agent_ring_identity(a, &shared, ring_id);
+        let members = crate::rings::list_member_points(db, &env.tenant_id, ring_id).unwrap();
+        let idx = members
+            .iter()
+            .position(|p| *p == signer_id.public)
+            .expect("signer must be a member of the also-ring");
+        ring::sign(
+            &canonical_anon_envelope_bytes(env),
+            &members,
+            &signer_id,
+            idx,
+        )
     }
     /// Build a ring with `allowed`/`digests` and subscribe agent `a` + a decoy.
     fn setup_ring(db: &Connection, t: &Scalar, a: &Scalar, allowed: &[&str], digests: &[&str]) {
+        setup_named_ring(db, t, a, "r", allowed, digests);
+    }
+    fn setup_named_ring(
+        db: &Connection,
+        t: &Scalar,
+        a: &Scalar,
+        ring_id: &str,
+        allowed: &[&str],
+        digests: &[&str],
+    ) {
         let rule = crate::rings::RingRule {
             allowed_actions: allowed.iter().map(|s| s.to_string()).collect(),
             allowed_config_digests: digests.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
-        crate::rings::upsert_ring(db, "default", "r", &rule, 1).unwrap();
-        crate::rings::subscribe(db, "default", t, &anon_pub_hex(a), "r", 1).unwrap();
+        crate::rings::upsert_ring(db, "default", ring_id, &rule, 1).unwrap();
+        crate::rings::subscribe(db, "default", t, &anon_pub_hex(a), ring_id, 1).unwrap();
         crate::rings::subscribe(
             db,
             "default",
             t,
             &anon_pub_hex(&anon_scalar(b"decoy")),
-            "r",
+            ring_id,
             1,
         )
         .unwrap();
+    }
+
+    /// An agent in both rings proves membership of both over one envelope, and
+    /// the receipt records both ring versions.
+    #[test]
+    fn anon_action_multi_ring_proves_membership_of_every_named_ring() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"agent-in-both"));
+        setup_named_ring(&db, &t, &a, "r", &["search"], &[]);
+        setup_named_ring(&db, &t, &a, "s", &["search"], &[]);
+        let mut env = anon_env("r", "search", "", "nonce-multi-0000001");
+        env.also_ring_ids = vec!["s".into()];
+        let proof = sign_anon(&db, &a, &t, &env);
+        let r = validate_anon_action(&db, b"s", &proof, 1).expect("member of both accepted");
+        assert_eq!(r.policy_version, "ring:r:v1+ring:s:v1");
+        // The two per-ring key images differ — no cross-ring correlation leaks.
+        let k_r = hex::encode(proof.ring_signature.key_image.compress().as_bytes());
+        let k_s = hex::encode(proof.also_ring_signatures[0].key_image.compress().as_bytes());
+        assert_ne!(k_r, k_s);
+    }
+
+    /// Authority intersects: naming a second ring can only narrow it.
+    #[test]
+    fn anon_action_multi_ring_denies_when_any_ring_forbids() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"agent-in-both"));
+        setup_named_ring(&db, &t, &a, "r", &["transfer"], &[]);
+        setup_named_ring(&db, &t, &a, "s", &["search"], &[]);
+        let mut env = anon_env("r", "transfer", "", "nonce-multi-0000002");
+        env.also_ring_ids = vec!["s".into()];
+        let proof = sign_anon(&db, &a, &t, &env);
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains("ring 's' rule denied"), "got: {}", err.1);
+    }
+
+    /// A ring the agent is NOT in cannot be co-claimed: no valid signature exists
+    /// against that ring's member set.
+    #[test]
+    fn anon_action_multi_ring_rejects_non_member_ring() {
+        let db = anon_mem_db();
+        let (t, a, other) = (
+            anon_scalar(b"t"),
+            anon_scalar(b"agent-a"),
+            anon_scalar(b"stranger"),
+        );
+        setup_named_ring(&db, &t, &a, "r", &["search"], &[]);
+        setup_named_ring(&db, &t, &other, "s", &["search"], &[]);
+        let mut env = anon_env("r", "search", "", "nonce-multi-0000003");
+        env.also_ring_ids = vec!["s".into()];
+        // Sign ring "s" with `a`, which is not a member of it: `a`'s per-ring key
+        // for "s" is not in that ring's member set, so no index can validate.
+        let big_t = &t * RISTRETTO_BASEPOINT_TABLE;
+        let shared = crate::ring_pseudonym::shared_secret_agent(&a, &big_t);
+        let signer_id = crate::ring_pseudonym::agent_ring_identity(&a, &shared, "s");
+        let members = crate::rings::list_member_points(&db, "default", "s").unwrap();
+        let forged = ring::sign(&canonical_anon_envelope_bytes(&env), &members, &signer_id, 0);
+        let proof = AnonActionProof {
+            ring_signature: sign_anon_for_ring(&db, &a, &t, &env, "r"),
+            envelope: env,
+            also_ring_signatures: vec![forged],
+        };
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(err.1.contains("verification failed"), "got: {}", err.1);
+    }
+
+    /// The ring list is signed: adding or dropping a ring invalidates the proof.
+    #[test]
+    fn anon_action_also_ring_ids_are_covered_by_the_signature() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"agent-in-both"));
+        setup_named_ring(&db, &t, &a, "r", &["search"], &[]);
+        setup_named_ring(&db, &t, &a, "s", &["search"], &[]);
+        let mut env = anon_env("r", "search", "", "nonce-multi-0000004");
+        env.also_ring_ids = vec!["s".into()];
+        let mut proof = sign_anon(&db, &a, &t, &env);
+        // Strip the co-ring claim after signing.
+        proof.envelope.also_ring_ids.clear();
+        proof.also_ring_signatures.clear();
+        let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
     }
 
     #[test]
@@ -1159,6 +1361,7 @@ mod tests {
         let proof = AnonActionProof {
             envelope: env,
             ring_signature: sig,
+            also_ring_signatures: Vec::new(),
         };
         let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
