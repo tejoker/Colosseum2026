@@ -80,6 +80,51 @@ while read -r dep; do
     fi
 done < <(grep -oE 'path = "[^"]+"' core/Cargo.toml | sed 's/path = "//; s/"//')
 
+# Every compose build context must exist. Compose validates all of them when it
+# loads the file, so one service pointing at a deleted directory kills `up` for
+# every other service too — which is how a removed hardhat-node context broke the
+# e2e job long after nothing referenced it.
+echo "== compose build contexts exist"
+if ! python3 - "$(pwd)" <<'PY'; then
+import os, sys, glob
+try:
+    import yaml
+except ImportError:
+    print("  (pyyaml unavailable — skipped)")
+    sys.exit(0)
+root = sys.argv[1]
+bad = False
+for f in sorted(glob.glob("docker-compose*.yml") + glob.glob("deploy/docker-compose*.yml")):
+    base = os.path.dirname(os.path.join(root, f)) or root
+    for name, svc in (yaml.safe_load(open(f)) or {}).get("services", {}).items():
+        b = svc.get("build")
+        if not b:
+            continue
+        ctx = b if isinstance(b, str) else b.get("context", ".")
+        dockerfile = "Dockerfile" if isinstance(b, str) else b.get("dockerfile", "Dockerfile")
+        ctx_abs = os.path.normpath(os.path.join(base, ctx))
+        df_abs = os.path.normpath(os.path.join(ctx_abs, dockerfile))
+        for label, path in (("context", ctx_abs), ("dockerfile", df_abs)):
+            if os.path.exists(path):
+                print(f"  ok   {f}:{name} {label} {os.path.relpath(path, root)}")
+            else:
+                print(f"  FAIL {f}:{name} {label} {os.path.relpath(path, root)} does not exist")
+                bad = True
+        # A service building core/Dockerfile must see core's path dependency, so
+        # its context has to be the repository root, not core/.
+        if df_abs.endswith(os.path.join("core", "Dockerfile")):
+            dep = os.path.join(ctx_abs, "transparent-zk", "types", "Cargo.toml")
+            if os.path.exists(dep):
+                print(f"  ok   {f}:{name} context covers transparent-zk/types")
+            else:
+                print(f"  FAIL {f}:{name} context {os.path.relpath(ctx_abs, root)} "
+                      "cannot see transparent-zk/types (cargo will fail to load the manifest)")
+                bad = True
+sys.exit(1 if bad else 0)
+PY
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "docker context verification FAILED"
     exit 1
