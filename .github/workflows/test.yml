@@ -159,21 +159,25 @@ jobs:
           # acknowledgement is required to boot in the default (production)
           # runtime. This CI box IS single-node, so accepting it is honest.
           SAURON_ACCEPT_SINGLE_NODE_SQLITE: "1"
-          # ENV is unset here, so the runtime resolves to production and
-          # assert_production_enforcement_safe() hard-panics before binding the
-          # socket unless every one of these is present. Without them the
-          # process died instantly and the health wait below timed out — which
-          # is what this job did on every run since the gate was added.
-          SAURON_MAX_ACTION_USD: "1000"
+          # Development runtime with call-signature enforcement ON — the same
+          # shape the release gate's empirical suite uses, and the only shape this
+          # scenario can run in:
+          #  * ENV unset resolves to production, where
+          #    assert_production_enforcement_safe() hard-panics before binding the
+          #    socket unless MAX_ACTION_USD, the pinned RISC Zero image IDs, the
+          #    audit HMAC key and the three secrets are all present. That is why
+          #    the health wait timed out on every run.
+          #  * Even fully configured, production then refuses the harness's setup:
+          #    "production requires externally generated public_key_hex and
+          #    key_image_hex; private partner keys must never enter SauronID
+          #    custody". The harness provisions its own clients, so it needs the
+          #    dev runtime and the dev endpoints.
+          # SAURON_REQUIRE_CALL_SIG=1 above is what the race actually depends on:
+          # in advisory mode the middleware is a no-op and every request in the
+          # burst returns 200 instead of one winner plus N-1 × 409.
+          ENV: development
+          SAURON_ENABLE_DEV_ENDPOINTS: "1"
         run: |
-          export SAURON_AUDIT_HMAC_KEY="$(openssl rand -hex 32)"
-          export SAURON_TOKEN_SECRET="$(openssl rand -hex 32)"
-          export SAURON_JWT_SECRET="$(openssl rand -hex 32)"
-          export SAURON_OPRF_SEED="$(openssl rand -hex 32)"
-          # Production refuses to boot unless the reviewed guest image IDs are
-          # pinned; use the ones committed in transparent-zk/image-ids.json.
-          SAURON_TRANSPARENT_IMAGE_IDS_JSON="$(python3 -c 'import json;print(json.dumps(json.load(open("../transparent-zk/image-ids.json"))["programs"]))')"
-          export SAURON_TRANSPARENT_IMAGE_IDS_JSON
           cargo build --locked --bin sauron-core
           nohup ./target/debug/sauron-core > /tmp/sauron-core.log 2>&1 &
           echo $! > /tmp/sauron-core.pid
