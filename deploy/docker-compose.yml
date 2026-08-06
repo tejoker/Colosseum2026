@@ -19,6 +19,15 @@ services:
       - SAURON_ACCEPT_SINGLE_NODE_SQLITE=${SAURON_ACCEPT_SINGLE_NODE_SQLITE:-1}
       - SAURON_ISSUER_URL=${SAURON_ISSUER_URL:-http://zkp-issuer:4000}
       - SAURON_ISSUER_SHARED_SECRET=${SAURON_ISSUER_SHARED_SECRET:-sauron_issuer_shared_dev_key_change_me}
+      # Advisory by default HERE ONLY, and deliberately: this is the stack the KYA
+      # e2e job drives, and redteam/dist/index.js (the scripted invariant suite)
+      # posts UNSIGNED to /agent/action/challenge and /agent/vc/issue, so
+      # enforcement turns those scenarios into 401s. The root docker-compose.yml
+      # evaluation stack and docker-compose.prod.yml both default to 1 — this is
+      # the exception, not the pattern. Flip it once those scenarios sign their
+      # calls (they also send a malformed PoP key today, which fails in either
+      # mode: "PoP public key is not base64url").
+      - SAURON_REQUIRE_CALL_SIG=${SAURON_REQUIRE_CALL_SIG:-0}
       # Required. Production requires >=32-byte keys; see admin::init_admin_auth.
       # Quoted: the ": " inside the :? message makes YAML read the whole entry
       # as a mapping, and compose then refuses to load the file at all.
