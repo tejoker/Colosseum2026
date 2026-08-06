@@ -20,7 +20,15 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 # Fail the build on any known vulnerability or unmaintained crate.
 yanked = "deny"
-ignore = []
+# The same two exceptions core/.cargo/audit.toml carries for cargo-audit: both
+# are unmaintained-macro-crate notices, not vulnerability or unsoundness
+# advisories, and neither can be removed without replacing the pinned RISC Zero
+# 3.0.5 verifier. Every other advisory stays release-blocking. Remove these as
+# soon as upstream does.
+ignore = [
+    "RUSTSEC-2024-0388", # derivative, through risc0-groth16/Arkworks
+    "RUSTSEC-2024-0436", # paste, through risc0-zkvm/Arkworks
+]
 
 [licenses]
 # Allow only OSI-approved, GPL-compatible permissive licenses for a
@@ -39,6 +47,10 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "OpenSSL",
+    # webpki-roots (0.26 via sqlx-postgres, 1.0 via rustls). This is the Mozilla
+    # CA root bundle, not code: a permissive data licence with no copyleft or
+    # attribution obligation on the binary.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 exceptions = []
@@ -48,6 +60,16 @@ name = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [
     { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+# webpki 0.22 ships no `license` field in its manifest; the crate is ISC
+# (LICENSE in the crate root). Newer webpki/rustls-webpki declare it properly.
+[[licenses.clarify]]
+name = "webpki"
+version = "0.22.4"
+expression = "ISC"
+license-files = [
+    { path = "LICENSE", hash = 0x001c7e6c },
 ]
 
 [bans]
