@@ -9,7 +9,8 @@
 // handlers) rely on the middleware to copy the cookie onto the request
 // header, so we only stamp the header here when running in the browser.
 
-import { currentTenant, TENANT_HEADER } from "./tenant";
+import { currentTenant, TENANT_COOKIE, TENANT_HEADER } from "./tenant";
+import { SESSION_COOKIE } from "./session";
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 
@@ -132,11 +133,41 @@ function tenantHeaders(): Record<string, string> {
   return { [TENANT_HEADER]: id };
 }
 
+/// Server Components fetch the same-origin /api/* surface, and those routes
+/// require the signed operator session — but a server-side `fetch` starts with
+/// no cookies, so every one of them came back 401 and each page fell back to its
+/// empty state. The console home page therefore read "No agents registered yet"
+/// on a deployment with 369 agents, while the client-rendered header on the same
+/// page showed the real count. Forward the operator's own cookie so a Server
+/// Component sees exactly what that operator is authorized to see — no more.
+async function serverAuthHeaders(): Promise<Record<string, string>> {
+  if (typeof window !== "undefined") return {};
+  try {
+    const { cookies } = await import("next/headers");
+    const jar = await cookies();
+    const forwarded = [SESSION_COOKIE, TENANT_COOKIE]
+      .map((name) => {
+        const value = jar.get(name)?.value;
+        return value ? `${name}=${value}` : "";
+      })
+      .filter(Boolean)
+      .join("; ");
+    return forwarded ? { cookie: forwarded } : {};
+  } catch {
+    // Outside a request scope (build-time prerender, scripts): nothing to forward.
+    return {};
+  }
+}
+
 async function get<T>(url: string): Promise<ApiResult<T>> {
   try {
+    const serverHeaders = await serverAuthHeaders();
     const res = await fetch(absolutize(url), {
-      next: { revalidate: 10 },
-      headers: { ...tenantHeaders() },
+      // No shared cache: the response is scoped to the operator session and the
+      // tenant it authorizes, so a cached entry could be served to a different
+      // operator on the next request.
+      cache: "no-store",
+      headers: { ...tenantHeaders(), ...serverHeaders },
     });
     if (!res.ok) {
       return { ok: false, error: `HTTP ${res.status}` };

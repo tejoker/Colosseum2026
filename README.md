@@ -61,6 +61,14 @@ to everything. More entry points: [`examples/`](examples/) (one folder per
 framework), the [MCP server](mcp-server/) (add SauronID to any MCP-capable
 agent without SDK work), and the [docs site](docs/site/).
 
+| Console — your agents | Getting started | API explorer |
+|---|---|---|
+| [![Console home listing registered agents with their per-agent call counts](docs/img/dashboard-overview.png)](docs/img/dashboard-overview.png) | [![Four-step guided setup showing the active operator and tenant](docs/img/dashboard-welcome.png)](docs/img/dashboard-welcome.png) | [![API explorer listing admin and read endpoints with copy-as-curl buttons](docs/img/dashboard-explorer.png)](docs/img/dashboard-explorer.png) |
+
+Captured from the `docker compose up` evaluation stack above with
+`npm run screenshots` in [`dashboard/`](dashboard/) — real data from the seeded
+tenant, not mockups.
+
 ## Why this matters
 
 An AI agent compromised by prompt injection or hostile tools can do real damage
