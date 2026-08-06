@@ -35,10 +35,11 @@ jobs:
   kya-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # Per-run dev admin key (set in the first step, propagated to every
-      # subsequent step + docker compose via $GITHUB_ENV).
-      SAURON_ADMIN_KEY: ""
+    # No job-level SAURON_ADMIN_KEY: a job-level `env` entry WINS over anything a
+    # step writes to $GITHUB_ENV, so declaring it as "" here pinned it empty for
+    # every step. compose then hit `${SAURON_ADMIN_KEY:?...}` (which fires on
+    # empty as well as unset) and died in under a second. The key is generated in
+    # the first step below.
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -48,11 +49,12 @@ jobs:
           KEY="$(openssl rand -hex 32)"
           ISSUER="$(openssl rand -hex 32)"
           echo "SAURON_ADMIN_KEY=${KEY}" >> "$GITHUB_ENV"
-          # docker compose interpolation needs the value to be present at compose-up time.
+          # compose interpolation reads .env from the PROJECT directory, which for
+          # `-f deploy/docker-compose.yml` is deploy/, not the repo root.
           {
             echo "SAURON_ADMIN_KEY=${KEY}"
             echo "ISSUER_SEED=${ISSUER}"
-          } > .env
+          } > deploy/.env
 
       - name: Show Docker versions
         run: |

@@ -65,8 +65,10 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/sauron_test
       SAURON_DB_BACKEND: postgres
-      # Per-run dev admin key; populated in the "Generate per-run admin key" step.
-      SAURON_ADMIN_KEY: ""
+      # No SAURON_ADMIN_KEY here: a job-level `env` entry WINS over anything a
+      # step writes to $GITHUB_ENV, so declaring it as "" pinned it empty for
+      # every step — the backend booted without a usable admin key and the race
+      # scenario could not provision. It is generated in the first step below.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
