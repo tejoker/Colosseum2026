@@ -50,10 +50,8 @@ services:
     restart: unless-stopped
 
   # ── Hardhat Local EVM Node (port 8545) ──────────────────────────────────────
-  hardhat-node:
-    build: ../contracts/revocation
-    container_name: sauron-hardhat
-    ports:
-      - "8545:8545"
-    command: npx hardhat node --hostname 0.0.0.0
-    restart: unless-stopped
+  # A `hardhat-node` service used to live here, building ../contracts/revocation.
+  # That directory went with the banking surface (contracts/ now holds only
+  # sauron_ledger), and compose validates every build context when it loads the
+  # file — so `up -d backend` failed instantly with a missing build path no
+  # matter which service was selected. Nothing referenced it. Removed.
