@@ -11,8 +11,12 @@
 
 ```bash
 git clone https://github.com/tejoker/HackNation2026 sauronid && cd sauronid
-docker compose up        # core :3001 + dashboard :3000 + seeded demo tenant
+SAURON_REQUIRE_CALL_SIG=1 docker compose up   # core :3001 + dashboard :3000 + seeded demo tenant
 ```
+
+Without `SAURON_REQUIRE_CALL_SIG=1` the stack runs in advisory mode, where
+signature violations are logged and **not** refused — useful for a first
+integration, useless for judging the product.
 
 Then leash your first agent (Python shown; same 15 lines in
 [TypeScript](agentic/README.md) and [Go](clients/go/sauronid/README.md)):
@@ -27,15 +31,28 @@ agent = register_llm_agent(
     client,
     user_session=auth["session"],
     user_key_image=auth["key_image"],
-    model_id="claude-opus-4-8",
+    model_id="claude-opus-5",
     system_prompt="You are a research assistant.",
     tools=["search", "fetch"],
 )
-resp = agent.call("POST", "/internal/api/search", json_body={"query": "..."})
-# Every call is Ed25519-signed, replay-protected, body-bound, and receipted.
-# A tampered body, replayed nonce, or drifted config is rejected server-side
-# with a JSON error that tells you the code, the why, and the fix.
+
+# Every agent.call() is Ed25519-signed over method, path, body, timestamp, a
+# one-use nonce and the agent's config digest.
+ok = agent.call("GET", f"/agent/{agent.agent_id}")
+print("signed  :", ok.status_code)          # 200
+
+# The same client, one line later, with the per-call signature withheld — on a
+# route the gateway enforces:
+denied = agent.call("POST", "/agent/action/challenge", json_body={}, skip_sig=True)
+print("unsigned:", denied.status_code, denied.json()["error"]["code"])
+# 401 call_sig_missing_header
+# .json()["error"]["fix"] names the exact headers that were missing.
 ```
+
+That second call is the product. A tampered body, a replayed nonce, a drifted
+config digest and a wrong-key signature are refused the same way, each with a
+`code`, a reason and a `fix` — see the
+[16-attack suite](redteam/) for one scenario per rejection.
 
 Log in to the dashboard at `http://localhost:3000` (dev/dev) and open
 **Getting started** for the guided version, or **API** for copy-as-curl access
@@ -284,15 +301,16 @@ agent = register_llm_agent(
     client,
     user_session=user_session,
     user_key_image=user_key_image,
-    model_id="claude-opus-4-8",
+    model_id="claude-opus-5",
     system_prompt=open("prompts/research_agent.md").read(),
     tools=["search", "fetch"],
 )
 
 # agent.call(method, path, ...) signs every request with the agent's per-call
 # key (DPoP-style) and binds the config digest — a tampered body, replayed
-# nonce, or drifted config is rejected server-side.
-result = agent.call("POST", "/internal/api/search", json_body={"query": "..."})
+# nonce, or drifted config is rejected server-side. Point it at any route this
+# deployment serves; the signature covers whatever you send.
+result = agent.call("GET", f"/agent/{agent.agent_id}")
 
 # For leashed + on-chain-anchored actions (payments, KYC consent): request a
 # challenge, ring-sign it with the agent's ring secret, then submit the proof.
