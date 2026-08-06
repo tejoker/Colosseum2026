@@ -26,6 +26,19 @@ services:
       - DATABASE_PATH=/var/lib/sauronid/sauron.db
       - SAURON_ACCEPT_SINGLE_NODE_SQLITE=1
       - SAURON_ENABLE_DEV_ENDPOINTS=1
+      # Fail closed by default, so what an evaluator sees is the product. With
+      # this at 0 the call-signature layer is a no-op: an unsigned request gets
+      # 200 and the same body as a signed one. Compose only forwards variables a
+      # service declares, so without this line `SAURON_REQUIRE_CALL_SIG=1 docker
+      # compose up` silently did nothing.
+      - SAURON_REQUIRE_CALL_SIG=${SAURON_REQUIRE_CALL_SIG:-1}
+      # Same limiter settings the release gate uses to run the 16-attack suite
+      # (release-gate.yml): the suite is a deliberate localhost load generator and
+      # trips the coarse per-IP limiter on setup. The per-endpoint register window
+      # stays finite so scenario A12 still has a limit to hit.
+      - SAURON_RISK_AGENT_REGISTER_PER_WINDOW=${SAURON_RISK_AGENT_REGISTER_PER_WINDOW:-60}
+      - SAURON_GLOBAL_RATE_LIMIT_RPS=${SAURON_GLOBAL_RATE_LIMIT_RPS:-100000}
+      - SAURON_GLOBAL_RATE_LIMIT_BURST=${SAURON_GLOBAL_RATE_LIMIT_BURST:-100000}
       - SAURON_ADMIN_KEY=dev-only-admin-key-not-for-production
       # Dev only: dashboard counters and seed summary read deployment-global
       # admin views (/admin/stats), which tenant-scoped keys cannot.

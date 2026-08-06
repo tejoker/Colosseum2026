@@ -11,12 +11,13 @@
 
 ```bash
 git clone https://github.com/tejoker/HackNation2026 sauronid && cd sauronid
-SAURON_REQUIRE_CALL_SIG=1 docker compose up   # core :3001 + dashboard :3000 + seeded demo tenant
+docker compose up        # core :3001 + dashboard :3000 + seeded demo tenant
 ```
 
-Without `SAURON_REQUIRE_CALL_SIG=1` the stack runs in advisory mode, where
-signature violations are logged and **not** refused — useful for a first
-integration, useless for judging the product.
+The evaluation stack is **fail-closed by default**: unsigned or tampered calls
+are refused, not logged. `SAURON_REQUIRE_CALL_SIG=0 docker compose up` switches
+the signature layer to advisory for a first integration — in that mode an
+unsigned call returns 200, so it is not what you should judge the product on.
 
 Then leash your first agent (Python shown; same 15 lines in
 [TypeScript](agentic/README.md) and [Go](clients/go/sauronid/README.md)):
