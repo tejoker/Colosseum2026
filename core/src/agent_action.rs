@@ -655,10 +655,7 @@ pub fn validate_anon_action(
     for (ring_id, sig) in env.also_ring_ids.iter().zip(&proof.also_ring_signatures) {
         let (also_rule, also_version) = crate::rings::get_ring(db, &env.tenant_id, ring_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-            .ok_or((
-                StatusCode::NOT_FOUND,
-                format!("ring '{ring_id}' not found"),
-            ))?;
+            .ok_or((StatusCode::NOT_FOUND, format!("ring '{ring_id}' not found")))?;
         if let crate::rings::RuleDecision::Deny(why) =
             crate::rings::evaluate_rule(&also_rule, &env.action, &env.config_digest)
         {
@@ -1221,7 +1218,12 @@ mod tests {
         assert_eq!(r.policy_version, "ring:r:v1+ring:s:v1");
         // The two per-ring key images differ — no cross-ring correlation leaks.
         let k_r = hex::encode(proof.ring_signature.key_image.compress().as_bytes());
-        let k_s = hex::encode(proof.also_ring_signatures[0].key_image.compress().as_bytes());
+        let k_s = hex::encode(
+            proof.also_ring_signatures[0]
+                .key_image
+                .compress()
+                .as_bytes(),
+        );
         assert_ne!(k_r, k_s);
     }
 
@@ -1260,7 +1262,12 @@ mod tests {
         let shared = crate::ring_pseudonym::shared_secret_agent(&a, &big_t);
         let signer_id = crate::ring_pseudonym::agent_ring_identity(&a, &shared, "s");
         let members = crate::rings::list_member_points(&db, "default", "s").unwrap();
-        let forged = ring::sign(&canonical_anon_envelope_bytes(&env), &members, &signer_id, 0);
+        let forged = ring::sign(
+            &canonical_anon_envelope_bytes(&env),
+            &members,
+            &signer_id,
+            0,
+        );
         let proof = AnonActionProof {
             ring_signature: sign_anon_for_ring(&db, &a, &t, &env, "r"),
             envelope: env,
