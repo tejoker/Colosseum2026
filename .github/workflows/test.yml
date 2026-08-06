@@ -157,16 +157,32 @@ jobs:
           # acknowledgement is required to boot in the default (production)
           # runtime. This CI box IS single-node, so accepting it is honest.
           SAURON_ACCEPT_SINGLE_NODE_SQLITE: "1"
+          # ENV is unset here, so the runtime resolves to production and
+          # assert_production_enforcement_safe() hard-panics before binding the
+          # socket unless every one of these is present. Without them the
+          # process died instantly and the health wait below timed out — which
+          # is what this job did on every run since the gate was added.
+          SAURON_MAX_ACTION_USD: "1000"
         run: |
+          export SAURON_AUDIT_HMAC_KEY="$(openssl rand -hex 32)"
+          export SAURON_TOKEN_SECRET="$(openssl rand -hex 32)"
+          export SAURON_JWT_SECRET="$(openssl rand -hex 32)"
+          export SAURON_OPRF_SEED="$(openssl rand -hex 32)"
+          # Production refuses to boot unless the reviewed guest image IDs are
+          # pinned; use the ones committed in transparent-zk/image-ids.json.
+          SAURON_TRANSPARENT_IMAGE_IDS_JSON="$(python3 -c 'import json;print(json.dumps(json.load(open("../transparent-zk/image-ids.json"))["programs"]))')"
+          export SAURON_TRANSPARENT_IMAGE_IDS_JSON
           cargo build --locked --bin sauron-core
           nohup ./target/debug/sauron-core > /tmp/sauron-core.log 2>&1 &
           echo $! > /tmp/sauron-core.pid
 
       - name: Wait for backend health
+        # /healthz, not /admin/stats: the latter is a deployment-global view and
+        # answers 401 to a tenant-scoped admin key ("use a cross-tenant
+        # super-admin"), so it can never be a liveness probe here.
         run: |
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:3001/admin/stats \
-                 -H "x-admin-key: ${SAURON_ADMIN_KEY}" >/dev/null; then
+            if curl -sf http://localhost:3001/healthz >/dev/null; then
               echo "backend healthy"
               exit 0
             fi
