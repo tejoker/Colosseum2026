@@ -97,6 +97,15 @@ bad = False
 for f in sorted(glob.glob("docker-compose*.yml") + glob.glob("deploy/docker-compose*.yml")):
     base = os.path.dirname(os.path.join(root, f)) or root
     for name, svc in (yaml.safe_load(open(f)) or {}).get("services", {}).items():
+        # An `environment` entry that parses as a mapping instead of a string
+        # means an unquoted ": " somewhere in the value — typically inside a
+        # ${VAR:?message}. Compose then refuses to load the whole file with
+        # "unexpected type map[string]interface {}", so every service dies.
+        for i, item in enumerate(svc.get("environment") or []):
+            if not isinstance(item, str):
+                print(f"  FAIL {f}:{name} environment[{i}] parses as "
+                      f"{type(item).__name__}, not a string — quote the entry")
+                bad = True
         b = svc.get("build")
         if not b:
             continue
