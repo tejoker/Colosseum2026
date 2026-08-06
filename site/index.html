@@ -111,9 +111,9 @@ agent.authorize_payment(amount_usd=120)
   </section>
 
   <section aria-label="Quickstart">
-    <h2>Two minutes to a leashed call</h2>
+    <h2>From clone to a refused call</h2>
     <div class="demo">
-<pre>docker compose up          <span class="dim"># core + dashboard + seeded demo tenant</span>
+<pre>SAURON_REQUIRE_CALL_SIG=1 docker compose up   <span class="dim"># fail-closed; omit it and violations are only logged</span>
 python -m pip install -e clients/python
 python examples/python-quickstart/main.py</pre>
     </div>
