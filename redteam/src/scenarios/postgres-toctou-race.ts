@@ -39,6 +39,14 @@ import { CoreApi, randSuffix } from "../core-api";
 import { signCallV2 } from "../call-sig-v2";
 
 const N = Math.max(2, parseInt(process.env.SAURON_RACE_N || "50", 10) || 50);
+
+/** jti claim of an A-JWT, so the challenge body binds to the same token. */
+function parseJwtJti(token: string): string {
+    const payload = token.split(".")[1];
+    if (!payload) return "";
+    const obj = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+    return typeof obj.jti === "string" ? obj.jti : "";
+}
 const baseUrl = process.env.API_URL || process.env.SAURON_CORE_URL || "http://127.0.0.1:3001";
 if (!process.env.SAURON_ADMIN_KEY) {
     throw new Error(
@@ -117,14 +125,30 @@ export async function scenarioPostgresToctouRace(
     const configDigest = agentRecord.agent_checksum ?? "";
     if (!configDigest) throw new Error("server did not return agent_checksum");
 
-    const path = "/agent/payment/authorize";
+    // The race used to run against /agent/payment/authorize. That endpoint can no
+    // longer host it: it requires a signed agent_action proof (missing → 422) and
+    // then a single-use PoP challenge (missing → 401), and both checks land
+    // BEFORE the handler consumes the call nonce. Every request in the burst came
+    // back a non-409 "winner" and the invariant could never hold. Worse, PoP
+    // challenges are single-use, so N concurrent requests can never all reach the
+    // nonce — the losers would 401 on PoP, not 409 on the nonce.
+    //
+    // /agent/action/challenge is call-sig-protected with no PoP requirement, so it
+    // isolates exactly what this scenario targets: Repo::consume_call_nonce under
+    // concurrency. The follow-up payment block below is skipped as a result (no
+    // authorization_id), which is honest — /agent/payment/consume was removed in
+    // d6d5a64 and consume_payment_authorization has no live endpoint to race.
+    const path = "/agent/action/challenge";
     const body = JSON.stringify({
-        ajwt,
-        jti: `jti-pgrace-${sfx}`,
+        agent_id: agentId,
+        human_key_image: key_image,
+        action: "payment_initiation",
+        resource: "",
+        merchant_id: `mch-${sfx}`,
         amount_minor: 100,
         currency: "EUR",
-        merchant_id: `mch-${sfx}`,
-        payment_ref: `pay-${sfx}`,
+        ajwt_jti: parseJwtJti(ajwt),
+        ttl_secs: 120,
     });
     const headers = {
         "content-type": "application/json",

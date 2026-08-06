@@ -83,7 +83,17 @@ if [[ -z "$pop_public_key_b64u" ]]; then
   rm -f "$tmp_pop_json"
   exit 1
 fi
-pop_jkt="e2e-pay-pop-${rand_suffix}"
+# RFC 7638 thumbprint of the OKP key above, matching
+# crypto_protocol::ed25519_jwk_thumbprint. /agent/register rejects any other
+# value ("pop_jkt must be the RFC 7638 thumbprint of pop_public_key_b64u"), so a
+# made-up label here failed the test before it sent a single payment request.
+pop_jkt=$(python3 - "$pop_public_key_b64u" <<'PY'
+import base64, hashlib, sys
+x = sys.argv[1].strip()
+canonical = '{"crv":"Ed25519","kty":"OKP","x":"%s"}' % x
+print(base64.urlsafe_b64encode(hashlib.sha256(canonical.encode()).digest()).decode().rstrip("="))
+PY
+)
 
 agent_keys=$(agent_action_keygen)
 agent_public_key_hex=$(printf '%s' "$agent_keys" | json_get "public_key_hex")
@@ -169,30 +179,13 @@ if [[ -z "$authorization_id" ]]; then
   exit 1
 fi
 
-printf '[E2E payment-auth] merchant consume with receipt + leash\n'
-consume_token_res=$(issue_agent_token "$session" "$agent_id" 300)
-consume_ajwt=$(printf '%s' "$consume_token_res" | json_get "ajwt")
-agent_action_consume=$(sign_agent_action "$agent_secret_hex" "$agent_id" "$key_image" "payment_consume" "$authorization_id" "$merchant_ok" 1234 "EUR" "$consume_ajwt")
-consume_body=$(python3 - "$authorization_id" "$merchant_ok" "$consume_ajwt" "$authorization_receipt" "$agent_action_consume" <<'PY'
-import json, sys
-authorization_id, merchant_id, ajwt, receipt, proof = sys.argv[1:]
-print(json.dumps({
-  "authorization_id": authorization_id,
-  "merchant_id": merchant_id,
-  "ajwt": ajwt,
-  "authorization_receipt": json.loads(receipt),
-  "agent_action": json.loads(proof),
-}, separators=(",", ":")))
-PY
-)
-code_consume=$(curl -sS -o /tmp/pay_consume_ok.json -w '%{http_code}' -X POST "${API_URL}/merchant/payment/consume" \
-  -H 'content-type: application/json' \
-  -d "$consume_body")
-if [[ "$code_consume" != "200" ]]; then
-  echo "merchant consume should succeed: $(cat /tmp/pay_consume_ok.json)" >&2
-  rm -f "$tmp_pop_json"
-  exit 1
-fi
+# A "merchant consume with receipt + leash" stage used to sit here, posting to
+# /merchant/payment/consume. That route was deliberately removed in d6d5a64
+# ("no more kyc + PoNP") and nothing replaced it, so the stage had been posting
+# into a 404 — the empty response body is why this test reported
+# "merchant consume should succeed:" with no detail. The authorization stages
+# above still cover the leash (cap, merchant allowlist, valid charge); if a
+# consume endpoint comes back, restore this stage with it.
 
 printf '[E2E payment-auth] deny replayed A-JWT (JTI)\n'
 pop_json=$(fresh_pop_jws "$session" "$agent_id" "$tmp_pop_json")
