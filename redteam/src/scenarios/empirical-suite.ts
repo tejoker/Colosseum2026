@@ -741,7 +741,14 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
                 nationality: "FRA",
             });
             const { session, key_image } = await api.userAuth(email, password);
-            const N = envLimit + 5;
+            // Twice the quota, not quota+5. risk::check_and_increment uses a
+            // TUMBLING window (`window_id = now / SAURON_RISK_WINDOW_SECS`), so a
+            // burst that straddles the boundary has its count split between two
+            // windows. Under load this suite's burst took 9.4s and a 65-request
+            // burst against a limit of 60 split into two under-quota halves —
+            // zero 429s, and A12 failed against a limiter that works. At 2×+5
+            // even an even split leaves one window over quota.
+            const N = envLimit * 2 + 5;
             const t0 = Date.now();
             const responses = await Promise.all(
                 Array.from({ length: N }, (_, i) => {
@@ -1195,23 +1202,29 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
         }
         const s1 = trimmedStats(earlySamples);
         const s2 = trimmedStats(lateSamples);
-        const meanDiff = Math.abs(s1.mean - s2.mean); // µs
-        // Welch t-like denominator: pooled stddev of the two means.
-        const seDiff = Math.sqrt(s1.std ** 2 / s1.n + s2.std ** 2 / s2.n);
+        // PAIRED statistic. The two flavours are probed back-to-back inside one
+        // iteration, so the per-pair difference cancels whatever ambient drift
+        // both members shared — a GC pause, a busy host, a build running on the
+        // same box. A difference of independent means absorbs that drift instead,
+        // which is what made this scenario flaky: on a loaded machine it reported
+        // a >50µs gap, and failed the whole suite, against an implementation that
+        // is constant-time. Same thresholds, applied to the mean of differences.
+        const pairDiffs = earlySamples.map((early, i) => early - lateSamples[i]);
+        const d = trimmedStats(pairDiffs);
+        const meanDiff = Math.abs(d.mean); // µs
+        const seDiff = d.std / Math.sqrt(d.n);
         const tStat = meanDiff / Math.max(seDiff, 1e-9);
         // Analysis negative control: the exact statistic must flag a deliberately
         // separated distribution, or a noisy/buggy detector could always pass.
-        const controlA = trimmedStats(Array.from({ length: 200 }, (_, i) => 100 + (i % 5)));
-        const controlB = trimmedStats(Array.from({ length: 200 }, (_, i) => 300 + (i % 5)));
-        const controlDiff = Math.abs(controlA.mean - controlB.mean);
-        const controlSe = Math.sqrt(
-            controlA.std ** 2 / controlA.n + controlB.std ** 2 / controlB.n
-        );
-        const controlT = controlDiff / Math.max(controlSe, 1e-9);
+        // Paired form — a real 200µs offset with ±2µs jitter must be caught.
+        const controlPairs = Array.from({ length: 200 }, (_, i) => 200 + (i % 5));
+        const controlStats = trimmedStats(controlPairs);
+        const controlDiff = Math.abs(controlStats.mean);
+        const controlT = controlDiff / Math.max(controlStats.std / Math.sqrt(controlStats.n), 1e-9);
         const detectorControlPassed = controlT >= 3 && controlDiff >= 50;
         // Threshold: |t| < 3 → no statistically significant timing gap at ~99.7% CI.
-        // We also require the absolute mean-diff to be small in µs terms (< 50µs)
-        // to remain meaningful even when both groups have wide network-induced std.
+        // We also require the absolute mean paired difference to be small in µs
+        // terms (< 50µs) so the verdict stays meaningful under wide network noise.
         const ok = detectorControlPassed && tStat < 3 && meanDiff < 50;
         record(
             out,
@@ -1220,10 +1233,10 @@ async function runEmpiricalSuite(api: CoreApi): Promise<TestResult[]> {
             "blocked",
             ok ? "blocked" : "allowed",
             ms,
-            `early_mean=${s1.mean.toFixed(2)}µs σ=${s1.std.toFixed(2)} | late_mean=${s2.mean.toFixed(2)}µs σ=${s2.std.toFixed(2)} | Δ=${meanDiff.toFixed(2)}µs t=${tStat.toFixed(2)} | detector_control_t=${controlT.toFixed(2)}`,
+            `early_mean=${s1.mean.toFixed(2)}µs σ=${s1.std.toFixed(2)} | late_mean=${s2.mean.toFixed(2)}µs σ=${s2.std.toFixed(2)} | paired Δ=${d.mean.toFixed(2)}µs σ=${d.std.toFixed(2)} n=${d.n} t=${tStat.toFixed(2)} | detector_control_t=${controlT.toFixed(2)}`,
             {
                 dynamic: true,
-                evidence: `Welch-style |t|=${tStat.toFixed(2)} (<3 ⇒ no oracle); subtle::ConstantTimeEq walks full sig regardless of first mismatch`,
+                evidence: `paired |t|=${tStat.toFixed(2)} over ${d.n} back-to-back pairs (<3 ⇒ no oracle), mean Δ=${d.mean.toFixed(2)}µs; subtle::ConstantTimeEq walks full sig regardless of first mismatch`,
             }
         );
     }

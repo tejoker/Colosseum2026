@@ -41,7 +41,12 @@ export SAURON_CORE_URL="${SAURON_CORE_URL:-http://127.0.0.1:3001}"
 export SAURON_URL="${SAURON_URL:-$SAURON_CORE_URL}"
 export RUST_LOG="${RUST_LOG:-warn}"
 
-ENFORCE_MODE="${SAURON_REQUIRE_CALL_SIG:-0}"
+# Fail closed by default: with the call-signature layer advisory, an unsigned
+# request gets 200 and the same body as a signed one, so an evaluator would be
+# looking at a leash that is not holding. Set SAURON_REQUIRE_CALL_SIG=0 to run
+# advisory during a first integration — that path also runs the 9-scenario
+# invariant suite instead of the 16-attack fail-closed suite.
+ENFORCE_MODE="${SAURON_REQUIRE_CALL_SIG:-1}"
 case "$ENFORCE_MODE" in
     1|true|yes|TRUE|YES|True|Yes) ENFORCE_MODE=1 ;;
     *) ENFORCE_MODE=0 ;;
