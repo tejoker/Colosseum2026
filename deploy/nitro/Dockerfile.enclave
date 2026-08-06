@@ -19,6 +19,9 @@ RUN dnf install -y rustc cargo openssl-devel \
 
 WORKDIR /build
 COPY core ./core
+# core's manifest resolves a path dependency at ../transparent-zk/types; without
+# it `cargo build --manifest-path core/Cargo.toml` cannot even load the manifest.
+COPY transparent-zk/types ./transparent-zk/types
 
 # The enclave binary intentionally has zero new dependencies (see
 # core/src/bin/nitro-enclave.rs). Building with --bin lets us skip the rest

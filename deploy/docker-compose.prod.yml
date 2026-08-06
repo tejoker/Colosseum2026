@@ -2,7 +2,11 @@
 # Use a secret manager or environment injection in real deployments.
 services:
   backend:
-    build: ../core
+    # Context is the repo root: core's manifest has a path dependency on
+    # transparent-zk/types. See the comment at the top of core/Dockerfile.
+    build:
+      context: ..
+      dockerfile: core/Dockerfile
     image: sauronid-backend:${SAURONID_IMAGE_TAG:-latest}
     ports:
       - "${SAURONID_BACKEND_PORT:-3001}:3001"

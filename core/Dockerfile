@@ -3,13 +3,22 @@ FROM rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb23
 
 WORKDIR /app
 
-# Fetch exactly the dependency graph committed for this release. A missing or
-# stale lockfile is a hard build failure.
-COPY Cargo.toml Cargo.lock ./
-RUN cargo fetch --locked
+# The build context is the REPOSITORY ROOT, not core/. core's manifest resolves
+# a path dependency at ../transparent-zk/types, which a core/-scoped context
+# cannot see — `cargo fetch --locked` then fails outright and no image is ever
+# produced. Every compose file passes `context: <repo root>` with
+# `dockerfile: core/Dockerfile`; keep them in step with this file.
+COPY core/Cargo.toml core/Cargo.lock ./core/
+COPY transparent-zk/types ./transparent-zk/types
+# src/ must be in place before any cargo invocation: with only a manifest,
+# cargo aborts with "no targets specified in the manifest", so the old
+# manifest-only `cargo fetch` dependency-cache layer could never have worked.
+COPY core/src ./core/src
 
-# Build the actual project
-COPY src/ src/
+WORKDIR /app/core
+
+# --locked: build exactly the dependency graph committed for this release. A
+# missing or stale lockfile is a hard build failure.
 RUN cargo build --locked --release
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
@@ -21,9 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/sauron-core .
-COPY --from=builder /app/target/release/client ./client
-COPY seed.sh .
+COPY --from=builder /app/core/target/release/sauron-core .
+COPY --from=builder /app/core/target/release/client ./client
+COPY core/seed.sh .
 
 # Non-root runtime user. /app is writable for the default DATABASE_PATH
 # (./sauron.db); /var/lib/sauronid is the volume mount point used by the

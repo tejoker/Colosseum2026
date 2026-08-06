@@ -1,0 +1,25 @@
+# Build context for images whose context is the repository root
+# (core/Dockerfile, deploy/nitro/Dockerfile.enclave). Without these rules the
+# context upload is >12 GB of build output. Do not exclude core/ or
+# transparent-zk/types — both are COPYed by core/Dockerfile.
+**/target/
+**/node_modules/
+**/.next/
+**/__pycache__/
+**/*.pyc
+.venv/
+.git/
+.github/
+
+# Local databases and generated state.
+*.db
+*.db-wal
+*.db-shm
+redteam/loadtest/results/
+
+# Secrets must never enter a build context.
+.dev-secrets
+prod.secrets.env
+*.secrets.env
+.env
+.env.local
