@@ -22,7 +22,11 @@ services:
       # Required. Production requires >=32-byte keys; see admin::init_admin_auth.
       - SAURON_ADMIN_KEY=${SAURON_ADMIN_KEY:?SAURON_ADMIN_KEY is required — generate with: openssl rand -hex 32, then export or place in a .env file.}
     healthcheck:
-      test: [ "CMD-SHELL", "curl -sf http://localhost:3001/admin/stats -H \"x-admin-key: $$SAURON_ADMIN_KEY\" || exit 1" ]
+      # /healthz, not /admin/stats: that view is deployment-global and answers
+      # 401 unless the key is a cross-tenant super-admin, so the container would
+      # never report healthy and `dashboard` (depends_on: service_healthy) would
+      # wait forever.
+      test: [ "CMD-SHELL", "curl -sf http://localhost:3001/healthz || exit 1" ]
       interval: 3s
       timeout: 5s
       retries: 15
