@@ -66,7 +66,11 @@ describe("setCurrentTenant()", () => {
 
 describe("availableTenants()", () => {
   it("fetches /api/tenants and merges the response with DEFAULT_TENANT", async () => {
-    const fetchMock = vi.fn(async () => ({
+    // The parameters are declared even though the body ignores them: vitest 4
+    // types mock.calls from the implementation's signature, so a zero-arg
+    // implementation makes calls[0] an empty tuple and the assertion below a
+    // type error ("Tuple type '[]' of length '0' has no element at index '0'").
+    const fetchMock = vi.fn(async (_input?: RequestInfo | URL, _init?: RequestInit) => ({
       ok: true,
       status: 200,
       json: async () => ({ tenants: ["acme", "globex"] }),

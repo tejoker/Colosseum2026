@@ -113,7 +113,7 @@ agent.authorize_payment(amount_usd=120)
   <section aria-label="Quickstart">
     <h2>From clone to a refused call</h2>
     <div class="demo">
-<pre>SAURON_REQUIRE_CALL_SIG=1 docker compose up   <span class="dim"># fail-closed; omit it and violations are only logged</span>
+<pre>docker compose up          <span class="dim"># fail-closed by default; =0 for advisory mode</span>
 python -m pip install -e clients/python
 python examples/python-quickstart/main.py</pre>
     </div>
