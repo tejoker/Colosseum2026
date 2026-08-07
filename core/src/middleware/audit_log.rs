@@ -422,6 +422,25 @@ fn write_db_sink(record: &AuditRecord) {
 /// order, recomputing each `entry_hash` and checking the `prev_hash` linkage.
 /// Returns `Err(reason)` at the first inconsistency (edit, deletion, reorder).
 /// Used by an admin verify endpoint / external auditor holding the audit key.
+/// Current head of the keyed audit chain: `(seq, entry_hash)`, or `None` when
+/// nothing has been logged yet.
+///
+/// The chain proves nobody edited the log *without the sealing key*. Whoever
+/// holds that key — the operator — can rewrite history and re-seal it. Anchoring
+/// this head into an external timestamp is what closes that: the head published
+/// at time T cannot be changed after T, so any later rewrite contradicts a
+/// commitment the operator does not control.
+pub fn audit_chain_head(conn: &rusqlite::Connection) -> Option<(i64, String)> {
+    conn.query_row(
+        "SELECT seq, entry_hash FROM security_audit_log
+         WHERE seq IS NOT NULL ORDER BY seq DESC LIMIT 1",
+        [],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+    )
+    .ok()
+    .filter(|(_, hash)| !hash.is_empty())
+}
+
 pub fn verify_audit_chain(conn: &rusqlite::Connection) -> Result<u64, String> {
     let key = audit_hmac_key();
     let mut stmt = conn

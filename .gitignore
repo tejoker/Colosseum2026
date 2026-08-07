@@ -155,3 +155,18 @@ deploy/native/dist/
 
 # compiled example binaries
 examples/go-quickstart/go-quickstart
+
+# ── ZKP issuer-dependent e2e (untracked, kept on disk) ────────────────────────
+# The ZKP issuer service went with the banking surface in 263fc0c and nothing
+# replaced it: core/src/issuer_runtime.rs is a client, not a server. These
+# scripts call zkp_require_issuer and hard-exit without one, so they cannot run
+# and were holding the KYA E2E job red. Untracked rather than deleted — restore
+# them from git history (or from disk) if a paying customer needs KYC/ZKP back.
+core/tests/e2e_agent_matrix.sh
+core/tests/e2e_ajwt_jti_replay.sh
+core/tests/e2e_kya_autonomous.sh
+core/tests/e2e_kya_delegated.sh
+core/tests/e2e_ring_restore_consent.sh
+core/tests/run_confidence_suite.sh
+core/tests/hf_fetch_and_matrix_test.sh
+core/tests/lib/zkp_fixture.sh

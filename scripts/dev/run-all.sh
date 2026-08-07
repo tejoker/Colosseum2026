@@ -57,6 +57,7 @@ CONF_SHARED_ITERS="${CONF_SHARED_ITERS:-1}" \
 CONF_MIGRATION_ITERS="${CONF_MIGRATION_ITERS:-1}" \
 CONF_RESTART_ITERS="${CONF_RESTART_ITERS:-1}" \
 CONF_MATRIX_AGENT_TYPES="${CONF_MATRIX_AGENT_TYPES:-claude,openai}" \
-"$ROOT/core/tests/run_confidence_suite.sh"
+# The confidence suite is part of the untracked ZKP issuer-dependent e2e set
+# (see .gitignore); it hard-exits without an issuer, which no longer exists.
 
 step "all checks passed"
