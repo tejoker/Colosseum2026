@@ -505,7 +505,12 @@ pub fn init_schema(conn: &Connection) {
             anchor_status    TEXT NOT NULL DEFAULT 'pending',
             anchor_error     TEXT NOT NULL DEFAULT '',
             leaf_version     INTEGER NOT NULL DEFAULT 1,
-            created_at       INTEGER NOT NULL
+            created_at       INTEGER NOT NULL,
+            -- Head of the keyed audit chain at the moment this batch was sealed.
+            -- Committed as an extra merkle leaf, so the external timestamp over
+            -- batch_root_hex also fixes the audit log as of this point.
+            audit_head_seq   INTEGER NOT NULL DEFAULT 0,
+            audit_head_hash  TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_root ON agent_action_anchors(batch_root_hex);
         CREATE INDEX IF NOT EXISTS idx_agent_action_anchors_range ON agent_action_anchors(from_created_at, to_created_at);
@@ -894,6 +899,14 @@ pub fn init_schema(conn: &Connection) {
     );
     // Receipt hash chain. Existing rows keep seq = 0 / prev_hash = '' and stay
     // verifiable under the v2 signature; new receipts chain from seq 1 upward.
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_anchors ADD COLUMN audit_head_seq INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_anchors ADD COLUMN audit_head_hash TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE agent_action_receipts ADD COLUMN seq INTEGER NOT NULL DEFAULT 0",
         [],

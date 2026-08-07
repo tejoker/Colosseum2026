@@ -3,7 +3,9 @@ set -euo pipefail
 
 OWNER="${OWNER:-tejoker}"
 REPO="${REPO:-HackNation2026}"
-CHECKS="${CHECKS:-release-gate,test-sqlite,test-postgres,kya-e2e,confidence-gate}"
+# confidence-gate is gone: it ran core/tests/run_confidence_suite.sh, which is
+# untracked with the rest of the ZKP issuer-dependent e2e surface.
+CHECKS="${CHECKS:-release-gate,test-sqlite,test-postgres,kya-e2e}"
 TARGET_BRANCHES=("$@")
 if [[ ${#TARGET_BRANCHES[@]} -eq 0 ]]; then
   TARGET_BRANCHES=(main pocv1)

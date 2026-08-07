@@ -114,6 +114,25 @@ fn leaf_hash_v1(receipt_id: &str, action_hash: &str, created_at: i64) -> [u8; 32
 /// V2 commits every security-relevant receipt field with unambiguous framing.
 /// Rewriting policy/JTI/PoP/status/signature/tenant metadata now changes the
 /// externally anchored root instead of leaving the old three-field leaf intact.
+/// Leaf committing the audit chain head into an anchored batch.
+///
+/// Separate domain from receipt leaves so an audit-head leaf can never be
+/// mistaken for a receipt leaf (or forged out of one). Anyone can recompute it
+/// from `(tenant_id, seq, entry_hash)` — the three values stored on the batch
+/// row — and check it against the anchored Merkle root.
+pub fn audit_head_leaf(tenant_id: &str, seq: i64, entry_hash: &str) -> [u8; 32] {
+    let seq_s = seq.to_string();
+    Sha256::digest(crate::crypto_protocol::canonical_fields(
+        "sauron.audit-head-leaf.v1",
+        &[
+            ("tenant_id", tenant_id),
+            ("audit_seq", &seq_s),
+            ("audit_entry_hash", entry_hash),
+        ],
+    ))
+    .into()
+}
+
 fn leaf_hash_v2(receipt: &AnchoredReceipt) -> [u8; 32] {
     let created_at = receipt.created_at.to_string();
     Sha256::digest(crate::crypto_protocol::canonical_fields(
@@ -223,11 +242,32 @@ pub async fn anchor_pending_actions_for_tenant(
         return Ok(None);
     }
 
-    // 3. Build the merkle tree over leaves.
-    let leaves: Vec<[u8; 32]> = receipts.iter().map(leaf_hash_v2).collect();
+    // 3. Build the merkle tree over leaves, plus one leaf committing the head of
+    //    the keyed audit chain.
+    //
+    //    The audit chain detects edits made WITHOUT the sealing key. The operator
+    //    holds that key, so on its own it cannot detect the operator rewriting
+    //    and re-sealing. Committing the head into a batch that gets externally
+    //    timestamped fixes that: the head as of this batch is published to
+    //    something the operator does not control, so a later rewrite contradicts
+    //    a prior commitment. Everything before the head is covered transitively —
+    //    it is a hash chain.
+    let audit_head = {
+        let st = state.read_or_recover();
+        let conn = st.db.lock().map_err(|e| e.to_string())?;
+        crate::middleware::audit_log::audit_chain_head(&conn)
+    };
+    let mut leaves: Vec<[u8; 32]> = receipts.iter().map(leaf_hash_v2).collect();
+    if let Some((seq, ref entry_hash)) = audit_head {
+        leaves.push(audit_head_leaf(tenant_id, seq, entry_hash));
+    }
     let tree = MerkleTree::<MerkleSha256>::from_leaves(&leaves);
     let root: [u8; 32] = tree.root().ok_or("empty merkle tree (unreachable)")?;
     let batch_root_hex = hex::encode(root);
+    let (audit_head_seq, audit_head_hash) = match audit_head {
+        Some((seq, hash)) => (seq, hash),
+        None => (0, String::new()),
+    };
 
     let from_receipt_id = receipts.first().unwrap().receipt_id.clone();
     let to_receipt_id = receipts.last().unwrap().receipt_id.clone();
@@ -245,8 +285,9 @@ pub async fn anchor_pending_actions_for_tenant(
             "INSERT INTO agent_action_anchors
              (anchor_id, batch_root_hex, n_actions, from_receipt_id, to_receipt_id,
              from_created_at, to_created_at, btc_anchor_id, sol_anchor_id,
-             anchor_status, anchor_error, leaf_version, created_at, tenant_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', 'pending', '', 2, ?8, ?9)",
+             anchor_status, anchor_error, leaf_version, created_at, tenant_id,
+             audit_head_seq, audit_head_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', 'pending', '', 2, ?8, ?9, ?10, ?11)",
             params![
                 anchor_id,
                 batch_root_hex,
@@ -257,6 +298,8 @@ pub async fn anchor_pending_actions_for_tenant(
                 to_created_at,
                 now_secs(),
                 tenant_id,
+                audit_head_seq,
+                audit_head_hash,
             ],
         )
         .map_err(|e| format!("DB insert agent_action_anchors: {e}"))?;
@@ -744,6 +787,45 @@ pub fn recent_batches_for_tenant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The anchored root must actually commit the audit head — otherwise the
+    /// external timestamp says nothing about the log. Rebuild the tree the way a
+    /// verifier would, from the receipts plus the (tenant, seq, hash) stored on
+    /// the batch row, and check that changing the head changes the root.
+    #[test]
+    fn anchored_root_commits_the_audit_head() {
+        let r = receipt();
+        let head_seq = 42i64;
+        let head_hash = "a".repeat(64);
+
+        let mut leaves: Vec<[u8; 32]> = vec![leaf_hash_v2(&r)];
+        leaves.push(audit_head_leaf(&r.tenant_id, head_seq, &head_hash));
+        let with_head = MerkleTree::<MerkleSha256>::from_leaves(&leaves)
+            .root()
+            .expect("root");
+
+        // Receipts alone produce a different root, so the head is genuinely
+        // inside the commitment rather than merely stored beside it.
+        let receipts_only = MerkleTree::<MerkleSha256>::from_leaves(&[leaf_hash_v2(&r)])
+            .root()
+            .expect("root");
+        assert_ne!(with_head, receipts_only);
+
+        // A rewritten log yields a different head hash, hence a different root:
+        // the operator cannot re-seal history and still match what was anchored.
+        let mut tampered: Vec<[u8; 32]> = vec![leaf_hash_v2(&r)];
+        tampered.push(audit_head_leaf(&r.tenant_id, head_seq, &"b".repeat(64)));
+        let after_rewrite = MerkleTree::<MerkleSha256>::from_leaves(&tampered)
+            .root()
+            .expect("root");
+        assert_ne!(with_head, after_rewrite);
+
+        // And the leaf is reproducible by anyone holding the three stored values.
+        assert_eq!(
+            audit_head_leaf(&r.tenant_id, head_seq, &head_hash),
+            audit_head_leaf(&r.tenant_id, head_seq, &head_hash)
+        );
+    }
 
     fn receipt() -> AnchoredReceipt {
         AnchoredReceipt {
