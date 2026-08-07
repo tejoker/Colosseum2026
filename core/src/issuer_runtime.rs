@@ -2,6 +2,7 @@
 //! `verify-proof`. Proof rejection (**HTTP 200** + `verified: false`) does **not** open the circuit.
 //! Use [`IssuerRuntime::verify_proof_failover`] with multiple base URLs for redundancy.
 
+use crate::sync_recover::MutexRecover;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -91,7 +92,7 @@ impl IssuerRuntime {
     /// Snapshot of all issuer endpoints that have interacted with this process (plus configured URLs).
     pub fn circuit_snapshots_json(&self, configured_bases: &[String]) -> serde_json::Value {
         let now = Self::now();
-        let map = self.gates.lock().unwrap();
+        let map = self.gates.lock_or_recover();
         let mut keys: Vec<String> = map.keys().cloned().collect();
         for k in configured_bases {
             let n = normalize_issuer_base(k);
@@ -123,7 +124,7 @@ impl IssuerRuntime {
         }
         let now = Self::now();
         let k = normalize_issuer_base(base);
-        let mut map = self.gates.lock().unwrap();
+        let mut map = self.gates.lock_or_recover();
         let g = map.entry(k).or_default();
         g.consecutive_trip_events = g.consecutive_trip_events.saturating_add(1);
         if g.consecutive_trip_events >= self.circuit_cfg.failure_threshold {
@@ -134,7 +135,7 @@ impl IssuerRuntime {
 
     fn reset_trips(&self, base: &str) {
         let k = normalize_issuer_base(base);
-        let mut map = self.gates.lock().unwrap();
+        let mut map = self.gates.lock_or_recover();
         if let Some(g) = map.get_mut(&k) {
             g.consecutive_trip_events = 0;
         }
@@ -153,7 +154,7 @@ impl IssuerRuntime {
 
         let now = Self::now();
         {
-            let map = self.gates.lock().unwrap();
+            let map = self.gates.lock_or_recover();
             let g = map.get(&base).copied().unwrap_or_default();
             if self.circuit_cfg.failure_threshold > 0 && now < g.open_until_epoch {
                 return Err(IssuerVerifyError::CircuitOpen);

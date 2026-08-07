@@ -31,6 +31,7 @@
 use crate::agent::{call_sig_skew_ms, VerifiedCallSig};
 use crate::error::AppError;
 use crate::state::ServerState;
+use crate::sync_recover::RwLockRecover;
 use crate::tenancy::TenantId;
 use axum::http::StatusCode;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -355,7 +356,7 @@ pub async fn verify_dpop_request(
     // checksum is intentionally NOT enforced here — DPoP proofs carry no
     // config digest (see module doc for why this surface is opt-in).
     let pop_pk_b64u: String = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT IFNULL(pop_public_key_b64u, '')
@@ -407,7 +408,7 @@ pub async fn verify_dpop_request(
 
     // Same replay window arithmetic as call-sig v2 (iat is already seconds).
     let jti_exp = proof.iat + skew_ms / 1000 + 60;
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     consume_jti(&repo, &agent_id, &proof.jti, jti_exp).await?;
 
     Ok(VerifiedCallSig { agent_id })

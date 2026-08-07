@@ -50,6 +50,7 @@ pub mod secret_provider;
 pub mod sites;
 pub mod solana_anchor;
 pub mod state;
+pub mod sync_recover;
 pub mod tenancy;
 pub mod transparent_proof;
 pub mod usage;

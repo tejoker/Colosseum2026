@@ -31,6 +31,7 @@ use sha2::{Digest, Sha512};
 
 use crate::ring_pseudonym;
 use crate::state::ServerState;
+use crate::sync_recover::RwLockRecover;
 
 /// Feature flag. The anonymous ring path is opt-in.
 pub fn anon_rings_enabled() -> bool {
@@ -413,7 +414,7 @@ pub async fn create_ring_handler(
 ) -> HandlerResult {
     require_enabled()?;
     let now = crate::ajwt_support::now_secs();
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     upsert_ring(&db, tenant.as_str(), &req.ring_id, &req.rule, now)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -428,7 +429,7 @@ pub async fn list_rings_handler(
     Extension(tenant): Extension<crate::tenancy::TenantId>,
 ) -> HandlerResult {
     require_enabled()?;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let rings =
         list_rings(&db, tenant.as_str()).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -452,7 +453,7 @@ pub async fn subscribe_handler(
     require_enabled()?;
     let trapdoor = operator_trapdoor().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let now = crate::ajwt_support::now_secs();
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     if get_ring(&db, tenant.as_str(), &ring_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
@@ -464,7 +465,7 @@ pub async fn subscribe_handler(
     let point = subscribe(&db, tenant.as_str(), &trapdoor, &master, &ring_id, now)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.log("RING_SUBSCRIBE", "OK", &ring_id);
     }
     Ok(Json(
@@ -481,13 +482,13 @@ pub async fn revoke_handler(
 ) -> HandlerResult {
     require_enabled()?;
     let trapdoor = operator_trapdoor().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let master = resolve_master_pub(&db, tenant.as_str(), &req)?;
     let removed = revoke(&db, tenant.as_str(), &trapdoor, &master, &ring_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.log("RING_REVOKE", if removed { "OK" } else { "NOOP" }, &ring_id);
     }
     Ok(Json(json!({ "ring_id": ring_id, "revoked": removed })))
@@ -500,7 +501,7 @@ pub async fn members_handler(
     Extension(tenant): Extension<crate::tenancy::TenantId>,
 ) -> HandlerResult {
     require_enabled()?;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let points = list_member_points(&db, tenant.as_str(), &ring_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;

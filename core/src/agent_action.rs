@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
 
+use crate::sync_recover::RwLockRecover;
 use crate::{policy, ring, state::ServerState, tenancy::TenantId};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -324,7 +325,7 @@ pub fn validate_agent_action(
     let now = now_secs();
 
     let (receipt, ring_ok) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let (db_human, revoked, expires_at, public_key_hex, registered_key_image, pop_jkt): (
             String,
@@ -775,7 +776,7 @@ pub async fn submit_anon_action(
         ));
     }
     let now = now_secs();
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let receipt = validate_anon_action(&db, &st.jwt_secret, &proof, now)?;
     Ok(Json(receipt))
@@ -799,7 +800,7 @@ pub async fn action_challenge(
     let ttl = payload.ttl_secs.clamp(15, 300);
     let now = now_secs();
     let (agent_ring_public_keys_hex, signer_index, signing_public_key_hex) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let signing_public_key_hex: String = db
             .query_row(
@@ -888,7 +889,7 @@ pub async fn receipt_verify(
     State(state): State<Arc<RwLock<ServerState>>>,
     Json(payload): Json<ReceiptVerifyBody>,
 ) -> Json<Value> {
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let valid_sig = verify_receipt_signature(&st.jwt_secret, &payload.receipt);
     let db_seen: bool = {
         let db = st.db.lock().unwrap();

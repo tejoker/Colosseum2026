@@ -20,6 +20,7 @@ use crate::error::AppError;
 use crate::policy;
 use crate::risk;
 use crate::state::ServerState;
+use crate::sync_recover::RwLockRecover;
 use crate::tenancy::TenantId;
 use axum::{
     extract::{Extension, Json, Path, State},
@@ -479,7 +480,7 @@ pub async fn register_agent(
     Json(mut payload): Json<RegisterAgentRequest>,
 ) -> Result<Json<RegisterAgentResponse>, (StatusCode, String)> {
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let human_key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
@@ -546,7 +547,7 @@ pub async fn register_agent(
     }
 
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let now = crate::ajwt_support::now_secs();
         risk::check_and_increment(
@@ -576,7 +577,7 @@ pub async fn register_agent(
                 "attestation_challenge_id is required for attested registration; request one from POST /agent/attestation/challenge".into(),
             ));
         }
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let now = now_secs();
         let row: Result<(String, String, String, i64, Option<i64>), rusqlite::Error> = db.query_row(
@@ -868,7 +869,7 @@ pub async fn register_agent(
     })?;
 
     if needs_attestation_challenge {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let now = now_secs();
         let changed = db
@@ -943,7 +944,7 @@ pub async fn register_agent(
 
     // Ensure no active agent already uses this pubkey.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let in_use: bool = db
             .query_row(
@@ -992,7 +993,7 @@ pub async fn register_agent(
 
     // Validate human exists in DB (dual-backend repo)
     {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         let exists = repo
             .user_exists(&human_key_image)
             .await
@@ -1006,7 +1007,7 @@ pub async fn register_agent(
     }
 
     let has_bank_link = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         has_bank_kyc_link(&db, &human_key_image)
     };
@@ -1023,7 +1024,7 @@ pub async fn register_agent(
     let (parent_opt, delegation_depth) = if payload.parent_agent_id.is_empty() {
         (None::<String>, 0i64)
     } else {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let row: Result<(String, String, i64, i64), rusqlite::Error> = db.query_row(
             "SELECT intent_json, human_key_image, COALESCE(delegation_depth, 0), revoked FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
@@ -1110,7 +1111,7 @@ pub async fn register_agent(
 
     // Persist agent in DB
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         // M1 of TPM2 PoP roadmap: persist the new hardware-attestation columns
         // alongside the legacy blob+kind. They are NULL for non-TPM2 kinds.
@@ -1181,14 +1182,14 @@ pub async fn register_agent(
 
     // Mandatory ring membership for delegated agents.
     {
-        let mut st = state.write().unwrap();
+        let mut st = state.write_or_recover();
         if !st.agent_group.members.contains(&agent_point) {
             st.agent_group.members.push(agent_point);
         }
     }
 
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.log("AGENT_REGISTER", "OK", &agent_id);
     }
     tracing::info!(
@@ -1221,7 +1222,7 @@ pub async fn issue_agent_token(
         return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
     }
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let session_human = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
@@ -1236,7 +1237,7 @@ pub async fn issue_agent_token(
         i64,
         String,
     ) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT human_key_image, agent_checksum, intent_json, revoked, expires_at, IFNULL(pop_jkt, '')
@@ -1318,7 +1319,7 @@ pub async fn update_agent_checksum(
     Json(payload): Json<ChecksumUpdateRequest>,
 ) -> Result<Json<ChecksumUpdateResponse>, (StatusCode, String)> {
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let actor_human_ki = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
@@ -1330,7 +1331,7 @@ pub async fn update_agent_checksum(
 
     // Verify the caller owns the agent (same human as registration).
     let owner_ki: String = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT human_key_image FROM agents WHERE agent_id = ?1 AND revoked = 0 AND tenant_id = ?2",
@@ -1347,7 +1348,7 @@ pub async fn update_agent_checksum(
     }
 
     let prev_checksum: String = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT agent_checksum FROM agents WHERE agent_id = ?1 AND tenant_id = ?2",
@@ -1359,7 +1360,7 @@ pub async fn update_agent_checksum(
 
     let now = ajwt_support::now_secs();
     let new_version = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         // Honour the storage-privacy mode on rotation too, otherwise hash_only
         // would leak the plaintext config via a later checksum update.
@@ -1401,7 +1402,7 @@ pub async fn get_agent(
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentRecord>, StatusCode> {
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     db.query_row(
         "SELECT agent_id, human_key_image, agent_checksum, intent_json, assurance_level, IFNULL(ring_key_image_hex, ''), issued_at, expires_at, revoked
@@ -1429,14 +1430,14 @@ pub async fn revoke_agent(
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let human_ki = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
     ))?;
 
     let rows = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.execute(
             "UPDATE agents SET revoked = 1 WHERE agent_id = ?1 AND human_key_image = ?2 AND tenant_id = ?3",
@@ -1454,7 +1455,7 @@ pub async fn revoke_agent(
 
     // M-3: prune the revoked agent's point from the in-memory ring.
     let pubkey: Option<String> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT public_key_hex FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
@@ -1464,10 +1465,10 @@ pub async fn revoke_agent(
         .ok()
     };
     if let Some(hex) = pubkey {
-        state.write().unwrap().drop_ring_member(&hex);
+        state.write_or_recover().drop_ring_member(&hex);
     }
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.log("AGENT_REVOKE", "OK", &agent_id);
     }
     tracing::info!(target: "sauron::agent", %agent_id, "agent revoked");
@@ -1484,7 +1485,7 @@ pub async fn verify_agent_token(
     Json(payload): Json<VerifyAjwtRequest>,
 ) -> Json<VerifyAjwtResponse> {
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
 
     let claims = match verify_ajwt_for_tenant(&jwt_secret, &payload.ajwt, &tenant_id) {
         None => {
@@ -1513,7 +1514,7 @@ pub async fn verify_agent_token(
 
     // Rate-limit per agent_id to prevent token enumeration / replay amplification.
     if let Some(ref aid) = agent_id {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let now = crate::ajwt_support::now_secs();
         if risk::check_and_increment(
@@ -1539,7 +1540,7 @@ pub async fn verify_agent_token(
     let mut assurance_level: Option<String> = None;
 
     if let Some(ref aid) = agent_id {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let row: Option<(i64, String, String)> = db
             .query_row(
@@ -1639,7 +1640,7 @@ pub async fn verify_agent_token(
                 });
             }
         };
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         if let Err(e) = ajwt_support::consume_ajwt_jti(&db, &jti, exp) {
             return Json(VerifyAjwtResponse {
@@ -1671,7 +1672,7 @@ pub async fn list_agents(
     Path(human_ki): Path<String>,
 ) -> Result<Json<Vec<AgentRecord>>, (StatusCode, String)> {
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let session_human = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
@@ -1683,7 +1684,7 @@ pub async fn list_agents(
         ));
     }
 
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT agent_id, human_key_image, agent_checksum, intent_json, assurance_level, IFNULL(ring_key_image_hex, ''), issued_at, expires_at, revoked
@@ -1733,7 +1734,7 @@ pub async fn agent_attestation_challenge(
     Json(payload): Json<AgentAttestationChallengeRequest>,
 ) -> Result<Json<AgentAttestationChallengeResponse>, (StatusCode, String)> {
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let human = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
@@ -1767,7 +1768,7 @@ pub async fn agent_attestation_challenge(
     let nonce = ajwt_support::random_hex_32();
     let now = now_secs();
     let expires_at = now + 300;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     db.execute(
         "DELETE FROM agent_attestation_challenges WHERE expires_at < ?1 OR used_at IS NOT NULL",
@@ -1811,13 +1812,13 @@ pub async fn agent_pop_challenge(
         return Err((StatusCode::BAD_REQUEST, "agent_id required".into()));
     }
     let tenant_id = tenant.map(|Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let human = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
     ))?;
 
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let (db_human, revoked, exp_a): (String, i64, i64) = db
         .query_row(
@@ -2071,7 +2072,7 @@ async fn try_verify_call_sig(
     // no longer a valid delegation).
     let now = now_secs();
     let (pop_pk_b64u, registered_checksum): (String, String) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT IFNULL(pop_public_key_b64u, ''), agent_checksum
@@ -2211,7 +2212,7 @@ async fn try_verify_call_sig(
     // SQLite default keeps the existing rusqlite path; Postgres path activates
     // when `SAURON_DB_BACKEND=postgres` + `DATABASE_URL` are set.
     let nonce_exp = call_ts / 1000 + skew_ms / 1000 + 60;
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     repo.consume_call_nonce(&agent_id, &nonce, nonce_exp)
         .await
         .map_err(|e| match e {

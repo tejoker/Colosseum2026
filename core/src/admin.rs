@@ -17,6 +17,7 @@ use crate::risk;
 use crate::runtime_mode::is_development_runtime;
 use crate::sites::ClientType;
 use crate::state::ServerState;
+use crate::sync_recover::RwLockRecover;
 
 // ─────────────────────────────────────────────────────
 //  Admin authentication (multi-key rotation + optional HS256 JWT)
@@ -487,7 +488,7 @@ pub async fn add_client(
 
     // Persistance en DB.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let mut db = st.db.lock().unwrap();
         let tx = db
             .transaction()
@@ -508,7 +509,7 @@ pub async fn add_client(
 
     // Ajouter la clé publique au groupe client en mémoire (pour vérifier les ring sigs Flux 1).
     {
-        let mut st = state.write().unwrap();
+        let mut st = state.write_or_recover();
         // pub_hex is server-generated via Identity::random() so decoding is
         // expected to succeed, but we defensively avoid panic on any future
         // refactor that pipes user-influenced hex through this path.
@@ -664,7 +665,7 @@ pub async fn get_anchor_ots(
     use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 
     let row: Option<(String, Vec<u8>)> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = match st.db.lock() {
             Ok(c) => c,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -765,7 +766,7 @@ pub async fn health_public(
 ) -> Json<serde_json::Value> {
     // Keep this trivial. Just check the DB roundtrip.
     let ok = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         match st.db.lock() {
             Ok(conn) => conn
                 .query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
@@ -786,7 +787,7 @@ pub async fn readyz(
     State(state): State<Arc<RwLock<ServerState>>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let db_ok = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         match st.db.lock() {
             Ok(conn) => match conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)) {
                 Ok(_) => true,
@@ -894,7 +895,7 @@ pub async fn health(State(state): State<Arc<RwLock<ServerState>>>) -> Json<Healt
     let mut warnings: Vec<String> = Vec::new();
 
     // Bitcoin anchor health
-    let bitcoin_anchor = match state.read().unwrap().bitcoin_anchor.as_ref() {
+    let bitcoin_anchor = match state.read_or_recover().bitcoin_anchor.as_ref() {
         Some(svc) if svc.provider() == crate::bitcoin_anchor::AnchorProvider::OpenTimestamps => {
             HealthComponent {
                 ok: true,
@@ -923,7 +924,7 @@ pub async fn health(State(state): State<Arc<RwLock<ServerState>>>) -> Json<Healt
             }
         }
     };
-    let solana_anchor = match state.read().unwrap().solana_anchor.as_ref() {
+    let solana_anchor = match state.read_or_recover().solana_anchor.as_ref() {
         Some(svc) => HealthComponent {
             ok: true,
             detail: format!("signer={}", &svc.signer_pubkey_b58()[..20]),
@@ -941,7 +942,7 @@ pub async fn health(State(state): State<Arc<RwLock<ServerState>>>) -> Json<Healt
 
     // DB roundtrip
     let database = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         match st.db.lock() {
             Ok(conn) => match conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)) {
                 Ok(_) => HealthComponent {
@@ -1067,6 +1068,11 @@ pub struct AdminAgentRecord {
     pub revoked: bool,
     pub has_pop: bool,
     pub agent_type: String,
+    /// The agent's declared mandate, verbatim as registered — scope, and any
+    /// caps such as `maxAmount`/`currency`. Without it an operator console can
+    /// only render "no intents declared" for every agent, which is the one thing
+    /// about an agent a reviewer actually wants to see.
+    pub intent_json: String,
 }
 
 /// POST /admin/agents/{agent_id}/revoke — operator-side revocation (admin auth).
@@ -1129,7 +1135,7 @@ pub async fn revoke_agent_admin(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
     let rows = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.execute(
             "UPDATE agents SET revoked = 1 WHERE agent_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
@@ -1142,7 +1148,7 @@ pub async fn revoke_agent_admin(
     }
     // M-3: prune the revoked agent's point from the in-memory ring.
     let pubkey: Option<String> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT public_key_hex FROM agents WHERE agent_id = ?1 AND (?2 = '*' OR tenant_id = ?2)",
@@ -1152,10 +1158,10 @@ pub async fn revoke_agent_admin(
         .ok()
     };
     if let Some(hex) = pubkey {
-        state.write().unwrap().drop_ring_member(&hex);
+        state.write_or_recover().drop_ring_member(&hex);
     }
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.log("AGENT_REVOKE_ADMIN", "OK", &agent_id);
     }
     Ok(Json(
@@ -1170,13 +1176,14 @@ pub async fn get_agents(
     authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<Vec<AdminAgentRecord>>, AppError> {
     let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT a.agent_id, a.human_key_image, a.agent_checksum, a.assurance_level,
                     a.issued_at, a.expires_at, a.revoked,
                     IFNULL(LENGTH(a.pop_public_key_b64u), 0),
-                    IFNULL(ci.agent_type, '')
+                    IFNULL(ci.agent_type, ''),
+                    IFNULL(a.intent_json, '')
              FROM agents a
              LEFT JOIN agent_checksum_inputs ci ON ci.agent_id = a.agent_id
              WHERE (?1 = '*' OR a.tenant_id = ?1)
@@ -1195,6 +1202,7 @@ pub async fn get_agents(
                 revoked: row.get::<_, i64>(6)? != 0,
                 has_pop: pop_len > 0,
                 agent_type: row.get(8)?,
+                intent_json: row.get(9)?,
             })
         })?
         .flatten()
@@ -1221,7 +1229,7 @@ pub async fn get_recent_actions(
 ) -> Result<Json<Vec<AdminActionReceiptRecord>>, AppError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT receipt_id, action_hash, agent_id, status, policy_version, created_at
@@ -1572,7 +1580,7 @@ pub async fn get_anchor_status(
     authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<AdminAnchorStatus>, AppError> {
     let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut s = AdminAnchorStatus::default();
     s.bitcoin_provider = crate::bitcoin_anchor::configured_provider_label();
@@ -1669,7 +1677,7 @@ pub async fn get_per_agent_metrics(
 ) -> Result<Json<Vec<AdminPerAgentMetric>>, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db
         .prepare(
@@ -1717,7 +1725,7 @@ pub async fn get_recent_egress(
 ) -> Result<Json<Vec<AdminEgressEntry>>, AppError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT id, agent_id, target_host, target_path, method, status_code, ts, allowed
@@ -1760,7 +1768,7 @@ pub async fn get_checksum_audit(
     Path(agent_id): Path<String>,
 ) -> Result<Json<Vec<AdminChecksumAudit>>, AppError> {
     let scope = admin_scope(authz.as_ref().map(|axum::Extension(a)| a), &tenant);
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT c.from_checksum, c.to_checksum, c.reason, c.actor, c.ts
@@ -1792,7 +1800,7 @@ pub async fn get_users(
     // cannot be filtered per tenant. Listing it is therefore a cross-tenant
     // super-admin operation: refuse unless SAURON_ADMIN_CROSS_TENANT is set.
     require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     let records: Vec<AdminUserRecord> = repo
         .list_users()
         .await
@@ -1828,7 +1836,7 @@ pub async fn get_clients(
     authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<Vec<AdminClientRecord>>, AppError> {
     require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT name, public_key_hex, key_image_hex, tokens_b, client_type FROM clients ORDER BY id"
@@ -1868,7 +1876,7 @@ pub async fn get_site_users(
     Path(name): Path<String>,
 ) -> Result<Json<Vec<SiteUserRecord>>, AppError> {
     require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     let records: Vec<SiteUserRecord> = repo
         .list_site_users(&name)
         .await
@@ -1907,7 +1915,7 @@ pub async fn get_site_zkp_proofs(
     Path(name): Path<String>,
 ) -> Result<Json<Vec<SiteZkpProofRecord>>, AppError> {
     require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let pattern = format!("site={} %", name);
     let mut stmt = db.prepare(
@@ -1967,7 +1975,7 @@ pub async fn get_requests(
     authz: Option<axum::Extension<AdminAuthz>>,
 ) -> Result<Json<Vec<RequestLogRecord>>, AppError> {
     require_cross_tenant_admin(authz.as_ref().map(|axum::Extension(a)| a))?;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT id, timestamp, action_type, status, detail FROM requests_log ORDER BY id DESC LIMIT 200"
@@ -2013,9 +2021,9 @@ pub async fn get_stats(
     // `users` is read through the dual-backend repo (Postgres when enabled);
     // `clients`/`api_usage` are SQLite-only tables, so they stay on the raw
     // handle below — each table is read from where it is written.
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     let total_users: i64 = repo.count_users().await.unwrap_or(0);
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
 
     let total_clients: i64 = db

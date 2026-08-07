@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 
 use crate::rings::RingBudgets;
 use crate::state::ServerState;
+use crate::sync_recover::RwLockRecover;
 
 /// Per-model price, USD per 1,000 tokens.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -349,7 +350,7 @@ pub async fn record_usage_handler(
         ));
     }
     let now = crate::agent_action::now_secs();
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     verify_usage_report(&db, &req, now)?;
     let (ring_id, key_image, totals) = record_usage(
@@ -381,7 +382,7 @@ pub async fn ring_usage_handler(
             "anonymous rings are disabled (set SAURON_ANON_RINGS=1)".into(),
         ));
     }
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     let rows = list_ring_usage(&db, tenant.as_str(), &ring_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;

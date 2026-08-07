@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::state::ServerState;
+use crate::sync_recover::RwLockRecover;
 
 fn env_on(var: &str) -> bool {
     matches!(
@@ -631,7 +632,7 @@ pub async fn issue_egress_capability(
         ));
     }
 
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let claims =
         crate::agent::verify_ajwt_for_tenant(&jwt_secret, &req.ajwt, &tenant_id).ok_or((
             StatusCode::UNAUTHORIZED,
@@ -645,7 +646,7 @@ pub async fn issue_egress_capability(
         return Err((StatusCode::UNAUTHORIZED, "A-JWT agent_id mismatch".into()));
     }
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         crate::risk::check_and_increment(
             &db,
@@ -722,7 +723,7 @@ pub async fn issue_egress_capability(
     );
     let token_hash = sha256_hex(&capability);
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.execute(
             "DELETE FROM agent_egress_capabilities WHERE expires_at < ?1 OR used_at IS NOT NULL",
@@ -811,7 +812,7 @@ pub async fn agent_egress_proxy(
     // Helper to record + audit a denial, then return the 403.
     let deny = |reason: String| -> (StatusCode, String) {
         {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             let _ = record_egress(
                 &db,
@@ -852,7 +853,7 @@ pub async fn agent_egress_proxy(
 
     // 1. Allowlist check (host + optional method/path constraints).
     let matched = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let intent = agent_intent(&db, &tenant_id, &agent_id)?;
         egress_match(
@@ -927,7 +928,7 @@ pub async fn agent_egress_proxy(
     // which is safer than allowing an ambiguous retry to duplicate effects.
     {
         let token_hash = sha256_hex(req.capability.trim());
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let changed = db
             .execute(
@@ -1007,7 +1008,7 @@ pub async fn agent_egress_proxy(
     // Record the (allowed) egress by the REQUEST it made, before reading the
     // body — so the anchored log captures the call even if the body is capped.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let _ = record_egress(
             &db,

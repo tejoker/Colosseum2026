@@ -39,6 +39,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::ajwt_support::random_hex_32;
 use crate::state::ServerState;
+use crate::sync_recover::RwLockRecover;
 
 const DEFAULT_INTERVAL_SECS: u64 = 600;
 
@@ -144,7 +145,7 @@ pub async fn anchor_pending_actions(
     state: &Arc<RwLock<ServerState>>,
 ) -> Result<Option<String>, String> {
     let tenants: Vec<String> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare("SELECT DISTINCT tenant_id FROM agent_action_receipts ORDER BY tenant_id")
@@ -175,7 +176,7 @@ pub async fn anchor_pending_actions_for_tenant(
     // Receipts are anchored in created_at order; we resume from the max
     // `to_created_at` we've already covered.
     let (last_to, last_receipt_id): (i64, String) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT to_created_at, to_receipt_id FROM agent_action_anchors
@@ -189,7 +190,7 @@ pub async fn anchor_pending_actions_for_tenant(
 
     // 2. Pull all receipts after that watermark, ordered.
     let receipts: Vec<AnchoredReceipt> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -238,7 +239,7 @@ pub async fn anchor_pending_actions_for_tenant(
 
     // 4. Persist the batch row first (so the on-chain anchors can reference it).
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO agent_action_anchors
@@ -262,11 +263,11 @@ pub async fn anchor_pending_actions_for_tenant(
     }
 
     // 5. Fire BOTH on-chain anchors in parallel; collect receipt ids.
-    let bitcoin_anchor = state.read().unwrap().bitcoin_anchor.clone();
-    let solana_anchor = state.read().unwrap().solana_anchor.clone();
+    let bitcoin_anchor = state.read_or_recover().bitcoin_anchor.clone();
+    let solana_anchor = state.read_or_recover().solana_anchor.clone();
     let expected_anchors =
         usize::from(bitcoin_anchor.is_some()) + usize::from(solana_anchor.is_some());
-    let db = state.read().unwrap().db.clone();
+    let db = state.read_or_recover().db.clone();
 
     let btc_handle = if let Some(svc) = bitcoin_anchor {
         let db = Arc::clone(&db);
@@ -336,7 +337,7 @@ pub async fn anchor_pending_actions_for_tenant(
 
     // 6. Update the batch row with the on-chain anchor ids.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         // Anchor providers predate tenant partitioning and insert their local
         // receipt with the legacy `default` tenant. Re-stamp the rows here so
@@ -430,7 +431,7 @@ pub fn proof_for_receipt_for_tenant(
     // deterministically by lexicographic receipt_id — but inclusion in the
     // batch is determined by created_at first.
     let receipt_created_at: i64 = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         match conn.query_row(
             "SELECT created_at FROM agent_action_receipts
@@ -454,7 +455,7 @@ pub fn proof_for_receipt_for_tenant(
         String,
         i64,
     )> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT anchor_id, batch_root_hex, from_created_at, to_created_at, btc_anchor_id, sol_anchor_id, from_receipt_id, to_receipt_id, leaf_version
@@ -492,7 +493,7 @@ pub fn proof_for_receipt_for_tenant(
     let (sol_confirmed, sol_slot, sol_sig) = if sol.is_empty() {
         (false, None::<i64>, None::<String>)
     } else {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT confirmed, slot, signature FROM solana_merkle_anchors
@@ -511,7 +512,7 @@ pub fn proof_for_receipt_for_tenant(
     let (btc_ots_upgraded, btc_provider) = if btc.is_empty() {
         (false, "opentimestamps".to_string())
     } else {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors
@@ -543,7 +544,7 @@ pub fn proof_for_receipt_for_tenant(
     // wrong merkle root. Tuple-ordered bounds make the rebuild identical to
     // the original ordered LIMIT-capped batch.
     let receipts: Vec<AnchoredReceipt> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let conn = st.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -638,7 +639,7 @@ pub fn recent_batches_for_tenant(
     limit: i64,
     tenant_id: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let conn = st.db.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -676,7 +677,7 @@ pub fn recent_batches_for_tenant(
         let (sol_confirmed, sol_slot, sol_sig) = if sol.is_empty() {
             (false, None::<i64>, None::<String>)
         } else {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let conn = st.db.lock().map_err(|e| e.to_string())?;
             conn.query_row(
                 "SELECT confirmed, slot, signature FROM solana_merkle_anchors
@@ -695,7 +696,7 @@ pub fn recent_batches_for_tenant(
         let (btc_ots_upgraded, btc_provider) = if btc.is_empty() {
             (false, "opentimestamps".to_string())
         } else {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let conn = st.db.lock().map_err(|e| e.to_string())?;
             conn.query_row(
                 "SELECT ots_upgraded, provider FROM bitcoin_merkle_anchors
