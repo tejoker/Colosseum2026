@@ -1294,6 +1294,15 @@ struct DevRegisterUserRequest {
     date_of_birth: String,
     #[serde(default)]
     nationality: String,
+    /// Base64url Ed25519 public key of the OWNER, bound to this user's key
+    /// image exactly as /register and /bank/register bind one.
+    ///
+    /// Without it a dev-seeded user has no owner key, so it cannot sign an
+    /// agent mandate and the demo cannot show the property that matters:
+    /// authority granted by the owner rather than asserted by the operator.
+    /// Optional, so the seeded password demo is unaffected.
+    #[serde(default)]
+    auth_public_key_b64u: String,
 }
 #[derive(Serialize)]
 struct DevRegisterUserResponse {
@@ -1329,6 +1338,15 @@ async fn dev_register_user(
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        if !payload.auth_public_key_b64u.trim().is_empty() {
+            store_user_auth_credential(
+                &state,
+                "default",
+                &identity.key_image_hex(),
+                payload.auth_public_key_b64u.trim(),
+                ts,
+            )?;
+        }
         repo.insert_user_registration(
             "default",
             &payload.site_name,
