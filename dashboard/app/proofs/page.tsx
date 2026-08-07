@@ -13,22 +13,53 @@ export default async function ProofsPage() {
   const batchesRes = await fetchAnchorBatches();
   const batches = batchesRes.ok ? batchesRes.data : [];
 
+  // A mock anchor writes a synthetic txid that exists on no chain. Saying
+  // "committed to Bitcoin" over those numbers, next to a "Verify on OTS" link
+  // that cannot resolve them, is the one claim on this page that would not
+  // survive someone clicking it.
+  const provider = anchors?.bitcoin_provider ?? "unknown";
+  const anchoringIsReal = provider === "opentimestamps";
+  const providerNote =
+    provider === "mock"
+      ? "Mock anchor provider: these roots are recorded locally with a synthetic txid and are on no chain. Set SAURON_BITCOIN_ANCHOR_PROVIDER=opentimestamps to anchor for real — the calendar is free."
+      : provider === "disabled"
+        ? "Anchoring is disabled on this deployment."
+        : provider === "opentimestamps"
+          ? null
+          : "Anchor provider not reported by the core — treat these roots as unanchored until it is.";
+
   return (
     <PageShell title={t("title")} subtitle={t("subtitle")}>
+      {providerNote && (
+        <p
+          role="status"
+          className="mb-4 rounded-md border border-[var(--border)] px-4 py-3 text-sm text-[var(--text-secondary)]"
+        >
+          {providerNote}
+        </p>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {/* Bitcoin */}
         <Card>
           <CardBody>
             <div className="flex items-center justify-between mb-4">
-              <p className="text-mono-sm text-[var(--text-muted)] uppercase">{t("bitcoin")}</p>
-              <a
-                href="https://opentimestamps.org"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-mono-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
-              >
-                {t("verifyOn", { chain: "OTS" })} →
-              </a>
+              <p className="text-mono-sm text-[var(--text-muted)] uppercase">
+                {t("bitcoin")}
+                <span className="ml-2 normal-case text-[var(--text-muted)]">
+                  {provider}
+                  {anchors?.bitcoin_network ? ` · ${anchors.bitcoin_network}` : ""}
+                </span>
+              </p>
+              {anchoringIsReal && (
+                <a
+                  href="https://opentimestamps.org"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-mono-sm text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
+                >
+                  {t("verifyOn", { chain: "OTS" })} →
+                </a>
+              )}
             </div>
             <dl className="space-y-3">
               {[
@@ -97,11 +128,12 @@ export default async function ProofsPage() {
         </Card>
       </div>
 
-      {/* The actual proofs — each batch is a Merkle root committed to Bitcoin. */}
+      {/* Each batch is a Merkle root. Whether it is committed to Bitcoin at all
+          depends on the configured provider — see providerNote above. */}
       <div className="mt-6">
         <div className="flex items-center gap-3 mb-3 flex-wrap">
           <p className="text-mono-sm text-[var(--text-muted)] uppercase">
-            Anchored batches ({batches.length})
+            {anchoringIsReal ? "Anchored batches" : "Recorded batches"} ({batches.length})
           </p>
           <details className="text-xs text-[var(--text-muted)]">
             <summary className="cursor-pointer hover:text-[var(--text-secondary)] select-none">
@@ -109,8 +141,10 @@ export default async function ProofsPage() {
             </summary>
             <div className="mt-2 max-w-prose text-[var(--text-secondary)] leading-relaxed">
               Every action an agent takes is fingerprinted, and the whole batch
-              is reduced to one short code — a “Merkle root.” That root is
-              committed to the Bitcoin blockchain through OpenTimestamps. Once
+              is reduced to one short code — a “Merkle root.” With the
+              OpenTimestamps provider configured, that root is committed to the
+              Bitcoin blockchain; with the mock provider it is only recorded
+              locally, which the banner above says outright. Once
               Bitcoin confirms it (about an hour), the record is permanent and
               public: no one — not an attacker, not even us — can change what
               the agents did without breaking the on-chain match. Click
@@ -129,7 +163,9 @@ export default async function ProofsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-[var(--text-muted)] border-b border-[var(--border)]">
-                  <th className="px-4 py-2 font-normal text-xs uppercase">Merkle root (committed to Bitcoin)</th>
+                  {/* Neutral: whether a given root is committed is per row, in
+                      the Bitcoin column — the table can hold both. */}
+                  <th className="px-4 py-2 font-normal text-xs uppercase">Merkle root</th>
                   <th className="px-4 py-2 font-normal text-xs uppercase">Actions</th>
                   <th className="px-4 py-2 font-normal text-xs uppercase">Bitcoin</th>
                   <th className="px-4 py-2 font-normal text-xs uppercase">When</th>
@@ -144,7 +180,14 @@ export default async function ProofsPage() {
                     </td>
                     <td className="px-4 py-2 text-[var(--text-secondary)] tabular-nums">{b.n_actions}</td>
                     <td className="px-4 py-2">
-                      {b.btc_confirmed ? (
+                      {b.btc_provider === "mock" ? (
+                        <span
+                          className="text-[var(--text-muted)]"
+                          title="Written by the mock anchor provider: synthetic txid, on no chain, nothing to download."
+                        >
+                          — not anchored (mock)
+                        </span>
+                      ) : b.btc_confirmed ? (
                         <span className="text-[var(--status-ok)]">✓ confirmed</span>
                       ) : (
                         <span className="text-[var(--text-muted)]">⏳ pending (~1h)</span>
@@ -152,7 +195,7 @@ export default async function ProofsPage() {
                     </td>
                     <td className="px-4 py-2 text-[var(--text-secondary)]">{fmtRelativeTime(b.created_at)}</td>
                     <td className="px-4 py-2">
-                      {b.btc_anchor_id ? (
+                      {b.btc_anchor_id && b.btc_provider === "opentimestamps" ? (
                         <a
                           href={`/api/proofs/ots/${encodeURIComponent(b.btc_anchor_id)}`}
                           className="text-[var(--accent-text)] hover:text-[var(--accent-hover)] transition-colors duration-150"
@@ -173,8 +216,9 @@ export default async function ProofsPage() {
           </div>
         )}
         <p className="mt-3 text-mono-sm text-[var(--text-muted)]">
-          Each root is the cryptographic fingerprint of a batch of agent actions, committed to
-          Bitcoin. Altering any past action would change its root and break the on-chain match.
+          Each root is the cryptographic fingerprint of a batch of agent actions. Where the Bitcoin
+          column shows a real anchor, altering any past action would change its root and break the
+          on-chain match.
         </p>
       </div>
     </PageShell>

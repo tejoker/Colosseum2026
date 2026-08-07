@@ -1,12 +1,16 @@
 import { fetchCoreJson } from "../../_proxy";
 
-// Per-batch anchor proofs: each row is a Merkle root committed to Bitcoin.
+// Per-batch anchor proofs. Whether a row is committed to Bitcoin at all depends
+// on the provider that wrote it: rows written by the mock provider have a
+// synthetic txid, no downloadable .ots, and belong on no chain. The provider is
+// per row because a deployment can be switched from mock to opentimestamps and
+// keep its history.
 interface CoreBatch {
   anchor_id: string;
   batch_root_hex: string;
   n_actions: number;
   created_at: number;
-  bitcoin?: { ots_upgraded?: boolean };
+  bitcoin?: { ots_upgraded?: boolean; provider?: string };
   btc_anchor_id?: string;
 }
 
@@ -20,6 +24,7 @@ export async function GET(req: Request) {
     created_at: new Date((b.created_at || 0) * 1000).toISOString(),
     btc_confirmed: !!b.bitcoin?.ots_upgraded,
     btc_anchor_id: b.btc_anchor_id || "",
+    btc_provider: b.bitcoin?.provider || "",
   }));
   return Response.json(out);
 }

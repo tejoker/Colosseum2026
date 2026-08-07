@@ -40,6 +40,9 @@ export interface CoreActionReceipt {
 }
 
 export interface CoreAnchorStatus {
+  bitcoin_provider?: string;
+  bitcoin_network?: string;
+  bitcoin_synthetic?: number;
   bitcoin_total: number;
   bitcoin_pending_upgrade: number;
   bitcoin_upgraded: number;
@@ -253,6 +256,11 @@ export function adaptAuditEvents(
 
 export function adaptAnchorStats(s: CoreAnchorStatus): AnchorStats {
   return {
+    // Optional on the wire so an older core still adapts; "unknown" is rendered
+    // as "provider not reported", never as a Bitcoin commitment.
+    bitcoin_provider: s.bitcoin_provider ?? "unknown",
+    bitcoin_network: s.bitcoin_network ?? "",
+    bitcoin_synthetic: s.bitcoin_synthetic ?? 0,
     bitcoin_total: s.bitcoin_total,
     bitcoin_pending: s.bitcoin_pending_upgrade,
     bitcoin_confirmed: s.bitcoin_upgraded,
