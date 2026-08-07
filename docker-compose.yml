@@ -39,6 +39,19 @@ services:
       - SAURON_RISK_AGENT_REGISTER_PER_WINDOW=${SAURON_RISK_AGENT_REGISTER_PER_WINDOW:-60}
       - SAURON_GLOBAL_RATE_LIMIT_RPS=${SAURON_GLOBAL_RATE_LIMIT_RPS:-100000}
       - SAURON_GLOBAL_RATE_LIMIT_BURST=${SAURON_GLOBAL_RATE_LIMIT_BURST:-100000}
+      # Real Bitcoin anchoring by default, via OpenTimestamps. This costs
+      # nothing: the calendar aggregates thousands of digests into one
+      # transaction it pays for, so a demo anchors for free and the receipt
+      # upgrades into a real chain proof within roughly an hour. Set
+      # SAURON_BITCOIN_ANCHOR_PROVIDER=mock to run offline (CI, no network) —
+      # the mock writes a synthetic txid that is on no chain, and the Proofs page
+      # now says so instead of claiming a Bitcoin commitment.
+      - SAURON_BITCOIN_ANCHOR_PROVIDER=${SAURON_BITCOIN_ANCHOR_PROVIDER:-opentimestamps}
+      - SAURON_BITCOIN_NETWORK=${SAURON_BITCOIN_NETWORK:-bitcoin}
+      # 60s instead of the 10-minute default so a demo produces a real anchored
+      # batch while someone is watching. The task only submits when there are
+      # pending receipts, so an idle stack does not poll the calendars.
+      - SAURON_ACTION_ANCHOR_INTERVAL_SECS=${SAURON_ACTION_ANCHOR_INTERVAL_SECS:-60}
       - SAURON_ADMIN_KEY=dev-only-admin-key-not-for-production
       # Dev only: dashboard counters and seed summary read deployment-global
       # admin views (/admin/stats), which tenant-scoped keys cannot.

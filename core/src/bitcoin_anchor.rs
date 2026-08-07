@@ -43,6 +43,29 @@ pub enum AnchorProvider {
     OpenTimestamps,
 }
 
+/// Normalised provider name for status endpoints: "opentimestamps", "mock", or
+/// "disabled". Read from the environment rather than a live service handle so a
+/// status caller gets the same answer whether or not anything has anchored yet.
+pub fn configured_provider_label() -> String {
+    let raw = std::env::var("SAURON_BITCOIN_ANCHOR_PROVIDER")
+        .unwrap_or_else(|_| "mock".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    match raw.as_str() {
+        "" | "disabled" | "none" => "disabled".to_string(),
+        "ots" | "opentimestamps" => "opentimestamps".to_string(),
+        "mock" => "mock".to_string(),
+        other => format!("unknown:{other}"),
+    }
+}
+
+pub fn configured_network_label() -> String {
+    std::env::var("SAURON_BITCOIN_NETWORK")
+        .unwrap_or_else(|_| "regtest-mock".to_string())
+        .trim()
+        .to_ascii_lowercase()
+}
+
 #[derive(Clone)]
 pub struct BitcoinAnchorService {
     provider: AnchorProvider,

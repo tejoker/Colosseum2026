@@ -58,6 +58,11 @@ export interface ActivityCall {
 }
 
 export interface AnchorStats {
+  /// "opentimestamps" | "mock" | "disabled" | "unknown"
+  bitcoin_provider: string;
+  bitcoin_network: string;
+  /// Anchors written by the mock provider: synthetic txid, on no chain.
+  bitcoin_synthetic: number;
   bitcoin_total: number;
   bitcoin_pending: number;
   bitcoin_confirmed: number;
@@ -237,6 +242,9 @@ export interface AnchorBatch {
   created_at: string;
   btc_confirmed: boolean;
   btc_anchor_id: string;
+  /// Provider that wrote THIS row: "opentimestamps" (a real, downloadable proof)
+  /// or "mock" (synthetic txid, nothing to download, on no chain).
+  btc_provider: string;
 }
 
 export async function fetchAnchorBatches(): Promise<ApiResult<AnchorBatch[]>> {

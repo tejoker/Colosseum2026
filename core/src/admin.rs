@@ -1543,6 +1543,14 @@ pub async fn issue_admin_key(
 
 #[derive(Serialize, Default)]
 pub struct AdminAnchorStatus {
+    /// Configured provider: "opentimestamps", "mock", or "disabled". Callers MUST
+    /// surface this: a mock anchor writes a synthetic txid that is not on any
+    /// chain, and a UI that says "committed to Bitcoin" without it is lying.
+    pub bitcoin_provider: String,
+    pub bitcoin_network: String,
+    /// Anchors recorded with `no_real_money = 1` — i.e. written by the mock
+    /// provider and verifiable nowhere.
+    pub bitcoin_synthetic: i64,
     pub bitcoin_total: i64,
     pub bitcoin_pending_upgrade: i64,
     pub bitcoin_upgraded: i64,
@@ -1567,6 +1575,16 @@ pub async fn get_anchor_status(
     let st = state.read().unwrap();
     let db = st.db.lock().unwrap();
     let mut s = AdminAnchorStatus::default();
+    s.bitcoin_provider = crate::bitcoin_anchor::configured_provider_label();
+    s.bitcoin_network = crate::bitcoin_anchor::configured_network_label();
+    s.bitcoin_synthetic = db
+        .query_row(
+            "SELECT COUNT(*) FROM bitcoin_merkle_anchors
+             WHERE no_real_money = 1 AND (?1 = '*' OR tenant_id = ?1)",
+            params![scope],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     s.bitcoin_total = db
         .query_row(
             "SELECT COUNT(*) FROM bitcoin_merkle_anchors WHERE (?1 = '*' OR tenant_id = ?1)",

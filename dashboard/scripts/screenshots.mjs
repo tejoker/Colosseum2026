@@ -29,7 +29,7 @@ const SHOTS = [
   ["/", "dashboard-overview.png"],
   ["/explorer", "dashboard-explorer.png"],
   ["/welcome", "dashboard-welcome.png"],
-  [process.env.AGENT_PATH || "/protected", "dashboard-agent.png"],
+  ["/proofs", "dashboard-proofs.png"],
 ];
 
 mkdirSync(OUT, { recursive: true });
