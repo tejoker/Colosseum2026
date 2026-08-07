@@ -28,6 +28,37 @@ export interface CoreAgentRecord {
   revoked: boolean;
   has_pop: boolean;
   agent_type: string;
+  /// Declared mandate as registered, e.g.
+  /// {"scope":["payment_initiation"],"maxAmount":5,"currency":"EUR"}.
+  /// Optional so an older core still adapts.
+  intent_json?: string;
+}
+
+/// Render a registered mandate as short human-readable claims. The scope entries
+/// are the actions the agent may take; a maxAmount/currency pair is the cap that
+/// goes with them, and it belongs on screen next to the scope rather than buried
+/// in a JSON blob.
+export function intentClaims(intentJson: string | undefined): string[] {
+  if (!intentJson || !intentJson.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(intentJson);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const obj = parsed as Record<string, unknown>;
+  const claims: string[] = [];
+  const scope = obj.scope;
+  if (Array.isArray(scope)) {
+    for (const s of scope) if (typeof s === "string" && s.trim()) claims.push(s);
+  }
+  const amount = obj.maxAmount;
+  const currency = typeof obj.currency === "string" ? obj.currency : "";
+  if (typeof amount === "number" && Number.isFinite(amount)) {
+    claims.push(`max ${amount}${currency ? ` ${currency}` : ""}`);
+  }
+  return claims;
 }
 
 export interface CoreActionReceipt {
@@ -128,7 +159,7 @@ export function adaptAgent(
     last_call_at: m?.last_action_at ? epochToIsoNullable(m.last_action_at) : null,
     total_calls: m?.action_count ?? 0,
     config_digest: r.agent_checksum || "",
-    allowed_intents: [], // not exposed by /admin/agents — empty array preserves UI
+    allowed_intents: intentClaims(r.intent_json),
   };
 }
 

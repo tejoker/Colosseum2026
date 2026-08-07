@@ -87,6 +87,7 @@ fn init_tracing() {
 
 use once_cell::sync::Lazy;
 use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder};
+use sauron_core::sync_recover::RwLockRecover;
 
 static METRICS_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 static HTTP_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -600,7 +601,7 @@ async fn handle_oprf(
             "identity point is not a valid OPRF input".into(),
         ));
     }
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let evaluated = oprf::server_evaluate(point, st.k);
     Ok(Json(OprfResponse {
         evaluated_point: evaluated.compress().as_bytes().to_vec(),
@@ -799,7 +800,7 @@ fn store_user_auth_credential(
     now: i64,
 ) -> Result<(), (StatusCode, String)> {
     validate_user_auth_public_key(public_key_b64u)?;
-    let st = state.read().unwrap();
+    let st = state.read_or_recover();
     let db = st.db.lock().unwrap();
     db.execute(
         "INSERT OR IGNORE INTO user_auth_credentials
@@ -891,7 +892,7 @@ async fn bank_register_user(
 
     // Verify caller is known BANK client.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let bank_exists: bool = db
             .query_row(
@@ -926,7 +927,7 @@ async fn bank_register_user(
     // in BEGIN IMMEDIATE for parity with Postgres serialisable isolation.
     {
         let repo = {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             st.repo.clone()
         };
         repo.consume_bank_attestation_nonce(
@@ -944,7 +945,7 @@ async fn bank_register_user(
     }
 
     let user_preexisting = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
 
         let exists = repo
             .user_exists(&payload.key_image_hex)
@@ -985,7 +986,7 @@ async fn bank_register_user(
                 "attestation_nonce": payload.attestation_nonce,
             })
             .to_string();
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             db.execute(
                 "INSERT OR REPLACE INTO bank_kyc_links (bank_customer_id, user_key_image, updated_at, metadata_json)
@@ -1009,14 +1010,14 @@ async fn bank_register_user(
     };
 
     {
-        let mut st = state.write().unwrap();
+        let mut st = state.write_or_recover();
         if !st.user_group.members.contains(&pk_point) {
             st.user_group.members.push(pk_point);
         }
     }
 
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let short_ki: String = payload.key_image_hex.chars().take(16).collect();
         st.log(
             "BANK_REGISTER",
@@ -1091,7 +1092,7 @@ async fn handle_register(
     // Verify against this tenant's FULL_KYC ring only. A valid partner in a
     // different tenant, or a BANK/ZKP_ONLY key, is not registration authority.
     let tenant_partner_ring: Vec<RistrettoPoint> = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let mut stmt = db
             .prepare(
@@ -1122,7 +1123,7 @@ async fn handle_register(
 
     // Persister l'utilisateur dans la DB (dual-backend repo).
     {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.insert_user_if_absent(
             &hex_ki,
             &hex_pk,
@@ -1158,7 +1159,7 @@ async fn handle_register(
     // holding a std RwLock guard).
     let mut merkle_leaf_to_persist: Option<(String, i64)> = None;
     {
-        let mut st = state.write().unwrap();
+        let mut st = state.write_or_recover();
         st.user_group.add_member(pk_point);
 
         // ── Merkle Commitment Ledger ─────────────────────────────
@@ -1205,7 +1206,7 @@ async fn handle_register(
     // Postgres when SAURON_DB_BACKEND=postgres). Best-effort: it only feeds
     // ledger reconstruction on restart, so a failure is non-fatal.
     if let Some((commitment_hex, ts)) = merkle_leaf_to_persist {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         if let Err(e) = repo
             .insert_merkle_leaf(&tenant_id, &commitment_hex, ts)
             .await
@@ -1222,7 +1223,7 @@ async fn handle_register(
         if let Ok(root_bytes) = hex::decode(root_hex) {
             if root_bytes.len() == 32 {
                 let root_arr: [u8; 32] = root_bytes.try_into().unwrap();
-                let st = state.read().unwrap();
+                let st = state.read_or_recover();
                 if let Some(ref svc) = st.bitcoin_anchor {
                     let svc = svc.clone();
                     let db = Arc::clone(&st.db);
@@ -1334,11 +1335,11 @@ async fn dev_register_user(
     if !sauron_core::runtime_mode::is_development_runtime() {
         return Err((StatusCode::FORBIDDEN, "Dev only".into()));
     }
-    let server_k = state.read().unwrap().k;
+    let server_k = state.read_or_recover().k;
     let oprf_result = dev_oprf_eval(server_k, &payload.email, &payload.password);
     let identity = Identity::from_oprf(oprf_result);
     {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.upsert_user(
             &identity.key_image_hex(),
             &identity.public_hex(),
@@ -1369,7 +1370,7 @@ async fn dev_register_user(
         let bank_customer_id = format!("DEV-{}", identity.key_image_hex());
         let metadata =
             serde_json::json!({ "source": "dev", "site_name": payload.site_name }).to_string();
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.execute(
             "INSERT OR IGNORE INTO bank_kyc_links (bank_customer_id, user_key_image, updated_at, metadata_json) VALUES (?1, ?2, ?3, ?4)",
@@ -1377,7 +1378,7 @@ async fn dev_register_user(
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    let mut st = state.write().unwrap();
+    let mut st = state.write_or_recover();
     if !st.user_group.members.contains(&identity.public) {
         st.user_group.members.push(identity.public);
     }
@@ -1407,7 +1408,7 @@ async fn dev_buy_tokens(
     if !sauron_core::runtime_mode::is_development_runtime() {
         return Err((StatusCode::FORBIDDEN, "Dev only".into()));
     }
-    let db = state.read().unwrap().db.lock().unwrap();
+    let db = state.read_or_recover().db.lock().unwrap();
     db.execute(
         "UPDATE clients SET tokens_b = tokens_b + ?1 WHERE name = ?2",
         params![payload.amount, payload.site_name],
@@ -1556,7 +1557,7 @@ async fn dev_leash_demo(
     let pop_jkt = "dev-leash-pop-thumbprint";
     let ring_members = vec![agent_identity.public, decoy_identity.public];
     {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.upsert_user(
             &human_key_image,
             &human.public_hex(),
@@ -1568,7 +1569,7 @@ async fn dev_leash_demo(
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.execute(
             "INSERT OR REPLACE INTO bank_kyc_links
@@ -1606,7 +1607,7 @@ async fn dev_leash_demo(
         }
     }
     {
-        let mut st = state.write().unwrap();
+        let mut st = state.write_or_recover();
         for member in &ring_members {
             if !st.agent_group.members.contains(member) {
                 st.agent_group.members.push(*member);
@@ -1614,7 +1615,7 @@ async fn dev_leash_demo(
         }
     }
 
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let validate_payment = |proof: &agent_action::AgentActionProof,
                             token: &DevAjwtToken,
                             agent_id: &str,
@@ -1821,7 +1822,7 @@ async fn dev_leash_demo(
         pop_jkt,
     )?;
     let ajwt_replay_fails = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let first = sauron_core::ajwt_support::consume_ajwt_jti(
             &db,
@@ -1890,7 +1891,7 @@ async fn dev_leash_demo(
         "EUR",
     );
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.execute(
             "UPDATE agents SET revoked = 1 WHERE agent_id = ?1",
@@ -1909,7 +1910,7 @@ async fn dev_leash_demo(
     .is_err();
 
     let receipt_verification = if let Some(receipt) = valid_receipt {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let signature_valid = agent_action::verify_receipt_signature(&st.jwt_secret, &receipt);
         let stored = {
             let db = st.db.lock().unwrap();
@@ -1980,7 +1981,7 @@ async fn dev_consent_profile(
     // consent_log is still on the raw handle (ported separately); scope the
     // lock so it drops before the async users read.
     let user_key_image: String = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.resolve_consent_user(&tenant_id, &payload.consent_token, &payload.site_name, now)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1991,7 +1992,7 @@ async fn dev_consent_profile(
     };
 
     let user = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.get_user(&user_key_image)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -2055,7 +2056,7 @@ async fn handle_zkp_proof_material(
         ));
     }
     let (issuer_url, client) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         (st.issuer_url.clone(), st.issuer_runtime.client.clone())
     };
     let body = serde_json::json!({
@@ -2145,7 +2146,7 @@ async fn delegated_agent_binding_middleware(
         .to_string();
 
     let (user_key_image, issuing_agent_id) = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.get_consent_by_token(&tenant_id, &consent_token)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -2167,7 +2168,7 @@ async fn delegated_agent_binding_middleware(
                 "x-agent-ajwt header required for delegated consent".to_string(),
             ))?;
 
-        let jwt_secret = state.read().unwrap().jwt_secret.clone();
+        let jwt_secret = state.read_or_recover().jwt_secret.clone();
         let claims = agent::verify_ajwt_for_tenant(&jwt_secret, ajwt, &tenant_id).ok_or((
             StatusCode::UNAUTHORIZED,
             "Invalid or expired A-JWT".to_string(),
@@ -2222,7 +2223,7 @@ async fn delegated_agent_binding_middleware(
             String,
             String,
         ) = {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             db.query_row(
                 "SELECT human_key_image, revoked, expires_at, public_key_hex, IFNULL(pop_jkt, '') FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
@@ -2247,7 +2248,7 @@ async fn delegated_agent_binding_middleware(
         }
 
         let agent_in_ring = {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let bytes = hex::decode(&agent_pub_hex).map_err(|_| {
                 (
                     StatusCode::UNAUTHORIZED,
@@ -2365,7 +2366,7 @@ async fn kyc_request(
 
     // Mandatory ZKP-only mode: only ZKP_ONLY relying parties may open consent requests.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let exists: bool = db
             .query_row(
@@ -2409,7 +2410,7 @@ async fn kyc_request(
     // the SQLite-only path (it is a fire-and-forget audit trail).
     {
         let repo = {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             st.repo.clone()
         };
         repo.insert_pending_consent(&tenant_id, &request_id, &payload.site_name, &claims_json)
@@ -2420,7 +2421,7 @@ async fn kyc_request(
                     format!("Unable to create consent request: {e}"),
                 )
             })?;
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let _ = db.execute(
             "INSERT INTO requests_log (timestamp, action_type, status, detail) VALUES (?1,'KYC_REQUEST','PENDING',?2)",
@@ -2469,7 +2470,7 @@ async fn kyc_consent_info(
     axum::extract::Path(request_id): axum::extract::Path<String>,
 ) -> Result<Json<KycConsentInfo>, (StatusCode, String)> {
     let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     let (site_name, claims_json, consent_token): (String, String, Option<String>) = repo
         .get_consent_info(&tenant_id, &request_id)
         .await
@@ -2521,7 +2522,7 @@ async fn kyc_consent(
     }
     // Validate the consent request exists and is pending
     let site_name = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.pending_consent_site(&tenant_id, &payload.request_id, false)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -2532,14 +2533,14 @@ async fn kyc_consent(
     };
 
     // Authenticate the user (dev mode: OPRF server-side)
-    let server_k = state.read().unwrap().k;
+    let server_k = state.read_or_recover().k;
     let oprf_result = dev_oprf_eval(server_k, &payload.email, &payload.password);
     let user_identity = Identity::from_oprf(oprf_result);
     let hex_ki = hex::encode(user_identity.key_image().compress().as_bytes());
 
     // Verify user exists
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         if !st.user_group.members.contains(&user_identity.public) {
             return Err((
                 StatusCode::NOT_FOUND,
@@ -2563,7 +2564,7 @@ async fn kyc_consent(
 
     // Update pending consent row atomically (dual-backend repo)
     {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         let rows = repo
             .grant_consent_token(
                 &tenant_id,
@@ -2585,7 +2586,7 @@ async fn kyc_consent(
 
         // Also log the consent in requests_log (SQLite-only table, raw handle).
         {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             let _ = db.execute(
                 "INSERT INTO requests_log (timestamp, action_type, status, detail) VALUES (?1,'KYC_CONSENT','OK',?2)",
@@ -2665,7 +2666,7 @@ async fn kyc_retrieve(
     // isolation with FOR UPDATE + UPDATE … RETURNING. Replay/expired/revoked
     // map to RepoError::Replay, surfaced here as 401/409.
     let repo = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.repo.clone()
     };
     let (user_ki, stored_site, issuing_agent_id, requested_claims_json) = repo
@@ -2713,7 +2714,7 @@ async fn kyc_retrieve(
         // Risk counter stays on the raw handle (risk_rate_counters is not a
         // ported table); scope it so the lock drops before the async read.
         {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             risk::check_and_increment(
                 &db,
@@ -2724,14 +2725,14 @@ async fn kyc_retrieve(
             .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
         }
         let nationality: String = {
-            let repo = state.read().unwrap().repo.clone();
+            let repo = state.read_or_recover().repo.clone();
             repo.get_user(&user_ki)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                 .map(|u| u.nationality)
                 .unwrap_or_default()
         };
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?
     };
@@ -2759,7 +2760,7 @@ async fn kyc_retrieve(
     enforce_authoritative_kyc_public_inputs(&circuit, &public_signals)?;
 
     let (issuer_urls, issuer_rt) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         (st.issuer_urls.clone(), st.issuer_runtime.clone())
     };
     let requested_dev_mock = proof
@@ -2837,7 +2838,7 @@ async fn kyc_retrieve(
 
     // Mark token as used + charge one connection credit + record api_usage
     let billing = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
 
         let charged = db
@@ -2874,7 +2875,7 @@ async fn kyc_retrieve(
 
     // Record api_usage (token already marked used atomically at the top)
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         {
             let db = st.db.lock().unwrap();
             let ts = std::time::SystemTime::now()
@@ -2905,7 +2906,7 @@ async fn kyc_retrieve(
     // user_registrations via the dual-backend repo (best-effort, outside the
     // raw-lock scope so the Postgres path can .await).
     {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2928,7 +2929,7 @@ async fn kyc_retrieve(
     // Resolve the human public key via the dual-backend repo before the
     // in-memory ring checks (which still need the raw handle for `agents`).
     let human_pub_hex: Option<String> = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.get_user(&user_ki)
             .await
             .ok()
@@ -2936,7 +2937,7 @@ async fn kyc_retrieve(
             .map(|u| u.public_key_hex)
     };
     let (human_in_user_ring, agent_in_agent_ring, agent_pub_key_hex, agent_assurance_level) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
 
         let human_in_ring = if let Some(ref hex) = human_pub_hex {
@@ -3071,7 +3072,7 @@ async fn kyc_retrieve(
             },
         )?;
         {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             sauron_core::ajwt_support::consume_ajwt_jti(&db, &binding.ajwt_jti, binding.ajwt_exp)
                 .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
@@ -3091,7 +3092,7 @@ async fn kyc_retrieve(
     );
 
     let issuer_controls = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.issuer_runtime.circuit_snapshots_json(&st.issuer_urls)
     };
     let controls = serde_json::json!({
@@ -3521,7 +3522,7 @@ async fn policy_authorize(
         StatusCode::BAD_REQUEST,
         "ajwt is required for policy authorization".into(),
     ))?;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let claims = agent::verify_ajwt_for_tenant(&jwt_secret, ajwt, &tenant_id)
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired A-JWT".into()))?;
     let claim_agent_id = claims
@@ -3554,7 +3555,7 @@ async fn policy_authorize(
         String,
         String,
     ) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         db.query_row(
             "SELECT assurance_level, revoked, expires_at, human_key_image, IFNULL(pop_jkt, '') FROM agents WHERE tenant_id = ?1 AND agent_id = ?2",
@@ -3612,7 +3613,7 @@ async fn policy_authorize(
         },
     )?;
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         sauron_core::ajwt_support::consume_ajwt_jti(&db, &jti, exp)
             .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
@@ -3810,7 +3811,7 @@ async fn agent_payment_authorize(
         ));
     }
 
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let claims = agent::verify_ajwt_for_tenant(&jwt_secret, &payload.ajwt, &tenant_id)
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired A-JWT".into()))?;
 
@@ -3865,7 +3866,7 @@ async fn agent_payment_authorize(
         .as_secs() as i64;
     let payment_jurisdiction = {
         {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             risk::check_and_increment(
                 &db,
@@ -3876,20 +3877,20 @@ async fn agent_payment_authorize(
             .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
         }
         let nationality: String = {
-            let repo = state.read().unwrap().repo.clone();
+            let repo = state.read_or_recover().repo.clone();
             repo.get_user(&human_key_image)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                 .map(|u| u.nationality)
                 .unwrap_or_default()
         };
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?
     };
 
     let (assurance_level, pop_jkt) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let (revoked, expires_at, db_human, assurance, pop_jkt, pop_pk_b64u): (i64, i64, String, String, String, String) = db
             .query_row(
@@ -4120,7 +4121,7 @@ async fn agent_payment_authorize(
     )?;
 
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         sauron_core::ajwt_support::consume_ajwt_jti(&db, &jti, exp)
             .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
@@ -4131,7 +4132,7 @@ async fn agent_payment_authorize(
     // M2 port: insert payment authorization via dual-backend repo helper.
     {
         let repo = {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             st.repo.clone()
         };
         repo.insert_payment_authorization(
@@ -4156,7 +4157,7 @@ async fn agent_payment_authorize(
     }
 
     let issuer_snap = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.issuer_runtime.circuit_snapshots_json(&st.issuer_urls)
     };
     Ok(Json(serde_json::json!({
@@ -4289,7 +4290,7 @@ async fn user_auth_challenge(
     let challenge_id = format!("uac_{}", sauron_core::ajwt_support::random_hex_32());
     let nonce = sauron_core::ajwt_support::random_hex_32();
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let _ = db.execute(
             "DELETE FROM user_auth_challenges WHERE expires_at < ?1 OR used_at > 0",
@@ -4362,7 +4363,7 @@ async fn user_auth_finish(
         .unwrap_or_default()
         .as_secs() as i64;
     let (nonce, expires_at, public_key_b64u, jwt_secret) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let challenge: (String, i64) = db
             .query_row(
@@ -4436,7 +4437,7 @@ async fn user_auth_finish(
     // Consume only after a valid signature. The conditional write is the
     // replay arbiter if two valid finishes race; exactly one receives a session.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let consumed = db
             .execute(
@@ -4486,20 +4487,20 @@ async fn user_auth(
         ));
     }
     let (server_k, jwt_secret) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         (st.k, st.jwt_secret.clone())
     };
     let oprf_result = dev_oprf_eval(server_k, &payload.email, &payload.password);
     let identity = Identity::from_oprf(oprf_result);
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         if !st.user_group.members.contains(&identity.public) {
             return Err((StatusCode::UNAUTHORIZED, "User not registered".into()));
         }
     }
     let key_image = hex::encode(identity.key_image().compress().as_bytes());
     let profile: Option<(String, String)> = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.get_user(&key_image)
             .await
             .ok()
@@ -4526,12 +4527,12 @@ async fn user_consents(
     State(state): State<Arc<RwLock<ServerState>>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
     ))?;
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     let rows: Vec<serde_json::Value> = repo
         .list_user_consents(&tenant_id, &key_image)
         .await
@@ -4561,12 +4562,12 @@ async fn user_revoke_consent(
     State(state): State<Arc<RwLock<ServerState>>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
     ))?;
-    let repo = state.read().unwrap().repo.clone();
+    let repo = state.read_or_recover().repo.clone();
     let n = repo
         .revoke_consent(&tenant_id, &request_id, &key_image)
         .await
@@ -4599,7 +4600,7 @@ async fn user_get_credential(
             "ZKP credential issuance disabled (SAURON_DISABLE_ZKP=1)".into(),
         ));
     }
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Invalid or expired session".into(),
@@ -4612,7 +4613,7 @@ async fn user_get_credential(
     // and reused for the claim below (also removes two blocking reads from the
     // async runtime).
     let repo = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.repo.clone()
     };
 
@@ -4672,7 +4673,7 @@ async fn user_get_credential(
 
     // Claim from issuer
     let (issuer_url, client) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         (st.issuer_url.clone(), st.issuer_runtime.client.clone())
     };
     let body = serde_json::json!({
@@ -4836,7 +4837,7 @@ async fn agent_egress_log(
         .unwrap()
         .as_secs() as i64;
     let id = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         // Shared with the enforcing proxy (/agent/egress/proxy) so both log +
         // anchor identically. Voluntary reports are always `allowed = true`.
@@ -4864,7 +4865,7 @@ async fn agent_kyc_consent(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tenant_id = tenant.map(|axum::Extension(t)| t).unwrap_or_default().0;
     // 1. Verify A-JWT
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let claims = agent::verify_ajwt_for_tenant(&jwt_secret, &payload.ajwt, &tenant_id)
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired A-JWT".into()))?;
 
@@ -4895,7 +4896,7 @@ async fn agent_kyc_consent(
         .as_secs() as i64;
     {
         {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             risk::check_and_increment(
                 &db,
@@ -4906,21 +4907,21 @@ async fn agent_kyc_consent(
             .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
         }
         let nationality: String = {
-            let repo = state.read().unwrap().repo.clone();
+            let repo = state.read_or_recover().repo.clone();
             repo.get_user(&human_key_image)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                 .map(|u| u.nationality)
                 .unwrap_or_default()
         };
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?;
     }
 
     // 2. Verify agent status + mandatory delegated-ring membership + KYA policy
     let (assurance_level, pop_jkt) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let (revoked, expires_at, db_human, agent_pub_hex, assurance, pop_jkt, pop_pk_b64u): (
             i64,
@@ -5039,7 +5040,7 @@ async fn agent_kyc_consent(
 
     // 3. Verify consent request exists + is for this site + not yet claimed
     let stored_site: String = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.pending_consent_site(&tenant_id, &payload.request_id, true)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -5077,7 +5078,7 @@ async fn agent_kyc_consent(
 
     // 3b. Server-side JTI consumption (one consent per A-JWT)
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         sauron_core::ajwt_support::consume_ajwt_jti(&db, &jti, exp)
             .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
@@ -5108,7 +5109,7 @@ async fn agent_kyc_consent(
     let expires_at = now + 300;
 
     {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         // Atomic: only update if consent_token is still NULL (race-safe)
         let rows = repo
             .grant_consent_token(
@@ -5128,7 +5129,7 @@ async fn agent_kyc_consent(
                 "Consent already claimed by another agent".into(),
             ));
         }
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.log(
             "AGENT_KYC_CONSENT",
             "OK",
@@ -5276,7 +5277,7 @@ async fn agent_vc_issue(
         ))?
     };
 
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let human_key_image = session_key_image(&headers, &jwt_secret, &tenant_id).ok_or((
         StatusCode::UNAUTHORIZED,
         "Valid x-sauron-session header required".into(),
@@ -5290,7 +5291,7 @@ async fn agent_vc_issue(
 
     // 1. Verify authenticated human exists and resolve trust source.
     let human_pub_hex: String = {
-        let repo = state.read().unwrap().repo.clone();
+        let repo = state.read_or_recover().repo.clone();
         repo.get_user(&human_key_image)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -5302,7 +5303,7 @@ async fn agent_vc_issue(
             ))?
     };
     let (human_in_user_ring, has_bank_link) = {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
 
         let has_bank_link: bool = db
@@ -5340,7 +5341,7 @@ async fn agent_vc_issue(
         .as_secs() as i64;
     {
         {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             let db = st.db.lock().unwrap();
             risk::check_and_increment(
                 &db,
@@ -5351,14 +5352,14 @@ async fn agent_vc_issue(
             .map_err(|e| (StatusCode::TOO_MANY_REQUESTS, e))?;
         }
         let nationality: String = {
-            let repo = state.read().unwrap().repo.clone();
+            let repo = state.read_or_recover().repo.clone();
             repo.get_user(&human_key_image)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                 .map(|u| u.nationality)
                 .unwrap_or_default()
         };
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         compliance::enforce_jurisdiction(&st.compliance, &nationality)
             .map_err(|e| (StatusCode::FORBIDDEN, e))?;
     }
@@ -5400,7 +5401,7 @@ async fn agent_vc_issue(
         }
 
         let (issuer_urls, issuer_rt) = {
-            let st = state.read().unwrap();
+            let st = state.read_or_recover();
             (st.issuer_urls.clone(), st.issuer_runtime.clone())
         };
         let verify_body = serde_json::json!({
@@ -5470,7 +5471,7 @@ async fn agent_vc_issue(
     // 2. Uniqueness check — each human may issue at most 10 active VCs, and
     // each action signing key/key-image pair may back only one active agent.
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5563,7 +5564,7 @@ async fn agent_vc_issue(
     });
 
     // 5. Sign VC with its own HKDF-separated HMAC key.
-    let jwt_secret = state.read().unwrap().jwt_secret.clone();
+    let jwt_secret = state.read_or_recover().jwt_secret.clone();
     let vc_canonical = vc.to_string();
     let vc_key = sauron_core::crypto_protocol::derive_subkey(&jwt_secret, "agent-vc-hmac-v1");
     let mut vc_mac = HmacSha256::new_from_slice(&vc_key).expect("HMAC key");
@@ -5572,7 +5573,7 @@ async fn agent_vc_issue(
 
     // 6. Persist in agents + agent_vcs tables
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         let db = st.db.lock().unwrap();
         // Register in agents table (so A-JWT flow works normally)
         db.execute(
@@ -5611,7 +5612,7 @@ async fn agent_vc_issue(
 
     // Add the caller-owned signing key to the in-memory delegated-agent ring.
     {
-        let mut st = state.write().unwrap();
+        let mut st = state.write_or_recover();
         if !st.agent_group.members.contains(&agent_point) {
             st.agent_group.members.push(agent_point);
         }
@@ -5635,7 +5636,7 @@ async fn agent_vc_issue(
     );
 
     {
-        let st = state.read().unwrap();
+        let st = state.read_or_recover();
         st.log(
             "AGENT_VC_ISSUE",
             "OK",

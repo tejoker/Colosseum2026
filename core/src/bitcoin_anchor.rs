@@ -413,6 +413,7 @@ pub fn spawn_ots_upgrader(db: Arc<DbHandle>) {
 mod tests {
     use super::*;
     use crate::db;
+    use crate::sync_recover::MutexRecover;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -430,7 +431,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn mock_bitcoin_anchor_records_no_cost_receipt() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock_or_recover();
         let db_path =
             std::env::temp_dir().join(format!("sauron-btc-anchor-{}.db", random_hex_32()));
         std::env::set_var("DATABASE_PATH", db_path.to_string_lossy().to_string());
