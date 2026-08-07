@@ -899,6 +899,15 @@ pub fn init_schema(conn: &Connection) {
     );
     // Receipt hash chain. Existing rows keep seq = 0 / prev_hash = '' and stay
     // verifiable under the v2 signature; new receipts chain from seq 1 upward.
+    // Owner-signed mandate: the grant, signed by the owner's own key.
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN owner_mandate_sig_b64u TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agents ADD COLUMN owner_mandate_hash TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE agent_action_anchors ADD COLUMN audit_head_seq INTEGER NOT NULL DEFAULT 0",
         [],

@@ -80,6 +80,51 @@ pub fn call_signature_payload(input: &CallSignatureInput<'_>) -> Vec<u8> {
     )
 }
 
+/// What an agent's OWNER signs at registration.
+///
+/// The authorization "this agent may do these things, up to this much" is the
+/// issuer's word today: the server verifies a session and writes whatever
+/// intent it was handed. That means the operator can invent authority for an
+/// agent, and a customer cannot tell the difference afterwards. Signing this
+/// payload with the owner's own Ed25519 key — the one `user_auth_with_key`
+/// already keeps in the caller's process — moves the grant to the only party
+/// entitled to make it.
+///
+/// Every field is known to the client BEFORE registration. `agent_id` is
+/// deliberately absent: the server mints it afterwards, so including it would
+/// make the mandate unsignable.
+#[derive(Debug)]
+pub struct OwnerMandateInput<'a> {
+    pub tenant_id: &'a str,
+    pub human_key_image: &'a str,
+    pub agent_public_key_hex: &'a str,
+    pub pop_public_key_b64u: &'a str,
+    pub intent_json: &'a str,
+    pub ttl_secs: &'a str,
+}
+
+pub fn owner_mandate_payload(input: &OwnerMandateInput<'_>) -> Vec<u8> {
+    canonical_fields(
+        "sauron.owner-mandate.v1",
+        &[
+            ("tenant_id", input.tenant_id),
+            ("human_key_image", input.human_key_image),
+            ("agent_public_key_hex", input.agent_public_key_hex),
+            ("pop_public_key_b64u", input.pop_public_key_b64u),
+            ("intent_json", input.intent_json),
+            ("ttl_secs", input.ttl_secs),
+        ],
+    )
+}
+
+/// Stable identifier for a mandate: SHA-256 of the canonical payload. Stored on
+/// the agent and safe to publish — it reveals nothing the holder of the mandate
+/// does not already have, and lets a receipt point at the exact grant.
+pub fn owner_mandate_hash(input: &OwnerMandateInput<'_>) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(owner_mandate_payload(input)))
+}
+
 #[derive(Debug)]
 pub struct PartnerRegistrationInput<'a> {
     pub tenant_id: &'a str,

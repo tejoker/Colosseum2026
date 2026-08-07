@@ -712,6 +712,64 @@ def _registration_attestation(
     return fields
 
 
+def _owner_mandate_payload(
+    *,
+    tenant_id: str,
+    human_key_image: str,
+    agent_public_key_hex: str,
+    pop_public_key_b64u: str,
+    intent_json: str,
+    ttl_secs: int,
+) -> bytes:
+    """Canonical bytes the OWNER signs to grant an agent its authority.
+
+    Byte-identical to `crypto_protocol::owner_mandate_payload` on the server —
+    same domain, same field order, same length-prefixed encoding. The grant is
+    otherwise the operator's word, and a customer cannot tell an authority the
+    operator invented from one they asked for.
+    """
+    return _canonical_fields(
+        "sauron.owner-mandate.v1",
+        [
+            ("tenant_id", tenant_id),
+            ("human_key_image", human_key_image),
+            ("agent_public_key_hex", agent_public_key_hex),
+            ("pop_public_key_b64u", pop_public_key_b64u),
+            ("intent_json", intent_json),
+            ("ttl_secs", str(ttl_secs)),
+        ],
+    )
+
+
+def sign_owner_mandate(
+    owner_private_key: Ed25519PrivateKey,
+    *,
+    human_key_image: str,
+    agent_public_key_hex: str,
+    pop_public_key_b64u: str,
+    intent_json: str,
+    ttl_secs: int,
+    tenant_id: str = "default",
+) -> str:
+    """Base64url Ed25519 signature over the registration mandate.
+
+    `owner_private_key` is the key from `user_auth_with_key` — it stays in the
+    caller's process and is never sent.
+    """
+    return _b64u(
+        owner_private_key.sign(
+            _owner_mandate_payload(
+                tenant_id=tenant_id,
+                human_key_image=human_key_image,
+                agent_public_key_hex=agent_public_key_hex,
+                pop_public_key_b64u=pop_public_key_b64u,
+                intent_json=intent_json,
+                ttl_secs=ttl_secs,
+            )
+        )
+    )
+
+
 def register_llm_agent(
     client: SauronIDClient,
     *,
@@ -732,6 +790,8 @@ def register_llm_agent(
     ttl_secs: int = 3600,
     extra_inputs: Optional[Mapping[str, Any]] = None,
     attestation_provider: Optional[AttestationProvider] = None,
+    owner_private_key: Optional[Ed25519PrivateKey] = None,
+    tenant_id: str = "default",
 ) -> SignedAgent:
     """Register an LLM agent. The model + system_prompt + tool list become
     the binding checksum; flipping any of them at runtime without rotating
@@ -773,6 +833,19 @@ def register_llm_agent(
         "pop_public_key_b64u": pop_b64u,
         "ttl_secs": ttl_secs,
     }
+    if owner_private_key is not None:
+        # Signed over the SAME intent_json string that goes on the wire: signing
+        # a re-serialised copy would be a different byte string and the server
+        # would (correctly) reject it.
+        body["owner_mandate_sig_b64u"] = sign_owner_mandate(
+            owner_private_key,
+            human_key_image=user_key_image,
+            agent_public_key_hex=pk_hex,
+            pop_public_key_b64u=pop_b64u,
+            intent_json=body["intent_json"],
+            ttl_secs=ttl_secs,
+            tenant_id=tenant_id,
+        )
     resp = requests.post(
         f"{client.base_url}/agent/register",
         headers=_registration_headers(client, user_session),
