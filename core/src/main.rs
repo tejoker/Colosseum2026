@@ -319,10 +319,7 @@ async fn main() {
         .route("/agent/pop/challenge", post(agent::agent_pop_challenge))
         .route(
             "/agent/action/challenge",
-            post(agent_action::action_challenge).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
+            post(agent_action::action_challenge),
         )
         .route(
             "/agent/action/receipt/verify",
@@ -333,46 +330,24 @@ async fn main() {
         .route("/agent/action/anon", post(agent_action::submit_anon_action))
         // Phase 4: report token usage for a prior anon receipt (gated likewise).
         .route("/agent/usage", post(usage::record_usage_handler))
-        .route(
-            "/agent/payment/authorize",
-            post(agent_payment_authorize).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
-        )
-        .route(
-            "/policy/authorize",
-            post(policy_authorize).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
-        )
+        .route("/agent/payment/authorize", post(agent_payment_authorize))
+        .route("/policy/authorize", post(policy_authorize))
         .route("/agent/list/{human_key_image}", get(agent::list_agents))
         .route(
             "/agent/{agent_id}/checksum/update",
             post(agent::update_agent_checksum),
         )
-        .route(
-            "/agent/egress/log",
-            post(agent_egress_log).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
-        )
+        .route("/agent/egress/log", post(agent_egress_log))
         // In-path egress gateway (Phase 1; gated by SAURON_EGRESS_GATEWAY).
         // Same per-call-sig gate as /egress/log — the ring sig proves the bound
         // agent; the handler enforces intent_json.egress_allowlist before forwarding.
         .route(
             "/agent/egress/capability",
-            post(sauron_core::egress_gateway::issue_egress_capability).route_layer(
-                middleware::from_fn_with_state(Arc::clone(&state), agent::require_call_signature),
-            ),
+            post(sauron_core::egress_gateway::issue_egress_capability),
         )
         .route(
             "/agent/egress/proxy",
-            post(sauron_core::egress_gateway::agent_egress_proxy).route_layer(
-                middleware::from_fn_with_state(Arc::clone(&state), agent::require_call_signature),
-            ),
+            post(sauron_core::egress_gateway::agent_egress_proxy),
         )
         .route(
             "/agent/{agent_id}",
@@ -397,21 +372,9 @@ async fn main() {
         .route("/user/credential", get(user_get_credential))
         .route("/user/consent/{request_id}", delete(user_revoke_consent))
         // Agent KYC consent flow (agent acts on behalf of human)
-        .route(
-            "/agent/kyc/consent",
-            post(agent_kyc_consent).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
-        )
+        .route("/agent/kyc/consent", post(agent_kyc_consent))
         // Self-sovereign agent VC (KYA without banks)
-        .route(
-            "/agent/vc/issue",
-            post(agent_vc_issue).route_layer(middleware::from_fn_with_state(
-                Arc::clone(&state),
-                agent::require_call_signature,
-            )),
-        )
+        .route("/agent/vc/issue", post(agent_vc_issue))
         // Public health — returns {ok} ONLY (no admin key). Detailed report is
         // /admin/health/detailed (admin-gated, prevents recon).
         .route("/health", get(sauron_core::admin::health_public))
@@ -458,6 +421,16 @@ async fn main() {
         // any legacy caller, preserving the 412-test baseline and the
         // live demo flow. Layered globally so every `/v1/*`, `/admin/*`,
         // and `/agent/*` handler has access via `Extension<TenantId>`.
+        // Per-call signature: DEFAULT DENY across the whole /agent/* surface.
+        // Applied once here instead of route by route, so a new agent route is
+        // protected the moment it exists and must be named in
+        // agent::CALL_SIG_EXEMPT_PATHS to be opened. The previous opt-in layout
+        // protected whatever someone remembered to annotate — a missing line
+        // shipped an unprotected route and broke no test.
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            agent::require_call_signature_default_deny,
+        ))
         .layer(middleware::from_fn(sauron_tenancy::extract_tenant))
         .layer(middleware::from_fn(http_metrics_middleware))
         // Q4: stamp response security headers (nosniff, XFO/CSP frame-ancestors,

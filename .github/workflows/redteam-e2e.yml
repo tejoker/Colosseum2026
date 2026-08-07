@@ -75,6 +75,13 @@ jobs:
       # untracked rather than deleted — see .gitignore — and restorable from git
       # history if KYC/ZKP comes back with a customer attached.
 
+      # The e2e signs its own calls now (default-deny across /agent/*), which
+      # needs agent-action-tool built — hence the toolchain here.
+      - name: Setup Rust for the e2e signer
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.91.1
+
       - name: Run strict agent payment authorization e2e
         env:
           API_URL: http://localhost:3001

@@ -49,6 +49,31 @@ issue_agent_token() {
     -d "{\"agent_id\":\"${agent_id}\",\"ttl_secs\":${ttl}}"
 }
 
+# Populate SIG_ARGS with curl -H arguments signing (method, path, body) with the
+# agent's PoP key. No-op unless SAURON_E2E_POP_SECRET_B64U is exported, so
+# scripts that do not need signing are unaffected.
+SIG_ARGS=()
+build_sig_args() {
+  local method="$1" path="$2" body="$3"
+  SIG_ARGS=()
+  [[ -z "${SAURON_E2E_POP_SECRET_B64U:-}" ]] && return 0
+  ensure_agent_action_tool
+  local headers
+  headers=$("${AGENT_ACTION_TOOL}" call-sig \
+    --pop-secret-b64u "${SAURON_E2E_POP_SECRET_B64U}" \
+    --agent-id "${SAURON_E2E_AGENT_ID:?SAURON_E2E_AGENT_ID must be exported to sign calls}" \
+    --method "${method}" \
+    --target-uri "${path}" \
+    --config-digest "${SAURON_E2E_CONFIG_DIGEST:-}" \
+    --body "${body}")
+  local line
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && SIG_ARGS+=(-H "${line}")
+  done < <(printf '%s' "${headers}" | python3 -c 'import json,sys
+for k, v in json.load(sys.stdin).items():
+    print(k + ":" + v)')
+}
+
 sign_agent_action() {
   local secret_hex="$1"
   local agent_id="$2"
@@ -67,8 +92,15 @@ sign_agent_action() {
     return 1
   fi
   ensure_agent_action_tool
-  local challenge
-  challenge=$(python3 - "$agent_id" "$human_key_image" "$action" "$resource" "$merchant_id" "$amount_minor" "$currency" "$jti" "$ttl" <<'PY' | curl -sS -X POST "${API_URL}/agent/action/challenge" -H 'content-type: application/json' -d @-
+  # /agent/action/challenge is signature-protected. This helper used to post it
+  # unsigned, which only worked because the old per-route enforcement missed
+  # this path; under default-deny it is refused, correctly. Export
+  # SAURON_E2E_POP_SECRET_B64U (the PoP private JWK "d") and
+  # SAURON_E2E_CONFIG_DIGEST and the call is signed with the same canonical
+  # bytes the server verifies.
+  local challenge_body sig_headers
+  challenge_body=$(python3 - "$agent_id" "$human_key_image" "$action" "$resource" "$merchant_id" "$amount_minor" "$currency" "$jti" "$ttl" <<'PY'
+
 import json, sys
 agent_id, human, action, resource, merchant, amount, currency, jti, ttl = sys.argv[1:]
 print(json.dumps({
@@ -84,6 +116,23 @@ print(json.dumps({
 }, separators=(",", ":")))
 PY
 )
+  local curl_args=(-sS -X POST "${API_URL}/agent/action/challenge" -H 'content-type: application/json')
+  if [[ -n "${SAURON_E2E_POP_SECRET_B64U:-}" ]]; then
+    sig_headers=$("${AGENT_ACTION_TOOL}" call-sig \
+      --pop-secret-b64u "${SAURON_E2E_POP_SECRET_B64U}" \
+      --agent-id "${agent_id}" \
+      --method POST \
+      --target-uri /agent/action/challenge \
+      --config-digest "${SAURON_E2E_CONFIG_DIGEST:-}" \
+      --body "${challenge_body}")
+    while IFS="=" read -r hname hvalue; do
+      [[ -n "${hname}" ]] && curl_args+=(-H "${hname}: ${hvalue}")
+    done < <(printf '%s' "${sig_headers}" | python3 -c 'import json,sys
+for k, v in json.load(sys.stdin).items():
+    print(k + "=" + v)')
+  fi
+  local challenge
+  challenge=$(printf '%s' "${challenge_body}" | curl "${curl_args[@]}" -d @-)
   if [[ -z "${challenge}" || "${challenge}" != *'"envelope"'* ]]; then
     echo "agent/action/challenge failed: ${challenge}" >&2
     return 1

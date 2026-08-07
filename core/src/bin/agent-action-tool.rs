@@ -1,6 +1,7 @@
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use sauron_core::{
     agent_action::{canonical_envelope_bytes, AgentActionChallengeResponse, AgentActionProof},
+    crypto_protocol::{call_signature_payload, CallSignatureInput},
     identity::Identity,
     ring as leash_ring,
 };
@@ -14,7 +15,7 @@ fn fail(message: impl AsRef<str>) -> ! {
 
 fn usage() -> ! {
     fail(
-        "usage:\n  agent-action-tool keygen\n  agent-action-tool sign-challenge --secret-hex <hex> --challenge-json <json|@path|path>",
+        "usage:\n  agent-action-tool keygen\n  agent-action-tool sign-challenge --secret-hex <hex> --challenge-json <json|@path|path>\n  agent-action-tool call-sig --pop-secret-b64u <b64u> --agent-id <id> --method <M> --target-uri <path> --body <json|@path|-> [--tenant <id>] [--audience <aud>] [--config-digest <d>] [--content-type <ct>]",
     )
 }
 
@@ -36,6 +37,25 @@ fn read_challenge_json(arg: &str) -> Result<String, String> {
         return fs::read_to_string(arg).map_err(|e| format!("failed to read {arg}: {e}"));
     }
     Ok(arg.to_string())
+}
+
+/// `--name value` lookup for the flag-style subcommands.
+fn arg(args: &[String], name: &str) -> Result<String, String> {
+    let needle = format!("--{name}");
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == &needle {
+            return it
+                .next()
+                .cloned()
+                .ok_or_else(|| format!("--{name} needs a value"));
+        }
+    }
+    Err(format!("--{name} is required"))
+}
+
+fn arg_opt(args: &[String], name: &str) -> Option<String> {
+    arg(args, name).ok()
 }
 
 fn sign_challenge(args: &[String]) -> Result<serde_json::Value, String> {
@@ -118,6 +138,7 @@ fn main() {
             }))
         }
         "sign-challenge" => sign_challenge(&args[2..]),
+        "call-sig" => call_sig(&args[2..]),
         _ => {
             usage();
         }
@@ -126,4 +147,95 @@ fn main() {
         Ok(value) => println!("{}", serde_json::to_string(&value).unwrap()),
         Err(err) => fail(err),
     }
+}
+
+/// Emit the per-call signature headers for one request.
+///
+/// Shell e2e scripts had no way to produce these, so they posted unsigned to
+/// routes that require a signature — which only stayed green because the old
+/// per-route enforcement missed that path. Uses the same
+/// `crypto_protocol::call_signature_payload` the server verifies with, so the
+/// canonical bytes cannot drift between signer and verifier.
+fn call_sig(args: &[String]) -> Result<serde_json::Value, String> {
+    use base64::Engine;
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    let pop_secret = arg(args, "pop-secret-b64u")?;
+    let agent_id = arg(args, "agent-id")?;
+    let method = arg(args, "method")?.to_uppercase();
+    let target_uri = arg(args, "target-uri")?;
+    let body_raw = arg_opt(args, "body").unwrap_or_default();
+    let body = if body_raw == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("read body from stdin: {e}"))?;
+        buf
+    } else if let Some(path) = body_raw.strip_prefix('@') {
+        fs::read_to_string(path).map_err(|e| format!("read body file {path}: {e}"))?
+    } else {
+        body_raw
+    };
+    let tenant_id = arg_opt(args, "tenant").unwrap_or_else(|| "default".to_string());
+    let audience = arg_opt(args, "audience").unwrap_or_else(|| "sauron-core".to_string());
+    let config_digest = arg_opt(args, "config-digest").unwrap_or_default();
+    let content_type = arg_opt(args, "content-type").unwrap_or_else(|| {
+        if body.is_empty() {
+            String::new()
+        } else {
+            "application/json".to_string()
+        }
+    });
+
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(pop_secret.trim())
+        .map_err(|e| format!("pop-secret-b64u is not base64url: {e}"))?;
+    let key_bytes: [u8; 32] = secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| "pop secret must decode to 32 bytes".to_string())?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+
+    let body_sha256_hex = hex::encode(Sha256::digest(body.as_bytes()));
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis()
+        .to_string();
+    let nonce = hex::encode(rand_32());
+
+    let payload = call_signature_payload(&CallSignatureInput {
+        agent_id: &agent_id,
+        tenant_id: &tenant_id,
+        audience: &audience,
+        method: &method,
+        target_uri: &target_uri,
+        content_type: &content_type,
+        body_sha256_hex: &body_sha256_hex,
+        config_digest: &config_digest,
+        timestamp_ms: &timestamp_ms,
+        nonce: &nonce,
+    });
+    let sig = signing_key.sign(&payload);
+    let sig_b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+    Ok(json!({
+        "x-sauron-agent-id": agent_id,
+        "x-sauron-tenant-id": tenant_id,
+        "x-sauron-call-audience": audience,
+        "x-sauron-call-ts": timestamp_ms,
+        "x-sauron-call-nonce": nonce,
+        "x-sauron-call-sig": sig_b64u,
+        "x-sauron-protocol-version": "2",
+        "x-sauron-agent-config-digest": config_digest,
+    }))
+}
+
+fn rand_32() -> [u8; 32] {
+    use rand::RngCore;
+    let mut b = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    b
 }

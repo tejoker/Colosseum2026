@@ -2304,6 +2304,63 @@ fn log_denied_egress(
     }
 }
 
+/// Paths under the agent surface that deliberately carry NO per-call signature,
+/// because at that point in the flow no agent key exists yet or the route is
+/// public by design. Everything else on that surface is signed.
+///
+/// This is the whole point of the default-deny layer: the exempt set is written
+/// down and reviewable, so adding a route cannot silently ship it unprotected.
+/// A new route is refused until someone consciously adds it here — a one-line
+/// diff a reviewer can see, instead of a missing line nobody notices.
+pub const CALL_SIG_EXEMPT_PATHS: &[&str] = &[
+    // Registration is where an agent's keys come into existence.
+    "/agent/register",
+    // Bootstrap: the agent has keys but no A-JWT yet.
+    "/agent/token",
+    // Challenge issuance — the client cannot sign before it has the challenge.
+    "/agent/attestation/challenge",
+    "/agent/pop/challenge",
+    // Public verification surfaces: they reveal nothing an unauthenticated
+    // caller could not already compute, and third parties must be able to call
+    // them without agent credentials.
+    "/agent/verify",
+    "/agent/action/receipt/verify",
+];
+
+/// True when `path` is on the agent surface and not explicitly exempt.
+fn call_sig_required_for(path: &str) -> bool {
+    if !path.starts_with("/agent/") {
+        return false;
+    }
+    if CALL_SIG_EXEMPT_PATHS.contains(&path) {
+        return false;
+    }
+    // GET /agent/{id} is a read of a record the owner already holds; it carries
+    // no authority and predates the signing layer.
+    let rest = &path["/agent/".len()..];
+    if !rest.is_empty() && !rest.contains('/') {
+        return false;
+    }
+    true
+}
+
+/// Default-deny wrapper: applies [`require_call_signature`] to every route on
+/// the agent surface except [`CALL_SIG_EXEMPT_PATHS`].
+///
+/// Replaces per-route opt-in. Under opt-in the protected set was whatever
+/// someone remembered to annotate, so a new route shipped unprotected and every
+/// test still passed — nothing fails when a check is simply absent.
+pub async fn require_call_signature_default_deny(
+    state: State<Arc<RwLock<ServerState>>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, AppError> {
+    if !call_sig_required_for(req.uri().path()) {
+        return Ok(next.run(req).await);
+    }
+    require_call_signature(state, req, next).await
+}
+
 pub async fn require_call_signature(
     State(state): State<Arc<RwLock<ServerState>>>,
     req: axum::extract::Request,
@@ -2356,5 +2413,55 @@ pub async fn require_call_signature(
                 Ok(next.run(req).await)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod call_sig_default_deny_tests {
+    use super::{call_sig_required_for, CALL_SIG_EXEMPT_PATHS};
+
+    #[test]
+    fn every_agent_route_is_signed_unless_explicitly_exempt() {
+        // The eight routes that used to opt in by hand.
+        for p in [
+            "/agent/action/challenge",
+            "/agent/payment/authorize",
+            "/agent/egress/log",
+            "/agent/egress/capability",
+            "/agent/egress/proxy",
+            "/agent/kyc/consent",
+            "/agent/vc/issue",
+        ] {
+            assert!(call_sig_required_for(p), "{p} must stay protected");
+        }
+        // And the point of the change: a route nobody has written yet.
+        assert!(
+            call_sig_required_for("/agent/action/submit"),
+            "a new agent route must be protected by default, not by remembering"
+        );
+    }
+
+    #[test]
+    fn exempt_paths_are_exempt_and_nothing_else_is() {
+        for p in CALL_SIG_EXEMPT_PATHS {
+            assert!(!call_sig_required_for(p), "{p} is on the exempt list");
+        }
+        // Reads of a single agent record carry no authority.
+        assert!(!call_sig_required_for("/agent/agt_abc123"));
+        // Non-agent surfaces are governed by their own auth layers.
+        assert!(!call_sig_required_for("/admin/stats"));
+        assert!(!call_sig_required_for("/healthz"));
+        assert!(!call_sig_required_for("/user/auth"));
+    }
+
+    #[test]
+    fn exemptions_stay_deliberate() {
+        // A tripwire: growing this list is a security decision, so it should be
+        // a visible diff here as well as in the constant.
+        assert_eq!(
+            CALL_SIG_EXEMPT_PATHS.len(),
+            6,
+            "exempt list changed — is the new entry genuinely unable to carry a signature?"
+        );
     }
 }
