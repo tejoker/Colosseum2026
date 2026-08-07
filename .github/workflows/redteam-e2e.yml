@@ -82,6 +82,23 @@ jobs:
         with:
           toolchain: 1.91.1
 
+      - name: Cache cargo for the e2e signer
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: cargo-e2e-signer-${{ runner.os }}-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: cargo-e2e-signer-${{ runner.os }}-
+
+      # Built explicitly, not implicitly inside the test. ensure_agent_action_tool
+      # would compile it on first use, so a build failure surfaced as "the e2e
+      # failed" with no indication that nothing had been tested yet.
+      - name: Build the e2e signer
+        working-directory: core
+        run: cargo build --locked --bin agent-action-tool
+
       - name: Run strict agent payment authorization e2e
         env:
           API_URL: http://localhost:3001
