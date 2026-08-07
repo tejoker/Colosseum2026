@@ -235,7 +235,8 @@ async fn finalize_proof_checkpoint(
                 .prepare(
                     "SELECT receipt_id, action_hash, agent_id, ring_key_image_hex,
                         policy_version, ajwt_jti, pop_jkt, status, signature,
-                        created_at, COALESCE(ring_id, ''), COALESCE(config_digest, ''), tenant_id
+                        created_at, COALESCE(ring_id, ''), COALESCE(config_digest, ''), tenant_id,
+                        COALESCE(seq, 0), COALESCE(prev_hash, '')
                  FROM agent_action_receipts
                  WHERE tenant_id = ?1
                    AND (created_at > ?2 OR (created_at = ?2 AND receipt_id >= ?3))
@@ -266,6 +267,8 @@ async fn finalize_proof_checkpoint(
                                 status: r.get(7)?,
                                 signature: r.get(8)?,
                                 timestamp: r.get(9)?,
+                                seq: r.get(13)?,
+                                prev_hash: r.get(14)?,
                             },
                             r.get::<_, String>(10)?,
                             r.get::<_, String>(11)?,

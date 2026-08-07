@@ -32,6 +32,10 @@ WORKDIR /app
 
 COPY --from=builder /app/core/target/release/sauron-core .
 COPY --from=builder /app/core/target/release/client ./client
+# The receipt/audit chain verifier ships with the runtime image: it is meant to
+# be run by whoever holds the database, including a customer checking the
+# operator, and `verify-receipts` needs no key at all.
+COPY --from=builder /app/core/target/release/sauronid-cli ./sauronid-cli
 COPY core/seed.sh .
 
 # Non-root runtime user. /app is writable for the default DATABASE_PATH

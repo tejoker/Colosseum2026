@@ -11,6 +11,7 @@
 //!   health           pretty-print the /health endpoint
 //!   policy           policy DSL helpers (subcommand: `validate <file>`)
 //!   verify-audit     verify the keyed SQLite security-audit chain
+//!   verify-receipts  verify the KEYLESS receipt hash chain (no secret needed)
 //!
 //! Usage:
 //!   sauronid-cli keypair                            # writes ./agent.priv + agent.pub
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         "health" => cmd_health(),
         "policy" => cmd_policy(&args[2..]),
         "verify-audit" => cmd_verify_audit(&args[2..]),
+        "verify-receipts" => cmd_verify_receipts(&args[2..]),
         "help" | "-h" | "--help" => {
             print_usage();
             Ok(())
@@ -84,6 +86,9 @@ SUBCOMMANDS:
     health            GET $SAURON_CORE_URL/health and pretty-print
     policy validate <file>   parse a policy YAML/JSON file and report errors
     verify-audit --database <path>  verify audit sequence, linkage, and HMACs
+    verify-receipts --database <path> [--tenant <id>]
+                                   verify the receipt hash chain — needs NO key,
+                                   so a customer can run it against a vendor
 
 ENV:
     SAURON_CORE_URL   default http://127.0.0.1:3001
@@ -109,6 +114,22 @@ fn cmd_verify_audit(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("open audit database {path}: {e}"))?;
     let count = sauron_core::middleware::audit_log::verify_audit_chain(&conn)?;
     println!("audit chain OK: {count} records");
+    Ok(())
+}
+
+/// Verify the receipt hash chain. Deliberately keyless: the chain hash is plain
+/// SHA-256 over canonical fields, so anyone holding a copy of the database can
+/// check that no receipt was removed, reordered or edited — including a customer
+/// checking the operator.
+fn cmd_verify_receipts(args: &[String]) -> Result<(), String> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let path = require_arg(args, "database")?;
+    let tenant = arg_value(args, "tenant").unwrap_or_else(|| "default".to_string());
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open database {path}: {e}"))?;
+    let count = sauron_core::agent_action::verify_receipt_chain(&conn, &tenant)?;
+    println!("receipt chain OK: {count} chained receipts for tenant {tenant}");
     Ok(())
 }
 
