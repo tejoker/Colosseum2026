@@ -53,6 +53,14 @@ pub struct ActionReceipt {
     pub timestamp: i64,
     pub status: String,
     pub signature: String,
+    /// Dense, monotonic position in this tenant's receipt chain. 0 marks a
+    /// legacy receipt written before chaining existed.
+    #[serde(default)]
+    pub seq: i64,
+    /// [`receipt_chain_hash`] of the receipt at `seq - 1`. Empty at seq 1 (chain
+    /// genesis) and on legacy receipts.
+    #[serde(default)]
+    pub prev_hash: String,
 }
 
 #[derive(Clone, Debug)]
@@ -185,8 +193,61 @@ pub fn expected_policy_hash(action: &str) -> String {
     hex::encode(h.finalize())
 }
 
+/// Chain hash of a receipt: what the NEXT receipt stores as `prev_hash`.
+///
+/// Plain SHA-256 over the canonical fields, deliberately keyless — anyone
+/// holding a receipt can recompute it and check the link without the server's
+/// signing key. The signature proves the server issued the receipt; the chain
+/// proves none were removed between two receipts you hold.
+pub fn receipt_chain_hash(receipt: &ActionReceipt) -> String {
+    let seq = receipt.seq.to_string();
+    let timestamp = receipt.timestamp.to_string();
+    let payload = crate::crypto_protocol::canonical_fields(
+        "sauron.agent-action-receipt-chain.v1",
+        &[
+            ("seq", &seq),
+            ("prev_hash", &receipt.prev_hash),
+            ("tenant_id", &receipt.tenant_id),
+            ("receipt_id", &receipt.receipt_id),
+            ("action_hash", &receipt.action_hash),
+            ("agent_id", &receipt.agent_id),
+            ("ring_key_image_hex", &receipt.ring_key_image_hex),
+            ("policy_version", &receipt.policy_version),
+            ("ajwt_jti", &receipt.ajwt_jti),
+            ("pop_jkt", &receipt.pop_jkt),
+            ("timestamp", &timestamp),
+            ("status", &receipt.status),
+        ],
+    );
+    let mut h = Sha256::new();
+    h.update(&payload);
+    hex::encode(h.finalize())
+}
+
 fn receipt_signing_payload(receipt: &ActionReceipt) -> Vec<u8> {
     let timestamp = receipt.timestamp.to_string();
+    // Legacy (unchained) receipts keep the v2 payload so previously issued
+    // signatures still verify; chained receipts commit seq + prev_hash too.
+    if receipt.seq > 0 {
+        let seq = receipt.seq.to_string();
+        return crate::crypto_protocol::canonical_fields(
+            "sauron.agent-action-receipt.v3",
+            &[
+                ("tenant_id", &receipt.tenant_id),
+                ("receipt_id", &receipt.receipt_id),
+                ("action_hash", &receipt.action_hash),
+                ("agent_id", &receipt.agent_id),
+                ("ring_key_image_hex", &receipt.ring_key_image_hex),
+                ("policy_version", &receipt.policy_version),
+                ("ajwt_jti", &receipt.ajwt_jti),
+                ("pop_jkt", &receipt.pop_jkt),
+                ("timestamp", &timestamp),
+                ("status", &receipt.status),
+                ("seq", &seq),
+                ("prev_hash", &receipt.prev_hash),
+            ],
+        );
+    }
     crate::crypto_protocol::canonical_fields(
         "sauron.agent-action-receipt.v2",
         &[
@@ -202,6 +263,109 @@ fn receipt_signing_payload(receipt: &ActionReceipt) -> Vec<u8> {
             ("status", &receipt.status),
         ],
     )
+}
+
+/// Reserve the next chain position for `tenant_id`: `(seq, prev_hash)`.
+///
+/// Callers already hold the write path's connection, and SQLite serialises
+/// writers, so the read-then-insert that follows cannot interleave with another
+/// receipt for the same tenant. On an empty chain this returns `(1, "")`.
+fn next_chain_position(db: &Connection, tenant_id: &str) -> Result<(i64, String), String> {
+    let head: Option<(i64, String)> = db
+        .query_row(
+            "SELECT seq, receipt_id FROM agent_action_receipts
+             WHERE tenant_id = ?1 ORDER BY seq DESC LIMIT 1",
+            params![tenant_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok();
+    let Some((prev_seq, prev_receipt_id)) = head else {
+        return Ok((1, String::new()));
+    };
+    if prev_seq == 0 {
+        // Chain starts after the legacy (unchained) rows.
+        return Ok((1, String::new()));
+    }
+    let prev = load_receipt(db, &prev_receipt_id)?
+        .ok_or_else(|| "chain head receipt vanished between read and link".to_string())?;
+    Ok((prev_seq + 1, receipt_chain_hash(&prev)))
+}
+
+/// Load a receipt by id, including its chain fields.
+pub fn load_receipt(db: &Connection, receipt_id: &str) -> Result<Option<ActionReceipt>, String> {
+    db.query_row(
+        "SELECT tenant_id, receipt_id, action_hash, agent_id, ring_key_image_hex,
+                policy_version, ajwt_jti, pop_jkt, created_at, status, signature,
+                IFNULL(seq, 0), IFNULL(prev_hash, '')
+         FROM agent_action_receipts WHERE receipt_id = ?1",
+        params![receipt_id],
+        |r| {
+            Ok(ActionReceipt {
+                tenant_id: r.get(0)?,
+                receipt_id: r.get(1)?,
+                action_hash: r.get(2)?,
+                agent_id: r.get(3)?,
+                ring_key_image_hex: r.get(4)?,
+                policy_version: r.get(5)?,
+                ajwt_jti: r.get(6)?,
+                pop_jkt: r.get(7)?,
+                timestamp: r.get(8)?,
+                status: r.get(9)?,
+                signature: r.get(10)?,
+                seq: r.get(11)?,
+                prev_hash: r.get(12)?,
+            })
+        },
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other.to_string()),
+    })
+}
+
+/// Walk a tenant's receipt chain and return how many chained receipts verified.
+///
+/// Checks, for every receipt with `seq > 0`: the sequence is dense (no gaps, so
+/// no deletions) and `prev_hash` equals the recomputed chain hash of its
+/// predecessor (so no edits or reordering). Needs no key — a customer holding a
+/// database copy can run it against a vendor.
+pub fn verify_receipt_chain(db: &Connection, tenant_id: &str) -> Result<i64, String> {
+    let mut stmt = db
+        .prepare(
+            "SELECT receipt_id FROM agent_action_receipts
+             WHERE tenant_id = ?1 AND IFNULL(seq, 0) > 0 ORDER BY seq ASC",
+        )
+        .map_err(|e| format!("prepare verify_receipt_chain: {e}"))?;
+    let ids: Vec<String> = stmt
+        .query_map(params![tenant_id], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query verify_receipt_chain: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+
+    let mut expected_seq = 1i64;
+    let mut expected_prev = String::new();
+    let mut checked = 0i64;
+    for id in ids {
+        let receipt = load_receipt(db, &id)?
+            .ok_or_else(|| format!("receipt {id} listed but not loadable"))?;
+        if receipt.seq != expected_seq {
+            return Err(format!(
+                "receipt chain break for tenant {tenant_id}: expected seq {expected_seq}, found {} ({})",
+                receipt.seq, receipt.receipt_id
+            ));
+        }
+        if receipt.prev_hash != expected_prev {
+            return Err(format!(
+                "receipt chain break for tenant {tenant_id} at seq {}: prev_hash does not match the previous receipt",
+                receipt.seq
+            ));
+        }
+        expected_prev = receipt_chain_hash(&receipt);
+        expected_seq += 1;
+        checked += 1;
+    }
+    Ok(checked)
 }
 
 pub fn sign_receipt(jwt_secret: &[u8], receipt: &ActionReceipt) -> String {
@@ -429,6 +593,8 @@ pub fn validate_agent_action(
             })?;
         }
 
+        let (seq, prev_hash) = next_chain_position(&db, opts.tenant_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let mut receipt = ActionReceipt {
             tenant_id: opts.tenant_id.to_string(),
             receipt_id: format!("ar_{}", crate::ajwt_support::random_hex_32()),
@@ -441,13 +607,15 @@ pub fn validate_agent_action(
             timestamp: now,
             status: opts.status.to_string(),
             signature: String::new(),
+            seq,
+            prev_hash,
         };
         receipt.signature = sign_receipt(&st.jwt_secret, &receipt);
         if ring_ok {
             db.execute(
                 "INSERT OR REPLACE INTO agent_action_receipts
-                 (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, tenant_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, tenant_id, seq, prev_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     receipt.receipt_id,
                     receipt.action_hash,
@@ -460,6 +628,8 @@ pub fn validate_agent_action(
                     receipt.signature,
                     receipt.timestamp,
                     opts.tenant_id,
+                    receipt.seq,
+                    receipt.prev_hash,
                 ],
             )
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -725,6 +895,8 @@ pub fn validate_anon_action(
 
     // 5. Receipt with NO agent identity. ring_id + config_digest are also
     //    committed by action_hash (which is in the signed payload).
+    let (seq, prev_hash) = next_chain_position(db, &env.tenant_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mut receipt = ActionReceipt {
         tenant_id: env.tenant_id.clone(),
         receipt_id: format!("ar_{}", crate::ajwt_support::random_hex_32()),
@@ -737,12 +909,14 @@ pub fn validate_anon_action(
         timestamp: now,
         status: "verified".to_string(),
         signature: String::new(),
+        seq,
+        prev_hash,
     };
     receipt.signature = sign_receipt(jwt_secret, &receipt);
     db.execute(
         "INSERT OR REPLACE INTO agent_action_receipts
-         (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, ring_id, config_digest, tenant_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+         (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, ring_id, config_digest, tenant_id, seq, prev_hash)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
             receipt.receipt_id,
             receipt.action_hash,
@@ -757,6 +931,8 @@ pub fn validate_anon_action(
             env.ring_id,
             env.config_digest,
             env.tenant_id,
+            receipt.seq,
+            receipt.prev_hash,
         ],
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1035,6 +1211,8 @@ mod tests {
     #[test]
     fn receipt_signature_detects_tampering() {
         let mut r = ActionReceipt {
+            seq: 0,
+            prev_hash: String::new(),
             tenant_id: "default".into(),
             receipt_id: "ar_1".into(),
             action_hash: "hash".into(),
@@ -1294,6 +1472,81 @@ mod tests {
         proof.also_ring_signatures.clear();
         let err = validate_anon_action(&db, b"s", &proof, 1).unwrap_err();
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The property a per-receipt signature cannot give you: a deleted receipt is
+    /// detectable. Each receipt is individually signed and still verifies after
+    /// the delete — only the chain notices the hole.
+    #[test]
+    fn receipt_chain_detects_a_deleted_receipt() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"chain-agent"));
+        setup_ring(&db, &t, &a, &["search"], &[]);
+        for i in 0..3 {
+            let env = anon_env("r", "search", "", &format!("nonce-chain-{i:012}"));
+            let proof = sign_anon(&db, &a, &t, &env);
+            validate_anon_action(&db, b"s", &proof, 1).expect("receipt written");
+        }
+        assert_eq!(
+            verify_receipt_chain(&db, "default").expect("intact chain verifies"),
+            3
+        );
+
+        // Delete the middle receipt. Its neighbours are untouched and their own
+        // signatures still verify.
+        let victim: String = db
+            .query_row(
+                "SELECT receipt_id FROM agent_action_receipts WHERE seq = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.execute(
+            "DELETE FROM agent_action_receipts WHERE receipt_id = ?1",
+            params![victim],
+        )
+        .unwrap();
+        let survivor = load_receipt(&db, &{
+            let id: String = db
+                .query_row(
+                    "SELECT receipt_id FROM agent_action_receipts WHERE seq = 3",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            id
+        })
+        .unwrap()
+        .unwrap();
+        assert!(
+            verify_receipt_signature(b"s", &survivor),
+            "the surviving receipt's own signature is still valid — that is the gap the chain closes"
+        );
+
+        let err = verify_receipt_chain(&db, "default").unwrap_err();
+        assert!(err.contains("expected seq 2"), "got: {err}");
+    }
+
+    /// Editing a receipt in place breaks the link its successor stores.
+    #[test]
+    fn receipt_chain_detects_an_edited_receipt() {
+        let db = anon_mem_db();
+        let (t, a) = (anon_scalar(b"t"), anon_scalar(b"chain-agent-2"));
+        setup_ring(&db, &t, &a, &["search"], &[]);
+        for i in 0..2 {
+            let env = anon_env("r", "search", "", &format!("nonce-edit-{i:013}"));
+            let proof = sign_anon(&db, &a, &t, &env);
+            validate_anon_action(&db, b"s", &proof, 1).expect("receipt written");
+        }
+        assert_eq!(verify_receipt_chain(&db, "default").unwrap(), 2);
+
+        db.execute(
+            "UPDATE agent_action_receipts SET status = 'rewritten' WHERE seq = 1",
+            [],
+        )
+        .unwrap();
+        let err = verify_receipt_chain(&db, "default").unwrap_err();
+        assert!(err.contains("prev_hash does not match"), "got: {err}");
     }
 
     #[test]

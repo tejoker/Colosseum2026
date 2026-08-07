@@ -386,7 +386,13 @@ pub fn init_schema(conn: &Connection) {
             -- identity is replaced by ring_id + the per-ring key image. Both are
             -- also committed by action_hash, so they are tamper-evident.
             ring_id            TEXT,
-            config_digest      TEXT
+            config_digest      TEXT,
+            -- Hash chain over receipts, per tenant. `seq` is dense and
+            -- monotonic; `prev_hash` is the chain hash of seq-1. Deleting or
+            -- reordering a receipt breaks the successor's link, which a plain
+            -- per-receipt signature cannot detect.
+            seq                INTEGER NOT NULL DEFAULT 0,
+            prev_hash          TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_agent_action_receipts_agent ON agent_action_receipts(agent_id, created_at);
 
@@ -884,6 +890,16 @@ pub fn init_schema(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_action_receipts ADD COLUMN config_digest TEXT",
+        [],
+    );
+    // Receipt hash chain. Existing rows keep seq = 0 / prev_hash = '' and stay
+    // verifiable under the v2 signature; new receipts chain from seq 1 upward.
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_receipts ADD COLUMN seq INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_receipts ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''",
         [],
     );
     let _ = conn.execute(
