@@ -51,32 +51,64 @@ def agent_keys() -> dict:
     )
 
 
+def seeded_owner() -> tuple:
+    """Reuse a seeded demo user if its throwaway owner key is available.
+
+    The seed generates one Ed25519 owner key per demo user and writes them into
+    the data volume. Copy them out with:
+
+        docker compose exec -T backend \
+          cat /var/lib/sauronid/demo-owner-keys.json > demo-owner-keys.json
+
+    Without that file this script registers its own user instead — same code
+    path, same guarantees, just a fresh identity.
+    """
+    path = os.environ.get("SAURON_DEMO_OWNER_KEYS", "demo-owner-keys.json")
+    if not os.path.exists(path):
+        return (None, None, None)
+    with open(path) as f:
+        keys = json.load(f)
+    email = os.environ.get("SAURON_DEMO_USER", "alice@sauron.dev")
+    entry = keys.get(email)
+    if not entry:
+        return (None, None, None)
+    raw = base64.urlsafe_b64decode(entry["private_b64u"] + "=" * (-len(entry["private_b64u"]) % 4))
+    return (Ed25519PrivateKey.from_private_bytes(raw), email, f"pass_{email.split('@')[0]}")
+
+
 def main() -> None:
     sfx = secrets.token_hex(4)
     client = SauronIDClient(base_url=CORE_URL, admin_key=ADMIN_KEY)
 
-    # 1. The owner's key is generated locally. The server never sees the private half.
-    owner = Ed25519PrivateKey.generate()
-    owner_pub_b64u = b64u(owner.public_key().public_bytes_raw())
-
-    email, password = f"owner_{sfx}@sauron.dev", f"Pass!{sfx}"
-    client.post_json(
-        "/dev/register_user",
-        {
-            "site_name": SITE,
-            "email": email,
-            "password": password,
-            "first_name": "Olivia",
-            "last_name": "Owner",
-            "date_of_birth": "1990-01-01",
-            "nationality": "FRA",
-            # Binds the owner's PUBLIC key to this user's key image.
-            "auth_public_key_b64u": owner_pub_b64u,
-        },
-    )
-    auth = client.user_auth(email, password)
-    key_image = auth["key_image"]
-    print(f"owner registered, key bound to key_image={key_image[:16]}…")
+    # Demo mode: a seeded user whose throwaway owner key the seed wrote out.
+    # Real mode: register a fresh owner whose key is generated here and never
+    # leaves this process. Identical from the server's point of view — the only
+    # difference is who generated the key and how disposable it is.
+    owner, email, password = seeded_owner()
+    if owner is not None:
+        auth = client.user_auth(email, password)
+        key_image = auth["key_image"]
+        print(f"demo mode: seeded user {email}, owner key from the seed")
+    else:
+        owner = Ed25519PrivateKey.generate()
+        email, password = f"owner_{sfx}@sauron.dev", f"Pass!{sfx}"
+        client.post_json(
+            "/dev/register_user",
+            {
+                "site_name": SITE,
+                "email": email,
+                "password": password,
+                "first_name": "Olivia",
+                "last_name": "Owner",
+                "date_of_birth": "1990-01-01",
+                "nationality": "FRA",
+                # Binds the owner's PUBLIC key to this user's key image.
+                "auth_public_key_b64u": b64u(owner.public_key().public_bytes_raw()),
+            },
+        )
+        auth = client.user_auth(email, password)
+        key_image = auth["key_image"]
+        print(f"fresh owner registered, key bound to key_image={key_image[:16]}…")
 
     # 2. The agent's own keys, and the mandate the owner is willing to sign.
     keys = agent_keys()

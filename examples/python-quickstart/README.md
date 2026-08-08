@@ -20,6 +20,21 @@ payment.
 
   Run it when the question is "why should I trust the party running this?".
 
+  Two modes, same code path:
+
+  - **Demo** — the seed gives each demo user a throwaway owner key. Copy them out
+    and the script runs as `alice@sauron.dev`:
+
+    ```bash
+    docker compose exec -T backend \
+      cat /var/lib/sauronid/demo-owner-keys.json > demo-owner-keys.json
+    python examples/python-quickstart/owner_mandate.py
+    ```
+
+  - **Real** — with no key file present it registers a fresh owner and generates
+    the key in-process, which is what a production owner does. The server cannot
+    tell the difference; only the disposability of the key differs.
+
 ## Prereqs
 
 - `docker compose up` at the repo root (core on `http://localhost:3001`).
