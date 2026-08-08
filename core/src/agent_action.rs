@@ -9,6 +9,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
 
+use crate::any_db::AnyConn;
+use crate::sql_params;
 use crate::sync_recover::RwLockRecover;
 use crate::{policy, ring, state::ServerState, tenancy::TenantId};
 
@@ -351,36 +353,46 @@ fn next_chain_position(db: &Connection, tenant_id: &str) -> Result<(i64, String)
 
 /// Load a receipt by id, including its chain fields.
 pub fn load_receipt(db: &Connection, receipt_id: &str) -> Result<Option<ActionReceipt>, String> {
-    db.query_row(
+    load_receipt_any(&mut AnyConn::Sqlite(db), receipt_id)
+}
+
+/// Backend-agnostic form. First call site converted to [`AnyConn`]: same SQL,
+/// translated on the way out, columns read through [`AnyRow`]'s typed getters
+/// so SQLite's dynamic typing and Postgres's strict typing both work.
+///
+/// The pattern the rest of the sweep follows — `db.query_row(sql, params![..],
+/// |r| ...)` becomes `conn.query_row(sql, sql_params![..], |r| ...)` with
+/// `r.get::<_, T>(i)` becoming the named getter, and the `QueryReturnedNoRows`
+/// dance disappearing because `query_row` already returns `Option`.
+pub fn load_receipt_any(
+    conn: &mut AnyConn<'_>,
+    receipt_id: &str,
+) -> Result<Option<ActionReceipt>, String> {
+    conn.query_row(
         "SELECT tenant_id, receipt_id, action_hash, agent_id, ring_key_image_hex,
                 policy_version, ajwt_jti, pop_jkt, created_at, status, signature,
                 IFNULL(seq, 0), IFNULL(prev_hash, ''), IFNULL(owner_mandate_hash, '')
          FROM agent_action_receipts WHERE receipt_id = ?1",
-        params![receipt_id],
+        sql_params![receipt_id],
         |r| {
             Ok(ActionReceipt {
-                tenant_id: r.get(0)?,
-                receipt_id: r.get(1)?,
-                action_hash: r.get(2)?,
-                agent_id: r.get(3)?,
-                ring_key_image_hex: r.get(4)?,
-                policy_version: r.get(5)?,
-                ajwt_jti: r.get(6)?,
-                pop_jkt: r.get(7)?,
-                timestamp: r.get(8)?,
-                status: r.get(9)?,
-                signature: r.get(10)?,
-                seq: r.get(11)?,
-                prev_hash: r.get(12)?,
-                owner_mandate_hash: r.get(13)?,
+                tenant_id: r.get_string(0)?,
+                receipt_id: r.get_string(1)?,
+                action_hash: r.get_string(2)?,
+                agent_id: r.get_string(3)?,
+                ring_key_image_hex: r.get_string(4)?,
+                policy_version: r.get_string(5)?,
+                ajwt_jti: r.get_string(6)?,
+                pop_jkt: r.get_string(7)?,
+                timestamp: r.get_i64(8)?,
+                status: r.get_string(9)?,
+                signature: r.get_string(10)?,
+                seq: r.get_i64(11)?,
+                prev_hash: r.get_string(12)?,
+                owner_mandate_hash: r.get_string(13)?,
             })
         },
     )
-    .map(Some)
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        other => Err(other.to_string()),
-    })
 }
 
 /// Walk a tenant's receipt chain and return how many chained receipts verified.
@@ -390,23 +402,23 @@ pub fn load_receipt(db: &Connection, receipt_id: &str) -> Result<Option<ActionRe
 /// predecessor (so no edits or reordering). Needs no key — a customer holding a
 /// database copy can run it against a vendor.
 pub fn verify_receipt_chain(db: &Connection, tenant_id: &str) -> Result<i64, String> {
-    let mut stmt = db
-        .prepare(
-            "SELECT receipt_id FROM agent_action_receipts
+    verify_receipt_chain_any(&mut AnyConn::Sqlite(db), tenant_id)
+}
+
+/// Backend-agnostic form of [`verify_receipt_chain`].
+pub fn verify_receipt_chain_any(conn: &mut AnyConn<'_>, tenant_id: &str) -> Result<i64, String> {
+    let ids: Vec<String> = conn.query_map(
+        "SELECT receipt_id FROM agent_action_receipts
              WHERE tenant_id = ?1 AND IFNULL(seq, 0) > 0 ORDER BY seq ASC",
-        )
-        .map_err(|e| format!("prepare verify_receipt_chain: {e}"))?;
-    let ids: Vec<String> = stmt
-        .query_map(params![tenant_id], |r| r.get::<_, String>(0))
-        .map_err(|e| format!("query verify_receipt_chain: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+        sql_params![tenant_id],
+        |r| r.get_string(0),
+    )?;
 
     let mut expected_seq = 1i64;
     let mut expected_prev = String::new();
     let mut checked = 0i64;
     for id in ids {
-        let receipt = load_receipt(db, &id)?
+        let receipt = load_receipt_any(conn, &id)?
             .ok_or_else(|| format!("receipt {id} listed but not loadable"))?;
         if receipt.seq != expected_seq {
             return Err(format!(

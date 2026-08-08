@@ -1,14 +1,92 @@
 use r2d2::{Pool, PooledConnection};
+use r2d2_postgres::PostgresConnectionManager;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 
+use crate::any_db::AnyConn;
+
 pub struct DbHandle {
     pool: Pool<SqliteConnectionManager>,
+    /// Present when SAURON_DB_BACKEND=postgres and DATABASE_URL is set.
+    ///
+    /// Held ALONGSIDE the SQLite pool, not instead of it: 277 call sites still
+    /// take `lock()` and speak rusqlite, so during the migration both are live
+    /// and each converted call site moves to `any()`. When the last one moves,
+    /// the SQLite pool becomes the dev-only default rather than a sidecar.
+    pg_pool: Option<Pool<PostgresConnectionManager<postgres::NoTls>>>,
 }
 
 impl DbHandle {
+    /// Pooled SQLite connection. The un-migrated path.
     pub fn lock(&self) -> Result<PooledConnection<SqliteConnectionManager>, r2d2::Error> {
         self.pool.get()
+    }
+
+    /// True when a Postgres pool is configured and `any()` will use it.
+    pub fn is_postgres(&self) -> bool {
+        self.pg_pool.is_some()
+    }
+
+    /// Run `f` against whichever backend is configured.
+    ///
+    /// A closure rather than a returned `AnyConn` because the Postgres variant
+    /// borrows a pooled client mutably: handing the guard back out would leak
+    /// the pool's lifetime into every call site.
+    pub fn any<T>(
+        &self,
+        f: impl FnOnce(&mut AnyConn<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match &self.pg_pool {
+            Some(pool) => {
+                let mut client = pool.get().map_err(|e| e.to_string())?;
+                f(&mut AnyConn::Postgres(&mut client))
+            }
+            None => {
+                let conn = self.lock().map_err(|e| e.to_string())?;
+                f(&mut AnyConn::Sqlite(&conn))
+            }
+        }
+    }
+}
+
+/// Build the Postgres pool when the deployment asks for it.
+///
+/// Returns None (and logs) rather than failing when the backend is not selected
+/// or the URL is absent, so a SQLite deployment is unaffected.
+fn open_pg_pool(pool_size: u32) -> Option<Pool<PostgresConnectionManager<postgres::NoTls>>> {
+    let backend = std::env::var("SAURON_DB_BACKEND")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(backend.as_str(), "postgres" | "pg" | "postgresql") {
+        return None;
+    }
+    let url = match std::env::var("DATABASE_URL") {
+        Ok(u) if !u.trim().is_empty() => u,
+        _ => {
+            tracing::error!(
+                target: "sauron::db",
+                "SAURON_DB_BACKEND=postgres but DATABASE_URL is unset; staying on SQLite"
+            );
+            return None;
+        }
+    };
+    let config = match url.parse::<postgres::Config>() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(target: "sauron::db", error = %e, "DATABASE_URL is not a valid postgres config; staying on SQLite");
+            return None;
+        }
+    };
+    let manager = PostgresConnectionManager::new(config, postgres::NoTls);
+    match Pool::builder().max_size(pool_size).build(manager) {
+        Ok(pool) => {
+            tracing::info!(target: "sauron::db", pool_size, "postgres pool ready");
+            Some(pool)
+        }
+        Err(e) => {
+            tracing::error!(target: "sauron::db", error = %e, "could not build the postgres pool; staying on SQLite");
+            None
+        }
     }
 }
 
@@ -57,7 +135,8 @@ pub fn open_db_at(path: &str, pool_size: u32) -> DbHandle {
 
     tracing::info!(target: "sauron::db", %path, pool_size, "SQLite opened");
 
-    DbHandle { pool }
+    let pg_pool = open_pg_pool(pool_size);
+    DbHandle { pool, pg_pool }
 }
 
 pub fn init_schema(conn: &Connection) {
