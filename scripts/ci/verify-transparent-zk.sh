@@ -15,6 +15,18 @@ require() {
 require cargo
 require jq
 require sha256sum
+require docker
+
+# The pins in image-ids.json are only reproducible from a containerised guest
+# build. Built locally, the guest ELF embeds this machine's absolute paths and
+# the image ID changes with the working directory, so checking a local build
+# against published pins can only ever fail. See transparent-zk/methods/build.rs.
+export SAURON_ZK_DOCKER_BUILD=1
+
+docker buildx version >/dev/null 2>&1 || {
+  printf 'docker buildx is required: the risc0 guest build uses `docker build --output`\n' >&2
+  exit 1
+}
 
 check_lock() {
   local relative="$1"

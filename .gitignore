@@ -110,7 +110,8 @@ tarpaulin-report.html
 .env*
 
 # Container-built Rust artifacts (root-owned; see the containerized cargo loop).
-target-docker/
+# Also covers ad-hoc CARGO_TARGET_DIR scratch dirs (target-repro, target-localcheck…).
+**/target-*/
 
 # Local dev-only generated secrets (admin key, etc.) — never commit.
 .dev-secrets
