@@ -644,10 +644,14 @@ pub async fn register_agent(
     // turning SAURON_REQUIRE_OWNER_MANDATE on makes an unsigned registration a
     // hard failure, which is the state a deployment wants once its clients are
     // updated.
+    // Production requires the owner's signature; development does not, so the
+    // demo stays a two-command story while a real deployment refuses any agent
+    // whose authority is only the operator's word. Same shape as
+    // SAURON_REQUIRE_CALL_SIG, and overridable in both directions.
     let require_owner_mandate = crate::runtime_mode::require_or_default(
         "SAURON_REQUIRE_OWNER_MANDATE",
         /* dev_default */ false,
-        /* prod_default */ false,
+        /* prod_default */ true,
     );
     let owner_mandate_sig = payload.owner_mandate_sig_b64u.trim().to_string();
     let owner_mandate_hash = if owner_mandate_sig.is_empty() {

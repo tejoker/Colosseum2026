@@ -392,7 +392,9 @@ pub fn init_schema(conn: &Connection) {
             -- reordering a receipt breaks the successor's link, which a plain
             -- per-receipt signature cannot detect.
             seq                INTEGER NOT NULL DEFAULT 0,
-            prev_hash          TEXT NOT NULL DEFAULT ''
+            prev_hash          TEXT NOT NULL DEFAULT '',
+            -- Which owner-signed grant authorised the action.
+            owner_mandate_hash TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_agent_action_receipts_agent ON agent_action_receipts(agent_id, created_at);
 
@@ -922,6 +924,10 @@ pub fn init_schema(conn: &Connection) {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_action_receipts ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_action_receipts ADD COLUMN owner_mandate_hash TEXT NOT NULL DEFAULT ''",
         [],
     );
     let _ = conn.execute(

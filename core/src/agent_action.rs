@@ -61,6 +61,16 @@ pub struct ActionReceipt {
     /// genesis) and on legacy receipts.
     #[serde(default)]
     pub prev_hash: String,
+    /// Hash of the owner-signed mandate that authorised this action, copied from
+    /// the agent record at receipt time.
+    ///
+    /// An agent can be re-registered under a wider mandate later; without this,
+    /// an auditor holding a receipt cannot tell WHICH grant was in force when
+    /// the action happened. Empty when the agent registered before owner
+    /// mandates, or on the anonymous ring path where there is no agent identity
+    /// to resolve one from.
+    #[serde(default)]
+    pub owner_mandate_hash: String,
 }
 
 #[derive(Clone, Debug)]
@@ -219,6 +229,33 @@ pub fn receipt_chain_hash(receipt: &ActionReceipt) -> String {
             ("status", &receipt.status),
         ],
     );
+    // Receipts written before owner mandates existed must keep hashing to the
+    // same value, or every chain in every existing deployment breaks at the
+    // first receipt written after the upgrade. So the mandate is committed under
+    // a distinct domain, only when there is one — exactly how the signature
+    // payload versions between v3 and v4.
+    let payload = if receipt.owner_mandate_hash.is_empty() {
+        payload
+    } else {
+        crate::crypto_protocol::canonical_fields(
+            "sauron.agent-action-receipt-chain.v2",
+            &[
+                ("seq", &seq),
+                ("prev_hash", &receipt.prev_hash),
+                ("tenant_id", &receipt.tenant_id),
+                ("receipt_id", &receipt.receipt_id),
+                ("action_hash", &receipt.action_hash),
+                ("agent_id", &receipt.agent_id),
+                ("ring_key_image_hex", &receipt.ring_key_image_hex),
+                ("policy_version", &receipt.policy_version),
+                ("ajwt_jti", &receipt.ajwt_jti),
+                ("pop_jkt", &receipt.pop_jkt),
+                ("timestamp", &timestamp),
+                ("status", &receipt.status),
+                ("owner_mandate_hash", &receipt.owner_mandate_hash),
+            ],
+        )
+    };
     let mut h = Sha256::new();
     h.update(&payload);
     hex::encode(h.finalize())
@@ -228,6 +265,27 @@ fn receipt_signing_payload(receipt: &ActionReceipt) -> Vec<u8> {
     let timestamp = receipt.timestamp.to_string();
     // Legacy (unchained) receipts keep the v2 payload so previously issued
     // signatures still verify; chained receipts commit seq + prev_hash too.
+    if receipt.seq > 0 && !receipt.owner_mandate_hash.is_empty() {
+        let seq = receipt.seq.to_string();
+        return crate::crypto_protocol::canonical_fields(
+            "sauron.agent-action-receipt.v4",
+            &[
+                ("tenant_id", &receipt.tenant_id),
+                ("receipt_id", &receipt.receipt_id),
+                ("action_hash", &receipt.action_hash),
+                ("agent_id", &receipt.agent_id),
+                ("ring_key_image_hex", &receipt.ring_key_image_hex),
+                ("policy_version", &receipt.policy_version),
+                ("ajwt_jti", &receipt.ajwt_jti),
+                ("pop_jkt", &receipt.pop_jkt),
+                ("timestamp", &timestamp),
+                ("status", &receipt.status),
+                ("seq", &seq),
+                ("prev_hash", &receipt.prev_hash),
+                ("owner_mandate_hash", &receipt.owner_mandate_hash),
+            ],
+        );
+    }
     if receipt.seq > 0 {
         let seq = receipt.seq.to_string();
         return crate::crypto_protocol::canonical_fields(
@@ -296,7 +354,7 @@ pub fn load_receipt(db: &Connection, receipt_id: &str) -> Result<Option<ActionRe
     db.query_row(
         "SELECT tenant_id, receipt_id, action_hash, agent_id, ring_key_image_hex,
                 policy_version, ajwt_jti, pop_jkt, created_at, status, signature,
-                IFNULL(seq, 0), IFNULL(prev_hash, '')
+                IFNULL(seq, 0), IFNULL(prev_hash, ''), IFNULL(owner_mandate_hash, '')
          FROM agent_action_receipts WHERE receipt_id = ?1",
         params![receipt_id],
         |r| {
@@ -314,6 +372,7 @@ pub fn load_receipt(db: &Connection, receipt_id: &str) -> Result<Option<ActionRe
                 signature: r.get(10)?,
                 seq: r.get(11)?,
                 prev_hash: r.get(12)?,
+                owner_mandate_hash: r.get(13)?,
             })
         },
     )
@@ -595,6 +654,17 @@ pub fn validate_agent_action(
 
         let (seq, prev_hash) = next_chain_position(&db, opts.tenant_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        // Which grant authorised this action. Read at receipt time, so a later
+        // re-registration under a different mandate cannot retroactively change
+        // what an existing receipt points at.
+        let owner_mandate_hash: String = db
+            .query_row(
+                "SELECT IFNULL(owner_mandate_hash, '') FROM agents
+                 WHERE agent_id = ?1 AND tenant_id = ?2",
+                params![opts.agent_id, opts.tenant_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
         let mut receipt = ActionReceipt {
             tenant_id: opts.tenant_id.to_string(),
             receipt_id: format!("ar_{}", crate::ajwt_support::random_hex_32()),
@@ -609,13 +679,14 @@ pub fn validate_agent_action(
             signature: String::new(),
             seq,
             prev_hash,
+            owner_mandate_hash,
         };
         receipt.signature = sign_receipt(&st.jwt_secret, &receipt);
         if ring_ok {
             db.execute(
                 "INSERT OR REPLACE INTO agent_action_receipts
-                 (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, tenant_id, seq, prev_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 (receipt_id, action_hash, agent_id, ring_key_image_hex, policy_version, ajwt_jti, pop_jkt, status, signature, created_at, tenant_id, seq, prev_hash, owner_mandate_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     receipt.receipt_id,
                     receipt.action_hash,
@@ -630,6 +701,7 @@ pub fn validate_agent_action(
                     opts.tenant_id,
                     receipt.seq,
                     receipt.prev_hash,
+                    receipt.owner_mandate_hash,
                 ],
             )
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -911,6 +983,10 @@ pub fn validate_anon_action(
         signature: String::new(),
         seq,
         prev_hash,
+        // The anon ring path has no agent identity by construction, so there is
+        // no agent record to read a mandate from. Ring membership IS the grant
+        // here, and policy_version already records which rings authorised it.
+        owner_mandate_hash: String::new(),
     };
     receipt.signature = sign_receipt(jwt_secret, &receipt);
     db.execute(
@@ -1213,6 +1289,7 @@ mod tests {
         let mut r = ActionReceipt {
             seq: 0,
             prev_hash: String::new(),
+            owner_mandate_hash: String::new(),
             tenant_id: "default".into(),
             receipt_id: "ar_1".into(),
             action_hash: "hash".into(),
@@ -1477,6 +1554,52 @@ mod tests {
     /// The property a per-receipt signature cannot give you: a deleted receipt is
     /// detectable. Each receipt is individually signed and still verifies after
     /// the delete — only the chain notices the hole.
+    /// A receipt commits the grant that authorised it, so re-pointing an old
+    /// receipt at a different (wider) mandate invalidates both its signature and
+    /// its place in the chain.
+    #[test]
+    fn receipt_commits_the_mandate_that_authorised_it() {
+        let base = ActionReceipt {
+            tenant_id: "default".into(),
+            receipt_id: "ar_x".into(),
+            action_hash: "ah".into(),
+            agent_id: "agt_1".into(),
+            ring_key_image_hex: "ki".into(),
+            policy_version: "v1".into(),
+            ajwt_jti: "jti".into(),
+            pop_jkt: "jkt".into(),
+            timestamp: 1000,
+            status: "verified".into(),
+            signature: String::new(),
+            seq: 1,
+            prev_hash: String::new(),
+            owner_mandate_hash: "a".repeat(64),
+        };
+        let mut signed = base.clone();
+        signed.signature = sign_receipt(b"k", &signed);
+        assert!(verify_receipt_signature(b"k", &signed));
+
+        // Swap in a different mandate — e.g. a later, broader grant.
+        let mut swapped = signed.clone();
+        swapped.owner_mandate_hash = "b".repeat(64);
+        assert!(
+            !verify_receipt_signature(b"k", &swapped),
+            "a receipt must not verify against a mandate it was not issued under"
+        );
+        assert_ne!(
+            receipt_chain_hash(&signed),
+            receipt_chain_hash(&swapped),
+            "the chain must notice too, so the swap also breaks the successor link"
+        );
+
+        // A receipt with no mandate (legacy, or the anon path) stays on v3 and
+        // keeps verifying — nothing already issued breaks.
+        let mut legacy = base.clone();
+        legacy.owner_mandate_hash = String::new();
+        legacy.signature = sign_receipt(b"k", &legacy);
+        assert!(verify_receipt_signature(b"k", &legacy));
+    }
+
     #[test]
     fn receipt_chain_detects_a_deleted_receipt() {
         let db = anon_mem_db();
