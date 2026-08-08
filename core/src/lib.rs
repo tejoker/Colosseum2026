@@ -15,6 +15,7 @@ pub mod agent_action_anchor;
 pub mod agent_checksum;
 pub mod aggregation;
 pub mod ajwt_support;
+pub mod any_db;
 pub mod attestation;
 pub mod audit;
 /// Back-compat alias: the legacy `attestation_cbor` flat-file module lives at
@@ -49,6 +50,7 @@ pub mod runtime_mode;
 pub mod secret_provider;
 pub mod sites;
 pub mod solana_anchor;
+pub mod sql_translate;
 pub mod state;
 pub mod sync_recover;
 pub mod tenancy;

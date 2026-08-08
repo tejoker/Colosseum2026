@@ -104,6 +104,18 @@ jobs:
               -v ON_ERROR_STOP=1 -f "$m"
           done
 
+      # The port routes call-site SQL through one translator instead of porting
+      # 55 tables by hand. Unit tests pin each rewrite's text; this pins that the
+      # rewritten statement returns the same rows from a real PostgreSQL.
+      - name: SQL translation differential (SQLite vs PostgreSQL)
+        run: python3 core/tests/sql_translation_differential.py
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: sauron_test
+
       - name: Assert schema parity with SQLite
         run: bash scripts/ops/check-schema-parity.sh
         env:
