@@ -20,20 +20,16 @@ payment.
 
   Run it when the question is "why should I trust the party running this?".
 
-  Two modes, same code path:
+  Two modes, one code path, and nothing to set up:
 
-  - **Demo** — the seed gives each demo user a throwaway owner key. Copy them out
-    and the script runs as `alice@sauron.dev`:
-
-    ```bash
-    docker compose exec -T backend \
-      cat /var/lib/sauronid/demo-owner-keys.json > demo-owner-keys.json
-    python examples/python-quickstart/owner_mandate.py
-    ```
-
-  - **Real** — with no key file present it registers a fresh owner and generates
-    the key in-process, which is what a production owner does. The server cannot
-    tell the difference; only the disposability of the key differs.
+  - **Demo** — the seed gives each demo user a throwaway owner key. The script
+    fetches them from the running stack by itself, so it just runs as
+    `alice@sauron.dev`. Point `SAURON_DEMO_USER` at another seeded address to
+    play a different owner.
+  - **Real** — with no stack to read keys from, it registers a fresh owner and
+    generates the key in-process, which is what a production owner does. The
+    server cannot tell the difference; only the disposability of the key
+    differs.
 
 ## Prereqs
 

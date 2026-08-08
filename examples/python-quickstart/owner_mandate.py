@@ -34,6 +34,7 @@ from sauronid_client.agent import sign_owner_mandate
 CORE_URL = os.environ.get("SAURON_CORE_URL", "http://localhost:3001")
 ADMIN_KEY = os.environ.get("SAURON_ADMIN_KEY", "dev-only-admin-key-not-for-production")
 SITE = os.environ.get("E2E_BANK_SITE", "BNP Paribas")
+DEMO_KEYS_IN_CONTAINER = "/var/lib/sauronid/demo-owner-keys.json"
 
 
 def b64u(raw: bytes) -> str:
@@ -55,19 +56,39 @@ def seeded_owner() -> tuple:
     """Reuse a seeded demo user if its throwaway owner key is available.
 
     The seed generates one Ed25519 owner key per demo user and writes them into
-    the data volume. Copy them out with:
+    the data volume. This reads them from a local demo-owner-keys.json if one is
+    there, and otherwise fetches them from the running container directly, so the
+    demo is still a single command.
 
-        docker compose exec -T backend \
-          cat /var/lib/sauronid/demo-owner-keys.json > demo-owner-keys.json
-
-    Without that file this script registers its own user instead — same code
-    path, same guarantees, just a fresh identity.
+    If none of that works — no stack up, no docker — the caller registers its own
+    owner instead: same code path, same guarantees, just a fresh identity.
     """
     path = os.environ.get("SAURON_DEMO_OWNER_KEYS", "demo-owner-keys.json")
-    if not os.path.exists(path):
+    keys = None
+    if os.path.exists(path):
+        with open(path) as f:
+            keys = json.load(f)
+    else:
+        # Nothing to copy by hand: pull them straight out of the running stack.
+        # Best-effort — no compose, no docker, no stack, and this just falls
+        # through to registering a fresh owner instead.
+        for argv in (
+            ["docker", "compose", "exec", "-T", "backend", "cat", DEMO_KEYS_IN_CONTAINER],
+            ["sg", "docker", "-c",
+             f"docker compose exec -T backend cat {DEMO_KEYS_IN_CONTAINER}"],
+        ):
+            try:
+                out = subprocess.run(argv, capture_output=True, text=True, timeout=25)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if out.returncode == 0 and out.stdout.strip():
+                try:
+                    keys = json.loads(out.stdout)
+                    break
+                except json.JSONDecodeError:
+                    continue
+    if not keys:
         return (None, None, None)
-    with open(path) as f:
-        keys = json.load(f)
     email = os.environ.get("SAURON_DEMO_USER", "alice@sauron.dev")
     entry = keys.get(email)
     if not entry:
