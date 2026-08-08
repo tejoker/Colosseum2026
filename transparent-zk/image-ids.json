@@ -4,8 +4,8 @@
   "risc0_guest_rust": "1.97.0",
   "cargo_risczero": "3.0.6",
   "lock_sha256": {
-    "Cargo.lock": "1f9d1c871250f9bff60cec14f8d2c04b37b37a25dfd90367131f02c87dedd306",
-    "verifier/Cargo.lock": "8f63cc6b0a9ce65976f69bb4d5d8e96901fb62c82e6e53d79668f586de598b9c",
+    "Cargo.lock": "644f342a21f99333af171b79e8f023d852b80e53ba109639bfa17a4b78489aea",
+    "verifier/Cargo.lock": "32cb27561f011a6be39775835481b073fde16271a500760645603c3bd18af33c",
     "methods/guest/Cargo.lock": "38b7b406d175e4d54a93f17059e5ba42ed670ff8013b4f0f4c4d5fb335d0b46a",
     "methods/action-policy-guest/Cargo.lock": "0a1c32474796e9bf3c39d9a7f79fcc7f44d81c66da9c5fb239fb2a7cd809b6f4"
   },
