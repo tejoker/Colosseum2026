@@ -30,6 +30,11 @@ sqlx = { version = "0.8.1", default-features = false, features = ["runtime-tokio
 rusqlite = { version = "0.31", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
+# BLOCKING Postgres driver, deliberately not sqlx: the 277 direct call sites are
+# sync code inside async handlers, and moving them to sqlx means rewriting each
+# function and its callers as async. See core/src/any_db.rs.
+postgres = "0.19"
+r2d2_postgres = "0.18"
 rs_merkle = "1.4"
 hmac = "0.12"
 hkdf = "0.12"

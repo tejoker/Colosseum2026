@@ -107,6 +107,15 @@ jobs:
       # The port routes call-site SQL through one translator instead of porting
       # 55 tables by hand. Unit tests pin each rewrite's text; this pins that the
       # rewritten statement returns the same rows from a real PostgreSQL.
+      # Same Rust code, both backends: binds through SqlValue, reads through
+      # AnyRow, asserts identical output. This is what the remaining call-site
+      # sweep leans on, so it runs on every push rather than by hand.
+      - name: AnyConn dual-backend equivalence
+        working-directory: core
+        run: cargo test --locked --test any_db_dual_backend
+        env:
+          SAURON_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/sauron_test
+
       - name: SQL translation differential (SQLite vs PostgreSQL)
         run: python3 core/tests/sql_translation_differential.py
         env:
