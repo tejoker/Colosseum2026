@@ -11,6 +11,8 @@ Your LLM agents call real APIs with real credentials. Prompt injection, hostile 
 
 - **Signed calls.** Every agent request is Ed25519-signed over tenant, method, path, canonical query, body digest, timestamp, one-use nonce, and the agent's registered config digest. A replayed nonce, tampered body, cross-endpoint reuse, or drifted system prompt/tool list is rejected server-side with a machine-readable error.
 - **Server-side policy.** Intent leashes, delegation scope-subset checks, per-agent and per-human rate limits, byte and amount caps, and an egress capability gateway with exact host/method/path constraints, one-use capabilities, and SSRF/redirect refusal — evaluated by an independent gateway, never trusted to the agent process.
+- **Why an auditor cares.** Tamper-protected logging is a live obligation for EU financial entities under DORA RTS (EU) 2024/1774 Art. 12(2)(d), in force since January 2025 — and your regulator's and auditor's access rights over us under DORA Art. 30(3)(e)(i) are exactly what an offline-verifiable receipt satisfies, without either party having to trust our word or our key.
+
 - **Verifiable receipts.** Actions land in a hash-chained audit log; Merkle commitments can be anchored to Bitcoin (OpenTimestamps) and Solana, and transparent RISC Zero STARK statements verify locally against pinned image IDs. The exported OTS material must be paired with its committed preimage and upgraded before independent Bitcoin verification; a receipt export alone is not proof of completeness or truth.
 
 ## Why not just X

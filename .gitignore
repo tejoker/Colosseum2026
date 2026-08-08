@@ -123,6 +123,9 @@ docs/sales/icp-lead-brief.md
 docs/sales/outreach-playbook.md
 docs/sales/lead-list-*.xlsx
 docs/legal/
+# Internal pricing reasoning (it says so on line 3) and internal planning specs.
+docs/sales/pricing-options.md
+docs/superpowers/
 .~lock.*#
 
 # vercel

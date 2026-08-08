@@ -103,6 +103,12 @@ jobs:
         env:
           API_URL: http://localhost:3001
         run: |
+          # Read the key from deploy/.env, written by the generate step in this
+          # same job, rather than relying on $GITHUB_ENV propagation: the script
+          # calls require_admin_key and exits in under a second without it,
+          # which is indistinguishable in the UI from a failed assertion.
+          set -a; . deploy/.env; set +a
+          echo "admin key present: ${SAURON_ADMIN_KEY:+yes}"
           bash core/tests/e2e_agent_payment_authorize.sh
 
       - name: Setup Node for agentic
